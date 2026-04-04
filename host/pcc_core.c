@@ -43,8 +43,8 @@ static char *trace_message_formats[] = {
 	"format 3 - pcc_np dev: thread_idx = %#lx, cnt_recv_packet = %#lx, cnt_sent_packet = %#lx, cnt_user_func_err = %#lx. end %u\n",
 	"format 4 - pcc_np dev: thread_idx = %#lx, rq = %#lx, rq_pi = %#lx, rqcq = %#lx, rqcq_ci = %#lx\n",
 	"format 5 - pcc_np dev: thread_idx = %#lx, sq = %#lx, sq_pi = %#lx, sqcq = %#lx. end %u\n",
+	"format 6 - pcc event: ev_type=%lu flow_tag=%lu port=%lu ts=%lu rate=%lu\n",
 	NULL};
-
 
 /* Default PCC RP threads */
 const uint32_t default_pcc_rp_threads_list[PCC_RP_THREADS_NUM_DEFAULT_VALUE] = {
@@ -174,14 +174,21 @@ doca_error_t pcc_init(struct pcc_config *cfg, struct pcc_resources *resources)
 	doca_error_t result, tmp_result;
 	uint32_t min_num_threads, max_num_threads;
 
+	PRINT_DEBUG("[pcc_core.c:pcc_init] ENTER device=%s role=%s\n",
+		    cfg->device_name, cfg->role == PCC_ROLE_RP ? "RP" : "NP");
+
 	/* Open DOCA device that supports PCC */
+	PRINT_DEBUG("[pcc_core.c:pcc_init] opening device '%s'\n", cfg->device_name);
 	result = open_pcc_device(cfg->device_name, cfg->role, &(resources->doca_device));
 	if (result != DOCA_SUCCESS) {
 		PRINT_ERROR("Error: Failed to open DOCA device that supports PCC\n");
 		return result;
 	}
+	PRINT_DEBUG("[pcc_core.c:pcc_init] device opened successfully\n");
 
 	/* Create DOCA PCC context */
+	PRINT_DEBUG("[pcc_core.c:pcc_init] creating PCC context (role=%s)\n",
+		    cfg->role == PCC_ROLE_RP ? "RP" : "NP");
 	if (cfg->role == PCC_ROLE_RP)
 		result = doca_pcc_create(resources->doca_device, &(resources->doca_pcc));
 	else if (cfg->role == PCC_ROLE_NP)
@@ -190,6 +197,7 @@ doca_error_t pcc_init(struct pcc_config *cfg, struct pcc_resources *resources)
 		PRINT_ERROR("Error: Failed to create DOCA PCC context\n");
 		goto close_doca_dev;
 	}
+	PRINT_DEBUG("[pcc_core.c:pcc_init] PCC context created\n");
 
 	/* Define default threads if not set according to role */
 	if (use_default_threads) {
@@ -224,18 +232,22 @@ doca_error_t pcc_init(struct pcc_config *cfg, struct pcc_resources *resources)
 		goto destroy_pcc;
 	}
 
+	PRINT_DEBUG("[pcc_core.c:pcc_init] setting DPA app binary\n");
 	result = doca_pcc_set_app(resources->doca_pcc, cfg->app);
 	if (result != DOCA_SUCCESS) {
 		PRINT_ERROR("Error: Failed to set DOCA PCC app\n");
 		goto destroy_pcc;
 	}
+	PRINT_DEBUG("[pcc_core.c:pcc_init] DPA app binary set OK\n");
 
 	/* Set DOCA PCC thread affinity */
+	PRINT_DEBUG("[pcc_core.c:pcc_init] setting thread affinity: %u threads\n", cfg->threads_num);
 	result = doca_pcc_set_thread_affinity(resources->doca_pcc, cfg->threads_num, cfg->threads_list);
 	if (result != DOCA_SUCCESS) {
 		PRINT_ERROR("Error: Failed to set thread affinity for DOCA PCC\n");
 		goto destroy_pcc;
 	}
+	PRINT_DEBUG("[pcc_core.c:pcc_init] thread affinity set OK\n");
 
 	/* Set DOCA PCC probe packet format */
 	switch (cfg->probe_packet_format) {
@@ -292,6 +304,7 @@ doca_error_t pcc_init(struct pcc_config *cfg, struct pcc_resources *resources)
 	}
 
 	/* Set DOCA PCC print buffer size */
+	PRINT_DEBUG("[pcc_core.c:pcc_init] setting print buffer size=%lu bytes\n", (unsigned long)PCC_PRINT_BUFFER_SIZE_DEFAULT_VALUE);
 	result = doca_pcc_set_print_buffer_size(resources->doca_pcc, PCC_PRINT_BUFFER_SIZE_DEFAULT_VALUE);
 	if (result != DOCA_SUCCESS) {
 		PRINT_ERROR("Error: Failed to set print buffer size for DOCA PCC\n");
@@ -299,11 +312,15 @@ doca_error_t pcc_init(struct pcc_config *cfg, struct pcc_resources *resources)
 	}
 
 	/* Set DOCA PCC trace message formats */
+	PRINT_DEBUG("[pcc_core.c:pcc_init] registering %d trace format strings\n", 7);
+	for (int i = 0; trace_message_formats[i] != NULL; i++)
+		PRINT_DEBUG("[pcc_core.c:pcc_init]   format[%d]: %.60s...\n", i, trace_message_formats[i]);
 	result = doca_pcc_set_trace_message(resources->doca_pcc, trace_message_formats);
 	if (result != DOCA_SUCCESS) {
 		PRINT_ERROR("Error: Failed to set trace message for DOCA PCC\n");
 		goto destroy_pcc;
 	}
+	PRINT_DEBUG("[pcc_core.c:pcc_init] trace messages registered OK\n");
 
 	/* Set DOCA PCC coredump file pathname */
 	result = doca_pcc_set_dev_coredump_file(resources->doca_pcc, cfg->coredump_file);
@@ -467,6 +484,32 @@ static doca_error_t rp_switch_telemetry_callback(void *param, void *config)
 	}
 	user_set_app = true;
 	PRINT_INFO("Info: Set DOCA PCC RP Switch Telemetry application\n");
+
+	return DOCA_SUCCESS;
+}
+
+/*
+ * ARGP Callback - Handle PCC RP DCQCN parameter
+ *
+ * @param [in]: Input parameter
+ * @config [in/out]: Program configuration context
+ * @return: DOCA_SUCCESS on success and DOCA_ERROR otherwise
+ */
+static doca_error_t rp_dcqcn_callback(void *param, void *config)
+{
+	struct pcc_config *pcc_cfg = (struct pcc_config *)config;
+	bool rp_dcqcn = *((bool *)param);
+
+	if (user_set_app) {
+		PRINT_ERROR("Error: Can not set multiple runtime application.\n");
+		return DOCA_ERROR_INITIALIZATION;
+	}
+
+	if (rp_dcqcn) {
+		pcc_cfg->app = pcc_rp_dcqcn_app;
+	}
+	user_set_app = true;
+	PRINT_INFO("Info: Set DOCA PCC RP DCQCN application\n");
 
 	return DOCA_SUCCESS;
 }
@@ -694,6 +737,7 @@ doca_error_t register_pcc_params(void)
 	struct doca_argp_param *device_param;
 	struct doca_argp_param *np_nic_telemetry_param;
 	struct doca_argp_param *rp_switch_telemetry_param;
+	struct doca_argp_param *rp_dcqcn_param;
 	struct doca_argp_param *np_switch_telemetry_param;
 	struct doca_argp_param *threads_list_param;
 	struct doca_argp_param *wait_time_param;
@@ -758,6 +802,26 @@ doca_error_t register_pcc_params(void)
 	doca_argp_param_set_callback(rp_switch_telemetry_param, rp_switch_telemetry_callback);
 	doca_argp_param_set_type(rp_switch_telemetry_param, DOCA_ARGP_TYPE_BOOLEAN);
 	result = doca_argp_register_param(rp_switch_telemetry_param);
+	if (result != DOCA_SUCCESS) {
+		PRINT_ERROR("Error: Failed to register program param: %s\n", doca_error_get_descr(result));
+		return result;
+	}
+
+	/* Create and register PCC RP DCQCN parameter */
+	result = doca_argp_param_create(&rp_dcqcn_param);
+	if (result != DOCA_SUCCESS) {
+		PRINT_ERROR("Error: Failed to create ARGP param: %s\n", doca_error_get_descr(result));
+		return result;
+	}
+	doca_argp_param_set_short_name(rp_dcqcn_param, "rp-dc");
+	doca_argp_param_set_long_name(rp_dcqcn_param, "rp-dcqcn");
+	doca_argp_param_set_arguments(rp_dcqcn_param, "<PCC Reaction Point DCQCN>");
+	doca_argp_param_set_description(
+		rp_dcqcn_param,
+		"Flag to indicate running as a Reaction Point with DCQCN algorithm (optional). DCQCN is an ECN-based congestion control protocol for RoCEv2 (Zhu et al. SIGCOMM 2015). By default the flag is set to false.");
+	doca_argp_param_set_callback(rp_dcqcn_param, rp_dcqcn_callback);
+	doca_argp_param_set_type(rp_dcqcn_param, DOCA_ARGP_TYPE_BOOLEAN);
+	result = doca_argp_register_param(rp_dcqcn_param);
 	if (result != DOCA_SUCCESS) {
 		PRINT_ERROR("Error: Failed to register program param: %s\n", doca_error_get_descr(result));
 		return result;
