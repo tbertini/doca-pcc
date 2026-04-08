@@ -67,6 +67,13 @@ run_command(app_builds, pcc_app_dev_src_dir, app_device_build_dir, doca_lib_dir,
 	pcc_dev_stubs_keep_dir_path, enable_tx_counter_sampling, enable_np_rx_rate, dpacc_mcpu_flag, check: true)
 pcc_rp_switch_telemetry_app = meson.get_compiler('c').find_library(pcc_app_name, dirs : pcc_dev_stubs_keep_dir_path, static: true)
 
+# Compile DOCA PCC Reaction Point DCQCN DPA program
+pcc_app_name = 'pcc_rp_dcqcn_app'
+pcc_dev_stubs_keep_dir_path = app_device_build_dir + '/' + pcc_app_name
+run_command(app_builds, pcc_app_dev_src_dir, app_device_build_dir, doca_lib_dir, pcc_app_name,
+	pcc_dev_stubs_keep_dir_path, enable_tx_counter_sampling, enable_np_rx_rate, dpacc_mcpu_flag, check: true)
+pcc_rp_dcqcn_app = meson.get_compiler('c').find_library(pcc_app_name, dirs : pcc_dev_stubs_keep_dir_path, static: true)
+
 # Compile DOCA PCC Notification Point NIC Telemetry DPA program
 pcc_app_name = 'pcc_np_nic_telemetry_app'
 pcc_dev_stubs_keep_dir_path = app_device_build_dir + '/' + pcc_app_name
@@ -87,6 +94,6 @@ doca_pcc_test = executable(DOCA_PREFIX + APP_NAME,
 	c_args : base_c_args,
 	include_directories: [app_inc_dirs, './host'],
 	install_dir : app_install_dir,
-	dependencies : [app_dependencies, pcc_rp_rtt_template_app, pcc_rp_switch_telemetry_app, pcc_np_nic_telemetry_app, pcc_np_switch_telemetry_app],
+	dependencies : [app_dependencies, pcc_rp_rtt_template_app, pcc_rp_switch_telemetry_app, pcc_rp_dcqcn_app, pcc_np_nic_telemetry_app, pcc_np_switch_telemetry_app],
 	install: install_apps
 )
