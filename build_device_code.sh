@@ -91,6 +91,7 @@ then
         PCC_APP_DEVICE_ALGO_SRCS=`ls ${PCC_DEV_RP_DCQCN_DIR}/algo/*.c`
         PCC_DEVICE_SRC_FILES="${PCC_APP_DEVICE_SRCS} ${PCC_APP_DEVICE_ALGO_SRCS}"
         APP_INC_LIST="${DOCA_INC_LIST} -I${PCC_DEV_RP_DCQCN_DIR}/algo"
+        DCQCN_DEBUG_FLAG="-DDCQCN_DEBUG"
         if [ ${AMALGAMATION_BUILD_MODE} = "true" ]; then
                 APP_INC_LIST="${APP_INC_LIST} -I${DOCA_PCC_DIR}/device/include/rp -I${DOCA_PCC_DIR}/device/adb_gen/"
         fi
@@ -137,7 +138,7 @@ then
 	DOCA_PCC_NP_RX_RATE="-DDOCA_PCC_NP_RX_RATE"
 fi
 
-APP_FLAGS="${DOCA_PCC_SAMPLE_TX_BYTES}, ${DOCA_PCC_NP_RX_RATE}"
+APP_FLAGS="${DOCA_PCC_SAMPLE_TX_BYTES}, ${DOCA_PCC_NP_RX_RATE}, ${DCQCN_DEBUG_FLAG}"
 
 function generate_prog_from_stubs()
 {
