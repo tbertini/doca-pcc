@@ -43,7 +43,11 @@ static char *trace_message_formats[] = {
 	"format 3 - pcc_np dev: thread_idx = %#lx, cnt_recv_packet = %#lx, cnt_sent_packet = %#lx, cnt_user_func_err = %#lx. end %u\n",
 	"format 4 - pcc_np dev: thread_idx = %#lx, rq = %#lx, rq_pi = %#lx, rqcq = %#lx, rqcq_ci = %#lx\n",
 	"format 5 - pcc_np dev: thread_idx = %#lx, sq = %#lx, sq_pi = %#lx, sqcq = %#lx. end %u\n",
-	"format 6 - pcc event: ev_type=%lu flow_tag=%lu port=%lu ts=%lu rate=%lu\n",
+	"format 6 - pcc event: ev_type=%lu flow_tag=%lu port=%lu algo_slot=%lu rate=%lu\n",
+	"format 7 - dcqcn new_flow: rate=%lu alpha=%lu ts=%lu arg4=%lu arg5=%lu\n",
+	"format 8 - dcqcn cnp: old_rate=%lu new_rate=%lu alpha=%lu dec_factor=%lu ts=%lu\n",
+	"format 9 - dcqcn tx: cur_rate=%lu alpha=%lu t_count=%lu bc_count=%lu bytes_accum=%lu\n",
+	"format 10 - dcqcn rate_inc: old_rate=%lu new_rate=%lu target=%lu phase=%lu t_bc=%lu\n",
 	NULL};
 
 /* Default PCC RP threads */
@@ -312,7 +316,7 @@ doca_error_t pcc_init(struct pcc_config *cfg, struct pcc_resources *resources)
 	}
 
 	/* Set DOCA PCC trace message formats */
-	PRINT_DEBUG("[pcc_core.c:pcc_init] registering %d trace format strings\n", 7);
+	PRINT_DEBUG("[pcc_core.c:pcc_init] registering %d trace format strings\n", 11);
 	for (int i = 0; trace_message_formats[i] != NULL; i++)
 		PRINT_DEBUG("[pcc_core.c:pcc_init]   format[%d]: %.60s...\n", i, trace_message_formats[i]);
 	result = doca_pcc_set_trace_message(resources->doca_pcc, trace_message_formats);
