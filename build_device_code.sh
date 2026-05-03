@@ -86,6 +86,19 @@ then
         if [ ${AMALGAMATION_BUILD_MODE} = "true" ]; then
                 APP_INC_LIST="${APP_INC_LIST} -I${DOCA_PCC_DIR}/device/include/rp -I${DOCA_PCC_DIR}/device/adb_gen/"
         fi
+elif [ ${PCC_APP_NAME} = "pcc_rp_timely_app" ]
+then
+        DOCA_PCC_DEV_LIB_NAME="doca_pcc_dev"
+        PCC_DEV_RP_TIMELY_DIR=${PCC_APP_DEVICE_SRC_DIR}/rp/timely
+        PCC_APP_DEVICE_SRCS=`ls ${PCC_DEV_RP_TIMELY_DIR}/*.c`
+        PCC_APP_DEVICE_ALGO_SRCS=`ls ${PCC_DEV_RP_TIMELY_DIR}/algo/*.c`
+        PCC_DEVICE_SRC_FILES="${PCC_APP_DEVICE_SRCS} ${PCC_APP_DEVICE_ALGO_SRCS}"
+        APP_INC_LIST="${DOCA_INC_LIST} -I${PCC_DEV_RP_TIMELY_DIR}/algo"
+        # Enable debug tracing (comment out the next line to disable for production)
+        TIMELY_DEBUG_FLAG="-DTIMELY_DEBUG"
+        if [ ${AMALGAMATION_BUILD_MODE} = "true" ]; then
+                APP_INC_LIST="${APP_INC_LIST} -I${DOCA_PCC_DIR}/device/include/rp -I${DOCA_PCC_DIR}/device/adb_gen/"
+        fi
 elif [ ${PCC_APP_NAME} = "pcc_np_nic_telemetry_app" ]
 then
         DOCA_PCC_DEV_LIB_NAME="doca_pcc_np_dev"
@@ -129,7 +142,7 @@ then
 	DOCA_PCC_NP_RX_RATE="-DDOCA_PCC_NP_RX_RATE"
 fi
 
-APP_FLAGS="${DOCA_PCC_SAMPLE_TX_BYTES}, ${DOCA_PCC_NP_RX_RATE}"
+APP_FLAGS="${DOCA_PCC_SAMPLE_TX_BYTES}, ${DOCA_PCC_NP_RX_RATE}, ${TIMELY_DEBUG_FLAG}"
 
 function generate_prog_from_stubs()
 {

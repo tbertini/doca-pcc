@@ -1,0 +1,621 @@
+/*
+ * Copyright (c) 2023 NVIDIA CORPORATION AND AFFILIATES.  All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted
+ * provided that the following conditions are met:
+ *     * Redistributions of source code must retain the above copyright notice, this list of
+ *       conditions and the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above copyright notice, this list of
+ *       conditions and the following disclaimer in the documentation and/or other materials
+ *       provided with the distribution.
+ *     * Neither the name of the NVIDIA CORPORATION nor the names of its contributors may be used
+ *       to endorse or promote products derived from this software without specific prior written
+ *       permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+ * FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL NVIDIA CORPORATION BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+ * STRICT LIABILITY, OR TOR (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ */
+
+/*
+ * TIMELY: RTT-based congestion control algorithm
+ *
+ * Implementation of the RP (Reaction Point) algorithm from:
+ * Mittal et al., "TIMELY: RTT-based Congestion Control for the Datacenter", SIGCOMM 2015.
+ *
+ * Reference: Algorithm 1 (§4.3) and parameter table (§6).
+ *
+ * TIMELY is a rate-based, RTT-driven congestion controller. It runs on each
+ * completion event (RTT measurement) and adjusts the per-flow rate based on
+ * the smoothed delay gradient (rate of change of RTT). Unlike DCQCN, it does
+ * NOT use ECN/CNPs — RTT is the only congestion signal.
+ */
+
+#include <doca_pcc_dev.h>
+#include <doca_pcc_dev_event.h>
+#include <doca_pcc_dev_algo_access.h>
+
+#include "utils.h"
+#include "timely_ctxt.h"
+#include "timely_algo_params.h"
+#include "timely.h"
+
+#pragma clang diagnostic ignored "-Wunused-parameter"
+
+/* Define TIMELY_DEBUG at compile time to enable detailed tracing.
+ * WARNING: significant performance overhead on hot path (every RTT event). */
+#ifdef TIMELY_DEBUG
+#define TIMELY_TRACE(fmt_id, a1, a2, a3, a4, a5) \
+	doca_pcc_dev_trace_5(fmt_id, (uint64_t)(a1), (uint64_t)(a2), (uint64_t)(a3), (uint64_t)(a4), (uint64_t)(a5))
+#define TIMELY_TRACE_FLUSH() doca_pcc_dev_trace_flush()
+#else
+#define TIMELY_TRACE(fmt_id, a1, a2, a3, a4, a5) do {} while (0)
+#define TIMELY_TRACE_FLUSH() do {} while (0)
+#endif
+
+/* Debug trace format IDs (only active when TIMELY_DEBUG is defined).
+ * Format IDs 7-10 are reserved for DCQCN (so the two algorithms can share a
+ * single trace_message_formats[] table when both branches are merged). */
+#define TIMELY_TRACE_FMT_NEW_FLOW (11)
+#define TIMELY_TRACE_FMT_RTT      (12)
+#define TIMELY_TRACE_FMT_CLAMP    (13)
+#define TIMELY_TRACE_FMT_HAI      (14)
+
+/* Branch identifiers used in the format-12 trace */
+#define TIMELY_BRANCH_T_LOW   (0)
+#define TIMELY_BRANCH_T_HIGH  (1)
+#define TIMELY_BRANCH_GRAD_LE (2)
+#define TIMELY_BRANCH_GRAD_GT (3)
+
+/* Abort time for stuck RTT requests (mirrors rtt_template) */
+#define TIMELY_ABORT_TIME_NS (300000)
+
+/*
+ * Calculate wrap around in case of int overflow.
+ * Local static copy to avoid duplicate symbol with pcc_common_dev.h under LTO
+ * (the pcc_common_dev.h version is ALWAYS_INLINE which doesn't survive -flto
+ * when included in two translation units).
+ */
+static inline uint32_t timely_diff_with_wrap32(uint32_t greater_num, uint32_t smaller_num)
+{
+	if (greater_num < smaller_num)
+		return UINT32_MAX - smaller_num + greater_num + 1;
+	return greater_num - smaller_num;
+}
+
+/* Configurable parameter indices (8 parameters) */
+typedef enum {
+	TIMELY_PARAM_T_LOW         = 0, /* T_low in nanoseconds */
+	TIMELY_PARAM_T_HIGH        = 1, /* T_high in nanoseconds */
+	TIMELY_PARAM_DELTA         = 2, /* Additive increment δ in FXP20 */
+	TIMELY_PARAM_BETA          = 3, /* Multiplicative decrement β in FXP16 */
+	TIMELY_PARAM_ALPHA         = 4, /* EWMA weight α in FXP16 (FIXME: paper does not specify) */
+	TIMELY_PARAM_MIN_RTT_NS    = 5, /* min RTT in nanoseconds (FIXME: paper does not specify magnitude) */
+	TIMELY_PARAM_HAI_THRESHOLD = 6, /* Consecutive negative-gradient events to trigger HAI */
+	TIMELY_PARAM_MIN_RATE      = 7, /* Minimum rate floor in FXP20 (FIXME: paper does not define) */
+	TIMELY_PARAM_NUM
+} timely_params_t;
+
+/* Counter indices (3 counters) */
+enum {
+	TIMELY_COUNTER_RTT_EVENT = 0, /* Number of RTT events handled */
+	TIMELY_COUNTER_INC_EVENT = 1, /* Number of rate-increase events (T_low or gradient ≤ 0) */
+	TIMELY_COUNTER_DEC_EVENT = 2, /* Number of rate-decrease events (T_high or gradient > 0) */
+	TIMELY_COUNTER_NUM
+} timely_counter_t;
+
+/* Description strings (kept volatile to prevent dead-code elimination by LTO) */
+const volatile char timely_desc[] = "TIMELY v1.0 (Mittal et al. SIGCOMM 2015)";
+static const volatile char timely_param_t_low_desc[] = "T_LOW, RTT low threshold in ns";
+static const volatile char timely_param_t_high_desc[] = "T_HIGH, RTT high threshold in ns";
+static const volatile char timely_param_delta_desc[] = "DELTA, additive increment step (FXP20)";
+static const volatile char timely_param_beta_desc[] = "BETA, multiplicative decrement factor (FXP16)";
+static const volatile char timely_param_alpha_desc[] = "ALPHA, EWMA weight for rtt_diff (FXP16)";
+static const volatile char timely_param_min_rtt_desc[] = "MIN_RTT_NS, wire propagation delay in ns";
+static const volatile char timely_param_hai_threshold_desc[] = "HAI_THRESHOLD, consecutive neg-gradient events for HAI";
+static const volatile char timely_param_min_rate_desc[] = "MIN_RATE, minimum rate floor (FXP20)";
+static const volatile char timely_counter_rtt_desc[] = "COUNTER_RTT_EVENT, number of RTT events handled";
+static const volatile char timely_counter_inc_desc[] = "COUNTER_INC_EVENT, number of rate-increase events";
+static const volatile char timely_counter_dec_desc[] = "COUNTER_DEC_EVENT, number of rate-decrease events";
+
+void timely_init(uint32_t algo_idx)
+{
+	struct doca_pcc_dev_algo_meta_data algo_def = {0};
+
+	/* algo_id 0xBFFD distinguishes TIMELY from DCQCN (0xBFFE) and rtt_template (0xBFFF) */
+	algo_def.algo_id = 0xBFFD;
+	algo_def.algo_major_version = 0x01;
+	algo_def.algo_minor_version = 0x00;
+	algo_def.algo_desc_size = sizeof(timely_desc);
+	algo_def.algo_desc_addr = (uint64_t)timely_desc;
+
+	uint32_t total_param_num = TIMELY_PARAM_NUM;
+	uint32_t total_counter_num = TIMELY_COUNTER_NUM;
+	uint32_t param_num = 0;
+	uint32_t counter_num = 0;
+
+	doca_pcc_dev_algo_init_metadata(algo_idx, &algo_def, total_param_num, total_counter_num);
+
+	doca_pcc_dev_algo_init_param(algo_idx,
+				     param_num++,
+				     TIMELY_T_LOW_NS,
+				     UINT32_MAX,
+				     1,
+				     1,
+				     sizeof(timely_param_t_low_desc),
+				     (uint64_t)timely_param_t_low_desc);
+	doca_pcc_dev_algo_init_param(algo_idx,
+				     param_num++,
+				     TIMELY_T_HIGH_NS,
+				     UINT32_MAX,
+				     1,
+				     1,
+				     sizeof(timely_param_t_high_desc),
+				     (uint64_t)timely_param_t_high_desc);
+	doca_pcc_dev_algo_init_param(algo_idx,
+				     param_num++,
+				     TIMELY_DELTA_FXP20,
+				     TIMELY_RATE_MAX,
+				     1,
+				     1,
+				     sizeof(timely_param_delta_desc),
+				     (uint64_t)timely_param_delta_desc);
+	doca_pcc_dev_algo_init_param(algo_idx,
+				     param_num++,
+				     TIMELY_BETA_FXP16,
+				     TIMELY_FXP16_ONE,
+				     1,
+				     1,
+				     sizeof(timely_param_beta_desc),
+				     (uint64_t)timely_param_beta_desc);
+	doca_pcc_dev_algo_init_param(algo_idx,
+				     param_num++,
+				     TIMELY_ALPHA_FXP16,
+				     TIMELY_FXP16_ONE,
+				     1,
+				     1,
+				     sizeof(timely_param_alpha_desc),
+				     (uint64_t)timely_param_alpha_desc);
+	doca_pcc_dev_algo_init_param(algo_idx,
+				     param_num++,
+				     TIMELY_MIN_RTT_NS,
+				     UINT32_MAX,
+				     1,
+				     1,
+				     sizeof(timely_param_min_rtt_desc),
+				     (uint64_t)timely_param_min_rtt_desc);
+	doca_pcc_dev_algo_init_param(algo_idx,
+				     param_num++,
+				     TIMELY_HAI_THRESHOLD,
+				     UINT16_MAX,
+				     1,
+				     1,
+				     sizeof(timely_param_hai_threshold_desc),
+				     (uint64_t)timely_param_hai_threshold_desc);
+	doca_pcc_dev_algo_init_param(algo_idx,
+				     param_num++,
+				     TIMELY_MIN_RATE_FXP20,
+				     TIMELY_RATE_MAX,
+				     1,
+				     1,
+				     sizeof(timely_param_min_rate_desc),
+				     (uint64_t)timely_param_min_rate_desc);
+
+	doca_pcc_dev_algo_init_counter(algo_idx,
+				       counter_num++,
+				       UINT32_MAX,
+				       2,
+				       sizeof(timely_counter_rtt_desc),
+				       (uint64_t)timely_counter_rtt_desc);
+	doca_pcc_dev_algo_init_counter(algo_idx,
+				       counter_num++,
+				       UINT32_MAX,
+				       2,
+				       sizeof(timely_counter_inc_desc),
+				       (uint64_t)timely_counter_inc_desc);
+	doca_pcc_dev_algo_init_counter(algo_idx,
+				       counter_num++,
+				       UINT32_MAX,
+				       2,
+				       sizeof(timely_counter_dec_desc),
+				       (uint64_t)timely_counter_dec_desc);
+}
+
+/*
+ * Clamp the rate to [min_rate, DOCA_PCC_DEV_MAX_RATE].
+ *
+ * @cur_rate [in]: candidate rate (FXP20)
+ * @min_rate [in]: minimum allowed rate (FXP20)
+ * @return: clamped rate (FXP20)
+ */
+static inline uint32_t timely_clamp_rate(uint32_t cur_rate, uint32_t min_rate)
+{
+#ifdef TIMELY_DEBUG
+	uint32_t old_rate = cur_rate;
+#endif
+	if (cur_rate > DOCA_PCC_DEV_MAX_RATE)
+		cur_rate = DOCA_PCC_DEV_MAX_RATE;
+	if (cur_rate < min_rate)
+		cur_rate = min_rate;
+#ifdef TIMELY_DEBUG
+	if (old_rate != cur_rate)
+		TIMELY_TRACE(TIMELY_TRACE_FMT_CLAMP, old_rate, cur_rate, min_rate, DOCA_PCC_DEV_MAX_RATE, 0);
+#endif
+	return cur_rate;
+}
+
+/*
+ * Compute (T_high / new_rtt) in FXP16 with overflow guard.
+ *
+ * Used in the multiplicative decrease branch:
+ *   rate ← rate · (1 - β · (1 - T_high/new_rtt))
+ *
+ * FIXME: paper §4.3 does not define overflow handling. If new_rtt ≤ T_high
+ * (which shouldn't happen since this branch is only entered when new_rtt > T_high),
+ * the ratio would be ≥ 1 and (1 - T_high/new_rtt) would underflow. We clamp to
+ * FXP16_ONE - 1 (0xFFFF) to keep the rate in a sane range.
+ */
+static inline uint32_t timely_t_high_over_rtt_fxp16(uint32_t t_high, uint32_t new_rtt)
+{
+	if (new_rtt == 0 || new_rtt <= t_high)
+		return TIMELY_FXP16_ONE - 1;
+	uint64_t ratio = ((uint64_t)t_high << 16) / new_rtt;
+	if (ratio >= TIMELY_FXP16_ONE)
+		ratio = TIMELY_FXP16_ONE - 1;
+	return (uint32_t)ratio;
+}
+
+/*
+ * Signed FXP16 multiply: (a_fxp16 * b) >> 16, returning int32_t.
+ *
+ * doca_pcc_dev_fxp_mult is unsigned; the EWMA filter and gradient computations
+ * need signed arithmetic because rtt_diff can be negative (queue draining).
+ *
+ * FIXME: paper Algorithm 1 does not specify how to represent the signed gradient
+ * in fixed-point. We use signed 64-bit intermediate arithmetic and rely on the
+ * implementation-defined behavior that signed right-shift is arithmetic
+ * (sign-extending) on the DPA's Clang compiler. This is true for all practical
+ * targets but is technically not guaranteed by C99.
+ */
+static inline int32_t timely_signed_fxp16_mult(int32_t a_fxp16, int32_t b)
+{
+	return (int32_t)(((int64_t)a_fxp16 * (int64_t)b) >> 16);
+}
+
+/*
+ * Handle new flow initialization.
+ *
+ * Initialize cur_rate to line rate and request the first RTT probe so that
+ * subsequent RTT events drive the algorithm.
+ *
+ * Paper §3 mentions the rate computation engine runs on each completion event;
+ * the initial rate is a deployment choice. We start at line rate per common
+ * datacenter practice (also matches DCQCN paper §3.1).
+ */
+static inline void timely_handle_new_flow(doca_pcc_dev_event_t *event,
+					  uint32_t *param,
+					  cc_ctxt_timely_t *ccctx,
+					  doca_pcc_dev_results_t *results)
+{
+	uint32_t timestamp = doca_pcc_dev_get_timestamp(event);
+	uint32_t new_flow_rate = TIMELY_NEW_FLOW_RATE_FXP20;
+
+	ccctx->cur_rate = new_flow_rate;
+	ccctx->prev_rtt = 0;
+	ccctx->rtt_diff = 0;
+	ccctx->neg_gradient_count = 0;
+	ccctx->start_delay = timestamp;
+	ccctx->rtt_meas_psn = 0;
+	ccctx->abort_cnt = 0;
+	ccctx->rtt_req_to_rtt_sent = 1;
+
+	results->rate = new_flow_rate;
+	results->rtt_req = 1; /* Request first RTT probe */
+
+	TIMELY_TRACE(TIMELY_TRACE_FMT_NEW_FLOW, new_flow_rate, timestamp, 0, 0, 0);
+	TIMELY_TRACE_FLUSH();
+}
+
+/*
+ * Handle TX event.
+ *
+ * TIMELY does not adjust the rate on TX events — the paper rate computation
+ * engine (§3.2) runs only on completion events. However, we maintain the
+ * RTT measurement state machine here (mirroring rtt_template) to detect
+ * stuck/aborted probes; without this, a single dropped RTT response would
+ * stall the algorithm forever.
+ *
+ * FIXME: paper §3 assumes the NIC produces RTT measurements via NIC ACK
+ * timestamps without explicit probing. In DOCA PCC we explicitly request
+ * probes via results->rtt_req. This is a model mapping, not a paper deviation.
+ */
+static inline void timely_handle_tx(doca_pcc_dev_event_t *event,
+				    uint32_t *param,
+				    cc_ctxt_timely_t *ccctx,
+				    doca_pcc_dev_results_t *results)
+{
+	uint8_t rtt_req = 0;
+	uint32_t rtt_meas_psn = ccctx->rtt_meas_psn;
+	uint32_t timestamp = doca_pcc_dev_get_timestamp(event);
+	doca_pcc_dev_event_general_attr_t ev_attr = doca_pcc_dev_get_ev_attr(event);
+
+	if (unlikely((ev_attr.flags & DOCA_PCC_DEV_TX_FLAG_RTT_REQ_SENT) && (rtt_meas_psn == 0))) {
+		ccctx->rtt_meas_psn = 1;
+		ccctx->rtt_req_to_rtt_sent = 0;
+		ccctx->start_delay = timestamp;
+	} else {
+		uint32_t rtt_till_now = timestamp - ccctx->start_delay;
+
+		if (unlikely(ccctx->start_delay > timestamp))
+			rtt_till_now += UINT32_MAX;
+
+		if (rtt_meas_psn == 0) {
+			rtt_till_now = 0;
+			ccctx->rtt_req_to_rtt_sent += 1;
+		}
+		if (unlikely((rtt_till_now > ((uint32_t)TIMELY_ABORT_TIME_NS << ccctx->abort_cnt)) ||
+			     (ccctx->rtt_req_to_rtt_sent > 2))) {
+			rtt_req = 1;
+			if (rtt_till_now > ((uint32_t)TIMELY_ABORT_TIME_NS << ccctx->abort_cnt))
+				ccctx->abort_cnt += 1;
+			ccctx->rtt_req_to_rtt_sent = 1;
+		}
+	}
+
+	results->rate = ccctx->cur_rate;
+	results->rtt_req = rtt_req;
+}
+
+/*
+ * Handle RTT event — THE MAIN HANDLER (paper Algorithm 1, §4.3).
+ *
+ * Computes the new rate based on the smoothed delay gradient and the absolute
+ * RTT thresholds T_low / T_high.
+ */
+static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
+				     uint32_t *param,
+				     uint32_t *counter,
+				     cc_ctxt_timely_t *ccctx,
+				     doca_pcc_dev_results_t *results)
+{
+	uint32_t rtt_meas_psn = ccctx->rtt_meas_psn;
+
+	/* Drop spurious RTT events that are not the one we are waiting for
+	 * (e.g., from a previously aborted probe). Mirrors rtt_template. */
+	if (unlikely((rtt_meas_psn == 0) && (ccctx->rtt_req_to_rtt_sent == 0))) {
+		results->rate = ccctx->cur_rate;
+		results->rtt_req = 0;
+		return;
+	}
+	ccctx->rtt_meas_psn = 0;
+	ccctx->abort_cnt = 0;
+
+	/* --- RTT calculation (paper §3.1: NIC timestamps for RTT) ---
+	 * In DOCA PCC: rtt = response_arrival_ts - request_send_ts.
+	 * Without time sync we cannot subtract the NP processing time
+	 * (resp_send_ts - req_recv_ts), so the measurement includes a small
+	 * but consistent NP-side delay. */
+	uint32_t start_rtt = doca_pcc_dev_get_rtt_req_send_timestamp(event);
+	uint32_t end_rtt = doca_pcc_dev_get_timestamp(event);
+	uint32_t new_rtt = timely_diff_with_wrap32(end_rtt, start_rtt);
+
+	/* Load parameters */
+	uint32_t t_low = param[TIMELY_PARAM_T_LOW];
+	uint32_t t_high = param[TIMELY_PARAM_T_HIGH];
+	uint32_t delta = param[TIMELY_PARAM_DELTA];
+	uint32_t beta = param[TIMELY_PARAM_BETA];
+	uint32_t alpha = param[TIMELY_PARAM_ALPHA];
+	uint32_t min_rtt_ns = param[TIMELY_PARAM_MIN_RTT_NS];
+	uint32_t hai_threshold = param[TIMELY_PARAM_HAI_THRESHOLD];
+	uint32_t min_rate = param[TIMELY_PARAM_MIN_RATE];
+
+	uint32_t cur_rate = ccctx->cur_rate;
+	int32_t prev_rtt_diff = ccctx->rtt_diff;
+
+	/* === Algorithm 1, lines 1-2: new_rtt_diff and prev_rtt update === */
+	int32_t new_rtt_diff = (int32_t)new_rtt - (int32_t)ccctx->prev_rtt;
+	ccctx->prev_rtt = new_rtt;
+
+	/* === Algorithm 1, line 3: rtt_diff EWMA ===
+	 *   rtt_diff = (1 - α) · rtt_diff + α · new_rtt_diff
+	 *
+	 * Both terms use signed 64-bit intermediate to handle negative new_rtt_diff
+	 * correctly (queue draining → rtt_diff becomes negative). */
+	int32_t one_minus_alpha = (int32_t)(TIMELY_FXP16_ONE - alpha);
+	int32_t term_old = timely_signed_fxp16_mult(one_minus_alpha, prev_rtt_diff);
+	int32_t term_new = timely_signed_fxp16_mult((int32_t)alpha, new_rtt_diff);
+	int32_t rtt_diff = term_old + term_new;
+	ccctx->rtt_diff = rtt_diff;
+
+	/* === Algorithm 1, line 4: normalized_gradient = rtt_diff / minRTT === */
+	int32_t normalized_gradient = 0;
+	if (likely(min_rtt_ns != 0))
+		normalized_gradient = rtt_diff / (int32_t)min_rtt_ns;
+
+	uint32_t branch_taken = 0;
+
+	/* === Algorithm 1, lines 5-7: T_low branch (additive increase) ===
+	 * Paper §4.3 "Need for RTT low threshold": filter RTT spikes due to bursts.
+	 * Uses INSTANTANEOUS new_rtt, not smoothed. */
+	if (new_rtt < t_low) {
+		cur_rate += delta;
+		ccctx->neg_gradient_count = 0;
+		branch_taken = TIMELY_BRANCH_T_LOW;
+		if (counter != NULL)
+			counter[TIMELY_COUNTER_INC_EVENT]++;
+		goto done;
+	}
+
+	/* === Algorithm 1, lines 8-10: T_high branch (multiplicative decrease) ===
+	 * Paper §4.3: rate ← rate · (1 - β · (1 - T_high/new_rtt)).
+	 * "Note that we use the instantaneous rather than smoothed RTT" —
+	 * we follow paper semantics and decide on new_rtt, not the smoothed value. */
+	if (new_rtt > t_high) {
+		uint32_t ratio_fxp16 = timely_t_high_over_rtt_fxp16(t_high, new_rtt);
+		uint32_t one_minus_ratio = TIMELY_FXP16_ONE - ratio_fxp16;
+		uint32_t beta_term = doca_pcc_dev_fxp_mult(beta, one_minus_ratio);
+		/* β · (1 - T_high/new_rtt) ≤ β < 1, so factor ≥ 1 - β > 0 */
+		uint32_t factor_fxp16 = TIMELY_FXP16_ONE - beta_term;
+		cur_rate = doca_pcc_dev_fxp_mult(factor_fxp16, cur_rate);
+		ccctx->neg_gradient_count = 0;
+		branch_taken = TIMELY_BRANCH_T_HIGH;
+		if (counter != NULL)
+			counter[TIMELY_COUNTER_DEC_EVENT]++;
+		goto done;
+	}
+
+	/* === Algorithm 1, lines 11-14: gradient ≤ 0 (queue draining or stable) === */
+	if (normalized_gradient <= 0) {
+		uint16_t neg_count = ccctx->neg_gradient_count;
+		if (neg_count < (uint16_t)hai_threshold)
+			neg_count++;
+		ccctx->neg_gradient_count = neg_count;
+
+		uint32_t n_factor = (neg_count >= (uint16_t)hai_threshold) ? TIMELY_HAI_FACTOR : 1;
+		cur_rate += n_factor * delta;
+		branch_taken = TIMELY_BRANCH_GRAD_LE;
+		if (counter != NULL)
+			counter[TIMELY_COUNTER_INC_EVENT]++;
+
+#ifdef TIMELY_DEBUG
+		if (n_factor != 1)
+			TIMELY_TRACE(TIMELY_TRACE_FMT_HAI, neg_count, n_factor, cur_rate, delta, 0);
+#endif
+		goto done;
+	}
+
+	/* === Algorithm 1, lines 15-16: gradient > 0 (multiplicative decrease) ===
+	 * rate ← rate · (1 - β · normalized_gradient).
+	 *
+	 * rtt_diff and min_rtt_ns are both in nanoseconds; the true FXP16
+	 * representation of the dimensionless ratio is (rtt_diff << 16) / min_rtt_ns.
+	 * We saturate the ratio at FXP16_ONE - 1 so that (1 - β · ratio) stays
+	 * positive even on very large gradients.
+	 *
+	 * FIXME: paper does not define how to bound this multiplier; saturation
+	 * at FXP16_ONE is our choice to prevent rate underflow. */
+	{
+		int64_t grad_fxp16_signed = ((int64_t)rtt_diff << 16) / (int32_t)min_rtt_ns;
+		uint32_t grad_fxp16 = (grad_fxp16_signed >= TIMELY_FXP16_ONE)
+					      ? (uint32_t)(TIMELY_FXP16_ONE - 1)
+					      : (uint32_t)grad_fxp16_signed;
+
+		uint32_t beta_term = doca_pcc_dev_fxp_mult(beta, grad_fxp16);
+		if (beta_term >= TIMELY_FXP16_ONE)
+			beta_term = TIMELY_FXP16_ONE - 1;
+		uint32_t factor_fxp16 = TIMELY_FXP16_ONE - beta_term;
+		cur_rate = doca_pcc_dev_fxp_mult(factor_fxp16, cur_rate);
+		ccctx->neg_gradient_count = 0;
+		branch_taken = TIMELY_BRANCH_GRAD_GT;
+		if (counter != NULL)
+			counter[TIMELY_COUNTER_DEC_EVENT]++;
+	}
+
+done:
+	/* FIXME: paper §5 mentions scaling the rate update by "the number of completions
+	 * per minimum RTT interval so that we do not overweigh the new information",
+	 * but does not give the exact formula. We implement the naive per-event update
+	 * — every completion event triggers a full Algorithm 1 step. With small segments
+	 * this can over-react; with the default 16 KB segment at 100 Gbps this matches
+	 * roughly one completion per minRTT, which is what the paper assumes. */
+
+	cur_rate = timely_clamp_rate(cur_rate, min_rate);
+	ccctx->cur_rate = cur_rate;
+	results->rate = cur_rate;
+	results->rtt_req = 1; /* Request next RTT probe */
+	ccctx->rtt_req_to_rtt_sent = 1;
+
+	TIMELY_TRACE(TIMELY_TRACE_FMT_RTT, new_rtt, (uint32_t)rtt_diff, (uint32_t)normalized_gradient,
+		     branch_taken, cur_rate);
+	TIMELY_TRACE_FLUSH();
+
+	(void)branch_taken; /* silence unused warning when TIMELY_DEBUG is off */
+}
+
+/*
+ * Handle NACK event.
+ *
+ * FIXME: paper does not define NACK handling for TIMELY (paper §5: "we use
+ * OS-bypass messaging over a fabric with PFC", i.e., a PFC-protected fabric
+ * where packet loss should be rare). Apply a conservative 50% rate cut and
+ * reset the negative-gradient counter to drop out of any pending HAI mode.
+ */
+static inline void timely_handle_nack(doca_pcc_dev_event_t *event,
+				      uint32_t *param,
+				      cc_ctxt_timely_t *ccctx,
+				      doca_pcc_dev_results_t *results)
+{
+	uint32_t cur_rate = ccctx->cur_rate >> 1;
+
+	cur_rate = timely_clamp_rate(cur_rate, param[TIMELY_PARAM_MIN_RATE]);
+	ccctx->cur_rate = cur_rate;
+	ccctx->neg_gradient_count = 0;
+	results->rate = cur_rate;
+	results->rtt_req = 0;
+}
+
+/*
+ * Handle CNP event.
+ *
+ * FIXME: paper §1 explicitly states TIMELY does NOT use ECN/CNP. If a CNP
+ * arrives anyway (e.g., the fabric still generates CNPs for legacy reasons),
+ * we ignore it and pass through the current rate. The rate will adjust on
+ * the next RTT event based on the actual delay.
+ */
+static inline void timely_handle_cnp(doca_pcc_dev_event_t *event,
+				     uint32_t *param,
+				     cc_ctxt_timely_t *ccctx,
+				     doca_pcc_dev_results_t *results)
+{
+	results->rate = ccctx->cur_rate;
+	results->rtt_req = 0;
+}
+
+void timely_algo(doca_pcc_dev_event_t *event,
+		 uint32_t *param,
+		 uint32_t *counter,
+		 doca_pcc_dev_algo_ctxt_t *algo_ctxt,
+		 doca_pcc_dev_results_t *results)
+{
+	cc_ctxt_timely_t *timely_ctx = (cc_ctxt_timely_t *)algo_ctxt;
+	doca_pcc_dev_event_general_attr_t ev_attr = doca_pcc_dev_get_ev_attr(event);
+	uint32_t ev_type = ev_attr.ev_type;
+	uint32_t cur_rate = timely_ctx->cur_rate;
+
+	if (unlikely(cur_rate == 0)) {
+		timely_handle_new_flow(event, param, timely_ctx, results);
+	} else if (ev_type == DOCA_PCC_DEV_EVNT_RTT) {
+		timely_handle_rtt(event, param, counter, timely_ctx, results);
+		if (counter != NULL)
+			counter[TIMELY_COUNTER_RTT_EVENT]++;
+	} else if (ev_type == DOCA_PCC_DEV_EVNT_ROCE_TX) {
+		timely_handle_tx(event, param, timely_ctx, results);
+	} else if (ev_type == DOCA_PCC_DEV_EVNT_ROCE_NACK) {
+		timely_handle_nack(event, param, timely_ctx, results);
+	} else if (ev_type == DOCA_PCC_DEV_EVNT_ROCE_CNP) {
+		timely_handle_cnp(event, param, timely_ctx, results);
+	} else {
+		results->rate = cur_rate;
+		results->rtt_req = 0;
+	}
+}
+
+doca_pcc_dev_error_t timely_set_algo_params(uint32_t param_id_base,
+					    uint32_t param_num,
+					    const uint32_t *new_param_values,
+					    uint32_t *params)
+{
+	if ((param_num > TIMELY_PARAM_NUM) || (param_id_base >= TIMELY_PARAM_NUM))
+		return DOCA_PCC_DEV_STATUS_FAIL;
+
+	if ((new_param_values == NULL) || (params == NULL))
+		return DOCA_PCC_DEV_STATUS_FAIL;
+
+	return DOCA_PCC_DEV_STATUS_OK;
+}

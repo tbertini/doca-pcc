@@ -43,6 +43,16 @@ static char *trace_message_formats[] = {
 	"format 3 - pcc_np dev: thread_idx = %#lx, cnt_recv_packet = %#lx, cnt_sent_packet = %#lx, cnt_user_func_err = %#lx. end %u\n",
 	"format 4 - pcc_np dev: thread_idx = %#lx, rq = %#lx, rq_pi = %#lx, rqcq = %#lx, rqcq_ci = %#lx\n",
 	"format 5 - pcc_np dev: thread_idx = %#lx, sq = %#lx, sq_pi = %#lx, sqcq = %#lx. end %u\n",
+	"format 6 - pcc event: ev_type=%lu flow_tag=%lu port=%lu algo_slot=%lu rate=%lu\n",
+	/* Format IDs 7-10 reserved for DCQCN traces (when DCQCN branch is merged in). */
+	"format 7 - reserved for DCQCN\n",
+	"format 8 - reserved for DCQCN\n",
+	"format 9 - reserved for DCQCN\n",
+	"format 10 - reserved for DCQCN\n",
+	"format 11 - timely new_flow: rate=%lu ts=%lu arg3=%lu arg4=%lu arg5=%lu\n",
+	"format 12 - timely rtt: new_rtt=%lu rtt_diff=%lu norm_grad=%lu branch=%lu new_rate=%lu\n",
+	"format 13 - timely clamp: old_rate=%lu new_rate=%lu min=%lu max=%lu arg5=%lu\n",
+	"format 14 - timely hai: neg_count=%lu N=%lu new_rate=%lu delta=%lu arg5=%lu\n",
 	NULL};
 
 
@@ -472,6 +482,32 @@ static doca_error_t rp_switch_telemetry_callback(void *param, void *config)
 }
 
 /*
+ * ARGP Callback - Handle PCC RP TIMELY parameter
+ *
+ * @param [in]: Input parameter
+ * @config [in/out]: Program configuration context
+ * @return: DOCA_SUCCESS on success and DOCA_ERROR otherwise
+ */
+static doca_error_t rp_timely_callback(void *param, void *config)
+{
+	struct pcc_config *pcc_cfg = (struct pcc_config *)config;
+	bool rp_timely = *((bool *)param);
+
+	if (user_set_app) {
+		PRINT_ERROR("Error: Can not set multiple runtime application.\n");
+		return DOCA_ERROR_INITIALIZATION;
+	}
+
+	if (rp_timely) {
+		pcc_cfg->app = pcc_rp_timely_app;
+	}
+	user_set_app = true;
+	PRINT_INFO("Info: Set DOCA PCC RP TIMELY application\n");
+
+	return DOCA_SUCCESS;
+}
+
+/*
  * ARGP Callback - Handle PCC NP Switch Telemetry parameter
  *
  * @param [in]: Input parameter
@@ -694,6 +730,7 @@ doca_error_t register_pcc_params(void)
 	struct doca_argp_param *device_param;
 	struct doca_argp_param *np_nic_telemetry_param;
 	struct doca_argp_param *rp_switch_telemetry_param;
+	struct doca_argp_param *rp_timely_param;
 	struct doca_argp_param *np_switch_telemetry_param;
 	struct doca_argp_param *threads_list_param;
 	struct doca_argp_param *wait_time_param;
@@ -758,6 +795,26 @@ doca_error_t register_pcc_params(void)
 	doca_argp_param_set_callback(rp_switch_telemetry_param, rp_switch_telemetry_callback);
 	doca_argp_param_set_type(rp_switch_telemetry_param, DOCA_ARGP_TYPE_BOOLEAN);
 	result = doca_argp_register_param(rp_switch_telemetry_param);
+	if (result != DOCA_SUCCESS) {
+		PRINT_ERROR("Error: Failed to register program param: %s\n", doca_error_get_descr(result));
+		return result;
+	}
+
+	/* Create and register PCC RP TIMELY parameter */
+	result = doca_argp_param_create(&rp_timely_param);
+	if (result != DOCA_SUCCESS) {
+		PRINT_ERROR("Error: Failed to create ARGP param: %s\n", doca_error_get_descr(result));
+		return result;
+	}
+	doca_argp_param_set_short_name(rp_timely_param, "rp-tm");
+	doca_argp_param_set_long_name(rp_timely_param, "rp-timely");
+	doca_argp_param_set_arguments(rp_timely_param, "<PCC Reaction Point TIMELY>");
+	doca_argp_param_set_description(
+		rp_timely_param,
+		"Flag to indicate running as a Reaction Point with TIMELY algorithm (optional). TIMELY is an RTT-based delay-gradient congestion control protocol (Mittal et al. SIGCOMM 2015). By default the flag is set to false.");
+	doca_argp_param_set_callback(rp_timely_param, rp_timely_callback);
+	doca_argp_param_set_type(rp_timely_param, DOCA_ARGP_TYPE_BOOLEAN);
+	result = doca_argp_register_param(rp_timely_param);
 	if (result != DOCA_SUCCESS) {
 		PRINT_ERROR("Error: Failed to register program param: %s\n", doca_error_get_descr(result));
 		return result;
