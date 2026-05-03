@@ -50,8 +50,9 @@ static char *trace_message_formats[] = {
 	"format 9 - reserved for DCQCN\n",
 	"format 10 - reserved for DCQCN\n",
 	"format 11 - timely new_flow: rate=%lu ts=%lu arg3=%lu arg4=%lu arg5=%lu\n",
-	"format 12 - timely rtt: new_rtt=%lu rtt_diff=%lu norm_grad=%lu branch=%lu new_rate=%lu\n",
-	"format 13 - timely clamp: old_rate=%lu new_rate=%lu min=%lu max=%lu arg5=%lu\n",
+	/* branch low nibble = T_LOW(0)/T_HIGH(1)/GRAD_LE(2)/GRAD_GT(3); bit 0x80 = clamped */
+	"format 12 - timely rtt: new_rtt=%lu rtt_diff=%ld norm_grad=%ld branch=0x%lx new_rate=%lu\n",
+	"format 13 - retired (clamp folded into format 12 branch bit 0x80)\n",
 	"format 14 - timely hai: neg_count=%lu N=%lu new_rate=%lu delta=%lu arg5=%lu\n",
 	NULL};
 

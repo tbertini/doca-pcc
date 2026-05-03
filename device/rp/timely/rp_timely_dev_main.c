@@ -36,6 +36,7 @@ void doca_pcc_dev_user_algo(doca_pcc_dev_algo_ctxt_t *algo_ctxt,
 
 	timely_algo(event, param, counter, algo_ctxt, results);
 
+#ifdef TIMELY_DEBUG
 	doca_pcc_dev_trace_5(PCC_TRACE_FMT_EVENT,
 			     (uint64_t)doca_pcc_dev_get_ev_attr(event).ev_type,
 			     (uint64_t)doca_pcc_dev_get_flowtag(event),
@@ -44,6 +45,7 @@ void doca_pcc_dev_user_algo(doca_pcc_dev_algo_ctxt_t *algo_ctxt,
 			     (uint64_t)results->rate);
 
 	doca_pcc_dev_trace_flush();
+#endif
 }
 
 /*
@@ -80,9 +82,11 @@ void doca_pcc_dev_user_init(uint32_t *disable_event_bitmask)
 
 	/* Do not mask any event types; TIMELY needs RTT events to fire. */
 	*disable_event_bitmask = 0;
+#ifdef TIMELY_DEBUG
 	doca_pcc_dev_printf("[TIMELY] %s: init complete, disable_event_bitmask=0x%x\n",
 			    __func__, *disable_event_bitmask);
 	doca_pcc_dev_trace_flush();
+#endif
 }
 
 /*

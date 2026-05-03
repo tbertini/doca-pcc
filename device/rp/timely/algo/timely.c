@@ -64,14 +64,17 @@
  * single trace_message_formats[] table when both branches are merged). */
 #define TIMELY_TRACE_FMT_NEW_FLOW (11)
 #define TIMELY_TRACE_FMT_RTT      (12)
-#define TIMELY_TRACE_FMT_CLAMP    (13)
+/* Format ID 13 retired — clamp info now folded into format 12's branch_taken */
 #define TIMELY_TRACE_FMT_HAI      (14)
 
-/* Branch identifiers used in the format-12 trace */
-#define TIMELY_BRANCH_T_LOW   (0)
-#define TIMELY_BRANCH_T_HIGH  (1)
-#define TIMELY_BRANCH_GRAD_LE (2)
-#define TIMELY_BRANCH_GRAD_GT (3)
+/* Branch identifiers used in the format-12 trace.
+ * Low 4 bits = which Algorithm-1 branch was taken.
+ * Bit 7 (0x80) = rate was clamped (to either MIN_RATE or DOCA_PCC_DEV_MAX_RATE). */
+#define TIMELY_BRANCH_T_LOW       (0)
+#define TIMELY_BRANCH_T_HIGH      (1)
+#define TIMELY_BRANCH_GRAD_LE     (2)
+#define TIMELY_BRANCH_GRAD_GT     (3)
+#define TIMELY_BRANCH_CLAMPED_BIT (0x80)
 
 /* Abort time for stuck RTT requests (mirrors rtt_template) */
 #define TIMELY_ABORT_TIME_NS (300000)
@@ -228,25 +231,29 @@ void timely_init(uint32_t algo_idx)
 }
 
 /*
- * Clamp the rate to [min_rate, DOCA_PCC_DEV_MAX_RATE].
+ * Clamp the rate to [min_rate, DOCA_PCC_DEV_MAX_RATE]. Sets *clamp_flag if
+ * either bound was hit (used to annotate the format-12 RTT trace; we do not
+ * emit a separate format-13 line because at min-rate floor it would fire on
+ * every event).
  *
  * @cur_rate [in]: candidate rate (FXP20)
  * @min_rate [in]: minimum allowed rate (FXP20)
+ * @clamp_flag [out]: set to 1 if rate was clamped, 0 otherwise (may be NULL)
  * @return: clamped rate (FXP20)
  */
-static inline uint32_t timely_clamp_rate(uint32_t cur_rate, uint32_t min_rate)
+static inline uint32_t timely_clamp_rate(uint32_t cur_rate, uint32_t min_rate, uint32_t *clamp_flag)
 {
-#ifdef TIMELY_DEBUG
-	uint32_t old_rate = cur_rate;
-#endif
-	if (cur_rate > DOCA_PCC_DEV_MAX_RATE)
+	uint32_t flag = 0;
+	if (cur_rate > DOCA_PCC_DEV_MAX_RATE) {
 		cur_rate = DOCA_PCC_DEV_MAX_RATE;
-	if (cur_rate < min_rate)
+		flag = 1;
+	}
+	if (cur_rate < min_rate) {
 		cur_rate = min_rate;
-#ifdef TIMELY_DEBUG
-	if (old_rate != cur_rate)
-		TIMELY_TRACE(TIMELY_TRACE_FMT_CLAMP, old_rate, cur_rate, min_rate, DOCA_PCC_DEV_MAX_RATE, 0);
-#endif
+		flag = 1;
+	}
+	if (clamp_flag != NULL)
+		*clamp_flag = flag;
 	return cur_rate;
 }
 
@@ -525,7 +532,10 @@ done:
 	 * this can over-react; with the default 16 KB segment at 100 Gbps this matches
 	 * roughly one completion per minRTT, which is what the paper assumes. */
 
-	cur_rate = timely_clamp_rate(cur_rate, min_rate);
+	uint32_t clamp_flag = 0;
+	cur_rate = timely_clamp_rate(cur_rate, min_rate, &clamp_flag);
+	if (clamp_flag)
+		branch_taken |= TIMELY_BRANCH_CLAMPED_BIT;
 	ccctx->cur_rate = cur_rate;
 	results->rate = cur_rate;
 	results->rtt_req = 1; /* Request next RTT probe */
@@ -553,7 +563,7 @@ static inline void timely_handle_nack(doca_pcc_dev_event_t *event,
 {
 	uint32_t cur_rate = ccctx->cur_rate >> 1;
 
-	cur_rate = timely_clamp_rate(cur_rate, param[TIMELY_PARAM_MIN_RATE]);
+	cur_rate = timely_clamp_rate(cur_rate, param[TIMELY_PARAM_MIN_RATE], NULL);
 	ccctx->cur_rate = cur_rate;
 	ccctx->neg_gradient_count = 0;
 	results->rate = cur_rate;

@@ -94,8 +94,10 @@ then
         PCC_APP_DEVICE_ALGO_SRCS=`ls ${PCC_DEV_RP_TIMELY_DIR}/algo/*.c`
         PCC_DEVICE_SRC_FILES="${PCC_APP_DEVICE_SRCS} ${PCC_APP_DEVICE_ALGO_SRCS}"
         APP_INC_LIST="${DOCA_INC_LIST} -I${PCC_DEV_RP_TIMELY_DIR}/algo"
-        # Enable debug tracing (comment out the next line to disable for production)
-        TIMELY_DEBUG_FLAG="-DTIMELY_DEBUG"
+        # Debug tracing: default-on. Build with TIMELY_DEBUG=0 to silence format 6/11/12/14.
+        if [ "${TIMELY_DEBUG:-1}" = "1" ]; then
+                TIMELY_DEBUG_FLAG="-DTIMELY_DEBUG"
+        fi
         if [ ${AMALGAMATION_BUILD_MODE} = "true" ]; then
                 APP_INC_LIST="${APP_INC_LIST} -I${DOCA_PCC_DIR}/device/include/rp -I${DOCA_PCC_DIR}/device/adb_gen/"
         fi
