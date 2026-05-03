@@ -84,7 +84,7 @@ int main(int argc, char **argv)
 	/* Set the default configuration values (Example values) */
 	cfg.wait_time = -1;
 	cfg.role = PCC_ROLE_RP;
-	cfg.app = pcc_rp_rtt_template_app;
+	cfg.app = pcc_rp_dcqcn_app;
 	memcpy(cfg.threads_list, default_pcc_rp_threads_list, sizeof(default_pcc_rp_threads_list));
 	cfg.threads_num = PCC_RP_THREADS_NUM_DEFAULT_VALUE;
 	cfg.probe_packet_format = PCC_DEV_PROBE_PACKET_CCMAD;
