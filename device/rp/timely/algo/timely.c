@@ -524,7 +524,7 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 			counter[TIMELY_COUNTER_DEC_EVENT]++;
 	}
 
-done:
+done:; /* C requires a statement after a label; declarations are not statements pre-C23 */
 	/* FIXME: paper §5 mentions scaling the rate update by "the number of completions
 	 * per minimum RTT interval so that we do not overweigh the new information",
 	 * but does not give the exact formula. We implement the naive per-event update

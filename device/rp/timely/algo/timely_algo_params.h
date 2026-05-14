@@ -37,25 +37,43 @@
  * Time values are in nanoseconds.
  */
 
-/* T_low = 50 microseconds (paper §6: "T_low of 50 us") */
-#define TIMELY_T_LOW_NS (50000)
-
-/* T_high = 500 microseconds (paper §6: "T_high of 500 us") */
-#define TIMELY_T_HIGH_NS (500000)
+/*
+ * T_LOW / T_HIGH retuned for our 100 Gbps fabric (BlueField-3 RoCE) on
+ * 2026-05-03 based on RTT samples observed in a TIMELY trace:
+ *   - Idle min RTT: ~2934 ns (taken as wire propagation delay)
+ *   - Under-load RTT clustered around 0.5-1.3 ms when paper defaults were in use,
+ *     i.e. T_HIGH=500us was hit too late and the queue had already grown to ~1ms
+ *     before any multiplicative decrease fired.
+ * Rule of thumb (also matches paper §4.3 spirit):
+ *   T_LOW  = 2  × MIN_RTT  -> filter packet-burst-induced spikes (16-65KB serializes
+ *                             in 1.3-5.2us at 100 Gbps; 2× MIN_RTT = 6us covers it)
+ *   T_HIGH = 15 × MIN_RTT  -> tolerable end-to-end queue depth budget
+ * Paper defaults (kept for reference) were tuned for 10 Gbps with ~20us base RTT.
+ */
+/* Paper defaults (10 Gbps fabric, ~20us base RTT):
+ * #define TIMELY_T_LOW_NS  (50000)   // paper §6: "T_low of 50 us"
+ * #define TIMELY_T_HIGH_NS (500000)  // paper §6: "T_high of 500 us"
+ */
+#define TIMELY_T_LOW_NS  (6000)    /* 2 × MIN_RTT, 100 Gbps fabric */
+#define TIMELY_T_HIGH_NS (45000)   /* 15 × MIN_RTT, 100 Gbps fabric */
 
 /*
- * Additive increment delta = 10 Mbps (paper §6: "additive increment of 10 Mbps").
+ * Additive increment delta retuned on 2026-05-03 for 100 Gbps fabric.
+ *
+ * Paper §6.1 used 10 Mbps on a 10 Gbps fabric, i.e. delta/line_rate = 0.001.
+ * Applying the same ratio to 100 Gbps gives 100 Mbps.
  *
  * Expressed as FXP20 fraction of 100 Gbps line rate:
- *   10e6 / 100e9 * (1<<20) = 104.857... ≈ 105
+ *   100e6 / 100e9 * (1<<20) = 1048.576 ≈ 1049
  *
- * FIXME: paper §6 specifies delta as an absolute bandwidth (10 Mbps), not as a
- * fraction of line rate. The FXP20 representation is line-rate-relative, so the
- * effective delta in absolute terms scales with the NIC's actual line rate.
- * On a 100 Gbps NIC this is exactly 10 Mbps; on 200 Gbps it would be 20 Mbps.
- * To preserve absolute semantics, this value should be retuned per NIC speed.
+ * FIXME: the FXP20 representation is line-rate-relative, so the effective
+ * delta in absolute terms scales with the NIC's actual line rate. Re-tune
+ * if NIC speed changes (use device/rp/timely/timely-recommend-params.sh).
  */
-#define TIMELY_DELTA_FXP20 (105)
+/* Paper default (10 Mbps additive step, scaled to 100 Gbps line rate):
+ * #define TIMELY_DELTA_FXP20 (105)   // paper §6.1
+ */
+#define TIMELY_DELTA_FXP20 (1049)  /* 100 Mbps additive step on 100 Gbps */
 
 /*
  * Multiplicative decrement factor beta = 0.8 (paper §6: "multiplicative decrement factor (β) of 0.8").
@@ -81,18 +99,22 @@
 /*
  * Minimum RTT representing wire propagation delay.
  *
- * FIXME: paper §4.3 says "we use a fixed value representing the wire propagation
+ * Tuned on 2026-05-03 from a TIMELY trace on our 100 Gbps BlueField-3 fabric:
+ * idle-load format-12 lines reported new_rtt clustering around 2934-2998 ns.
+ * Taking 3000 ns as the wire propagation delay floor.
+ *
+ * Paper §4.3 says "we use a fixed value representing the wire propagation
  * delay across the datacenter network, which is known ahead of time" and notes
  * that "the exact value of the minimum RTT does not matter since we only need
  * to determine if the queue is growing or receding". However, the magnitude
  * affects the rate decrease in the gradient>0 branch:
  *     rate ← rate · (1 - β · rtt_diff/minRTT)
  * smaller minRTT → larger decrease per gradient nanosecond.
- *
- * 25 microseconds is a reasonable default for a single-hop datacenter at 100 Gbps.
- * This should be tuned to actual fabric propagation delay (measured via empty-queue RTT).
  */
-#define TIMELY_MIN_RTT_NS (25000)
+/* Previous default (untuned, generic-datacenter guess):
+ * #define TIMELY_MIN_RTT_NS (25000)
+ */
+#define TIMELY_MIN_RTT_NS (3000)  /* observed idle min on 100 Gbps fabric */
 
 /*
  * HAI (HyperActive Increase) threshold: trigger HAI mode after this many consecutive

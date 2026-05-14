@@ -45,6 +45,8 @@ void doca_pcc_dev_user_algo(doca_pcc_dev_algo_ctxt_t *algo_ctxt,
 			     (uint64_t)results->rate);
 
 	doca_pcc_dev_trace_flush();
+#else
+	(void)attr; /* attr only used inside the TIMELY_DEBUG trace */
 #endif
 }
 
