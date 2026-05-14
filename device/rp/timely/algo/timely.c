@@ -524,13 +524,13 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 			counter[TIMELY_COUNTER_DEC_EVENT]++;
 	}
 
-done:; /* C requires a statement after a label; declarations are not statements pre-C23 */
-	/* FIXME: paper §5 mentions scaling the rate update by "the number of completions
-	 * per minimum RTT interval so that we do not overweigh the new information",
-	 * but does not give the exact formula. We implement the naive per-event update
-	 * — every completion event triggers a full Algorithm 1 step. With small segments
-	 * this can over-react; with the default 16 KB segment at 100 Gbps this matches
-	 * roughly one completion per minRTT, which is what the paper assumes. */
+done:; 
+	/* Paper §5 scales rate updates by (completions per minRTT) because their algorithm
+	 * runs on every data-segment ACK (high cadence at small segment sizes). DOCA PCC
+	 * decouples our handler from data ACKs: it runs only on RTT events driven by
+	 * dedicated probes (requested via results->rtt_req). Empirically, probe inter-arrival
+	 * on our setup is ~16 ms ≫ minRTT (~µs), i.e. far fewer than 1 update per minRTT.
+	 * Paper's "≤1 completion per minRTT" assumption holds → no scaling needed. */
 
 	uint32_t clamp_flag = 0;
 	cur_rate = timely_clamp_rate(cur_rate, min_rate, &clamp_flag);

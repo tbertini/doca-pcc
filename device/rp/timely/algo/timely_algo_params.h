@@ -26,36 +26,15 @@
 #ifndef _TIMELY_ALGO_PARAMS_H_
 #define _TIMELY_ALGO_PARAMS_H_
 
-/*
- * TIMELY Algorithm Default Parameters
- *
- * All values from Mittal et al. 2015 (SIGCOMM), Section 6 ("Unless mentioned otherwise..."),
- * converted to DOCA PCC fixed-point formats.
- *
- * Rate values are in FXP20 (1<<20 = 100% line rate).
- * EWMA weight (alpha) and decrement factor (beta) are in FXP16 (1<<16 = 1.0).
- * Time values are in nanoseconds.
- */
 
-/*
- * T_LOW / T_HIGH retuned for our 100 Gbps fabric (BlueField-3 RoCE) on
- * 2026-05-03 based on RTT samples observed in a TIMELY trace:
- *   - Idle min RTT: ~2934 ns (taken as wire propagation delay)
- *   - Under-load RTT clustered around 0.5-1.3 ms when paper defaults were in use,
- *     i.e. T_HIGH=500us was hit too late and the queue had already grown to ~1ms
- *     before any multiplicative decrease fired.
- * Rule of thumb (also matches paper §4.3 spirit):
- *   T_LOW  = 2  × MIN_RTT  -> filter packet-burst-induced spikes (16-65KB serializes
- *                             in 1.3-5.2us at 100 Gbps; 2× MIN_RTT = 6us covers it)
- *   T_HIGH = 15 × MIN_RTT  -> tolerable end-to-end queue depth budget
- * Paper defaults (kept for reference) were tuned for 10 Gbps with ~20us base RTT.
- */
 /* Paper defaults (10 Gbps fabric, ~20us base RTT):
  * #define TIMELY_T_LOW_NS  (50000)   // paper §6: "T_low of 50 us"
  * #define TIMELY_T_HIGH_NS (500000)  // paper §6: "T_high of 500 us"
  */
-#define TIMELY_T_LOW_NS  (6000)    /* 2 × MIN_RTT, 100 Gbps fabric */
-#define TIMELY_T_HIGH_NS (45000)   /* 15 × MIN_RTT, 100 Gbps fabric */
+// #define TIMELY_T_LOW_NS  (6000)
+// #define TIMELY_T_HIGH_NS (45000)
+#define TIMELY_T_LOW_NS  (50000)
+#define TIMELY_T_HIGH_NS (500000)
 
 /*
  * Additive increment delta retuned on 2026-05-03 for 100 Gbps fabric.
@@ -114,7 +93,9 @@
 /* Previous default (untuned, generic-datacenter guess):
  * #define TIMELY_MIN_RTT_NS (25000)
  */
-#define TIMELY_MIN_RTT_NS (3000)  /* observed idle min on 100 Gbps fabric */
+
+// 3800 BF3-to-BF3 1-to-1 ib_write_bw. Paper says MIN_RTT value is not important though.
+#define TIMELY_MIN_RTT_NS (3800)
 
 /*
  * HAI (HyperActive Increase) threshold: trigger HAI mode after this many consecutive
