@@ -40,8 +40,8 @@
 // #define TIMELY_T_HIGH_NS (95000)
 
 // Rate too low
-#define TIMELY_T_LOW_NS  (100000)
-#define TIMELY_T_HIGH_NS (1000000)
+#define TIMELY_T_LOW_NS  (15000)
+#define TIMELY_T_HIGH_NS (100000)
 
 /*
  * Additive increment delta retuned on 2026-05-03 for 100 Gbps fabric.
