@@ -31,10 +31,12 @@
  * #define TIMELY_T_LOW_NS  (50000)   // paper §6: "T_low of 50 us"
  * #define TIMELY_T_HIGH_NS (500000)  // paper §6: "T_high of 500 us"
  */
-// #define TIMELY_T_LOW_NS  (6000)
-// #define TIMELY_T_HIGH_NS (45000)
-#define TIMELY_T_LOW_NS  (50000)
-#define TIMELY_T_HIGH_NS (500000)
+// Paper's values:
+// #define TIMELY_T_LOW_NS  (50000)
+// #define TIMELY_T_HIGH_NS (500000)
+
+#define TIMELY_T_LOW_NS  (9500)
+#define TIMELY_T_HIGH_NS (95000)
 
 /*
  * Additive increment delta retuned on 2026-05-03 for 100 Gbps fabric.
