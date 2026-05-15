@@ -140,7 +140,7 @@ else:                                           # timely.c:518-540   (TIMELY_BRA
     rate ← rate · (1 - β·normalized_gradient)
 ```
 
-Default parameters (paper §6) are in [`algo/timely_algo_params.h`](algo/timely_algo_params.h). Per-event params are runtime-configurable via the standard DOCA PCC param interface (8 params, see `TIMELY_PARAM_*` enum in [`algo/timely.c`](algo/timely.c)).
+Default parameters, units, and min/max bounds are in [`algo/timely_params.h`](algo/timely_params.h) — the single source of truth for the PPCC contract, shared between the DPA algorithm and the host-side dumper. Per-event params are runtime-configurable via the standard DOCA PCC param interface (9 params, see `TIMELY_P_*` enum in [`algo/timely_params.h`](algo/timely_params.h); 8 counters via `TIMELY_C_*`).
 
 ## Known unknowns / FIXMEs
 
