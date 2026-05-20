@@ -76,6 +76,19 @@ wire propagation delay) and reads the local NIC line rate, then prints the
 four `#define` lines you should paste into `algo/timely_algo_params.h`. See
 `--help` for flags. Re-run it any time the fabric or NIC speed changes.
 
+### Runtime override via PPCC (no recompile)
+
+The 9 parameters in `algo/timely_params.h` are also exposed through the
+standard PPCC register interface, so a host-side orchestrator can push a new
+vector between runs without rebuilding the DPA binary. The Mac-side
+[`incast-bench`](../../../../incast-bench) orchestrator uses this path:
+it dumps the contract via `timely_params_dump` at start-of-run, pushes the
+chosen vector via `mlxreg` `cmd_type=0xB` (bulk set params), and scrapes the
+8 TIMELY counters via `cmd_type=0xC` / `0xD`. See `incast-bench --help` and
+the `--timely-param` / `--timely-params` flags. Re-tuning the compiled-in
+defaults is still worthwhile (faster startup, sane values when nothing pushes
+overrides), but for sweeps the PPCC path is what you want.
+
 ## Trace format reference
 
 ### Registered formats (`host/pcc_core.c`)
