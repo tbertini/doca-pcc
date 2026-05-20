@@ -75,74 +75,80 @@ host where `doca_pcc` is running. Some MFT versions accept the
 `--indexes` field unquoted; if your version complains, try quoting the
 whole RHS or splitting into `--index_data`.
 
-### 2.1 Algorithm slot info — `cmd_type=0x0`
+Note: `target_app` is a **subapp selector** (which sub-application within
+the algo slot) and is unrelated to `cmd_type` (which operation to perform).
+For TIMELY (single algo per slot) always use `target_app=0`. The operation
+goes in `--op "cmd_type=0xN"`.
+
+### 2.1 Algorithm slot info — `cmd_type=0x0` (get_algo_info)
 
 ```bash
 sudo mlxreg -d $MST -y --get --reg_name PPCC \
     --indexes "local_port=1,pnat=0,lp_msb=0,algo_slot=0,algo_param_index=0,target_app=0" \
-    --text_length=24
+    --op "cmd_type=0x0"
 ```
 
 Expected: a "Value" line indicating algorithm 0 is loaded. `algo_id`
 returned should equal `0xBFFD`.
 
-### 2.2 Algorithm enable status — `cmd_type=0x3`
+### 2.2 Algorithm enable status — `cmd_type=0x3` (get_enable_status)
 
 ```bash
 sudo mlxreg -d $MST -y --get --reg_name PPCC \
-    --indexes "local_port=1,pnat=0,lp_msb=0,algo_slot=0,algo_param_index=0,target_app=3" \
-    --text_length=4
+    --indexes "local_port=1,pnat=0,lp_msb=0,algo_slot=0,algo_param_index=0,target_app=0" \
+    --op "cmd_type=0x3"
 ```
 
 Expected: enabled bit set, sl_bitmask non-zero. If disabled, enable with
 `cmd_type=0x1` (see `mlxreg --reg_name=PPCC --help`).
 
-### 2.3 Number of parameters — `cmd_type=0x4`
+### 2.3 Number of parameters — `cmd_type=0x4` (get_num_params)
 
 ```bash
 sudo mlxreg -d $MST -y --get --reg_name PPCC \
-    --indexes "local_port=1,pnat=0,lp_msb=0,algo_slot=0,algo_param_index=0,target_app=4" \
-    --text_length=4
+    --indexes "local_port=1,pnat=0,lp_msb=0,algo_slot=0,algo_param_index=0,target_app=0" \
+    --op "cmd_type=0x4"
 ```
 
 Expected: **9**.
 
-### 2.4 Number of counters — `cmd_type=0xE`
+### 2.4 Number of counters — `cmd_type=0xE` (get_num_counters)
 
 ```bash
 sudo mlxreg -d $MST -y --get --reg_name PPCC \
-    --indexes "local_port=1,pnat=0,lp_msb=0,algo_slot=0,algo_param_index=0,target_app=14" \
-    --text_length=4
+    --indexes "local_port=1,pnat=0,lp_msb=0,algo_slot=0,algo_param_index=0,target_app=0" \
+    --op "cmd_type=0xE"
 ```
 
 Expected: **8**.
 
-### 2.5 Per-parameter info — `cmd_type=0x5`
+### 2.5 Per-parameter info — `cmd_type=0x5` (get_param_info)
 
 Loop over `algo_param_index=0…8` and confirm each returns the expected
-default / max from `timely_params.h`:
+default / min / max from `timely_params.h` (in `param_value1` / `param_value2`
+/ `param_value3` respectively):
 
 ```bash
 for i in 0 1 2 3 4 5 6 7 8; do
     echo "=== param $i ==="
     sudo mlxreg -d $MST -y --get --reg_name PPCC \
-        --indexes "local_port=1,pnat=0,lp_msb=0,algo_slot=0,algo_param_index=$i,target_app=5" \
-        --text_length=16
+        --indexes "local_port=1,pnat=0,lp_msb=0,algo_slot=0,algo_param_index=$i,target_app=0" \
+        --op "cmd_type=0x5"
 done
 ```
 
 Cross-reference each output against the corresponding row in
 [`algo/timely_params.h`](algo/timely_params.h)'s `timely_params[]` array.
 
-### 2.6 Bulk get current params — `cmd_type=0xA`
+### 2.6 Bulk get current params — `cmd_type=0xA` (bulk_get_params)
 
 ```bash
 sudo mlxreg -d $MST -y --get --reg_name PPCC \
-    --indexes "local_port=1,pnat=0,lp_msb=0,algo_slot=0,algo_param_index=0,target_app=10" \
-    --text_length=36
+    --indexes "local_port=1,pnat=0,lp_msb=0,algo_slot=0,algo_param_index=0,target_app=0" \
+    --op "cmd_type=0xA"
 ```
 
-Expected (in order): `10000 80000 1049 52429 57344 3800 5 64 1048576`
+Expected `text[0..8]` (in order): `10000 80000 1049 52429 57344 3800 5 64 1048576`
 (matching the contract defaults, which are aligned with `timely_algo_params.h`).
 
 ---
@@ -151,12 +157,12 @@ Expected (in order): `10000 80000 1049 52429 57344 3800 5 64 1048576`
 
 ### 3.1 Number of counters — already validated in 2.4
 
-### 3.2 Bulk get counters — `cmd_type=0xC`
+### 3.2 Bulk get counters — `cmd_type=0xC` (bulk_get_counters)
 
 ```bash
 sudo mlxreg -d $MST -y --get --reg_name PPCC \
-    --indexes "local_port=1,pnat=0,lp_msb=0,algo_slot=0,algo_param_index=0,target_app=12" \
-    --text_length=32
+    --indexes "local_port=1,pnat=0,lp_msb=0,algo_slot=0,algo_param_index=0,target_app=0" \
+    --op "cmd_type=0xC"
 ```
 
 Expected pre-flow: all 8 counters are 0 (no events dispatched yet).
@@ -199,8 +205,8 @@ After a 10-second flow at the working defaults:
 ```bash
 # Get-and-clear (cmd_type=0xD), so subsequent reads start fresh:
 sudo mlxreg -d $MST -y --get --reg_name PPCC \
-    --indexes "local_port=1,pnat=0,lp_msb=0,algo_slot=0,algo_param_index=0,target_app=13" \
-    --text_length=32
+    --indexes "local_port=1,pnat=0,lp_msb=0,algo_slot=0,algo_param_index=0,target_app=0" \
+    --op "cmd_type=0xD"
 ```
 
 Sanity checks:
