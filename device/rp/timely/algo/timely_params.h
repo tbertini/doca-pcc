@@ -39,10 +39,10 @@
  * conversion using the configured line rate. Time parameters are nanoseconds. Alpha
  * and beta are FXP16 (1<<16 = 1.0). HAI threshold is a raw count.
  *
- * PLAN PLACEHOLDER values follow the implementation plan's defaults and DIFFER from
- * the values the DPA was running with pre-PPCC (see timely_algo_params.h). Phase 3
- * baseline parity will identify any defaults that need to revert to the measured-
- * good values from timely_algo_params.h.
+ * Defaults are aligned with the pre-PPCC hardcoded values in timely_algo_params.h
+ * so that a doca_pcc instance running without any param writes behaves identically
+ * to the pre-Phase-1 build. The orchestrator (incast-bench) overrides these at
+ * runtime via PPCC cmd_type=0x8/0xB when sweeping the parameter space.
  */
 
 /* TIMELY algorithm ID. Project convention: DCQCN=0xBFFE, rtt_template=0xBFFF. */
@@ -90,21 +90,20 @@ struct timely_param_desc {
 
 /* THE contract. Edit only here.
  *
- * Defaults are PLAN PLACEHOLDERS — to be reconciled against pre-PPCC measured
- * baseline in Phase 3. FXP20 values assume a 100 Gbps line rate when converted
- * from the plan's Mbps semantics:
+ * Defaults match timely_algo_params.h (pre-PPCC measured-good values on a
+ * 100 Gbps BlueField-3 fabric). FXP20 values assume a 100 Gbps line rate:
  *   N Mbps -> N*1e6 / 100e9 * (1<<20) = N*10.486 (rounded).
  */
 static const struct timely_param_desc timely_params[TIMELY_NUM_PARAMS] = {
-	[TIMELY_P_T_LOW_NS]        = {"t_low",         "ns",       50000,    5000,  200000},
-	[TIMELY_P_T_HIGH_NS]       = {"t_high",        "ns",      500000,   50000, 2000000},
-	[TIMELY_P_DELTA_FXP20]     = {"delta",         "FXP20",      105,      10,   10486},
-	[TIMELY_P_BETA_FXP16]      = {"beta",          "FXP16",    52428,   13107,   65535},
+	[TIMELY_P_T_LOW_NS]        = {"t_low",         "ns",       10000,    1000,  200000},
+	[TIMELY_P_T_HIGH_NS]       = {"t_high",        "ns",       80000,   10000, 2000000},
+	[TIMELY_P_DELTA_FXP20]     = {"delta",         "FXP20",     1049,      10,   10486},
+	[TIMELY_P_BETA_FXP16]      = {"beta",          "FXP16",    52429,   13107,   65535},
 	[TIMELY_P_ALPHA_FXP16]     = {"alpha",         "FXP16",    57344,     256,   65535},
-	[TIMELY_P_MIN_RTT_NS]      = {"min_rtt_ns",    "ns",       10000,    1000,  100000},
+	[TIMELY_P_MIN_RTT_NS]      = {"min_rtt_ns",    "ns",        3800,     500,  100000},
 	[TIMELY_P_HAI_THRESHOLD]   = {"hai_threshold", "count",        5,       1,      50},
-	[TIMELY_P_MIN_RATE_FXP20]  = {"min_rate",      "FXP20",     1049,      10,  104858},
-	[TIMELY_P_INIT_RATE_FXP20] = {"init_rate",     "FXP20",   262144,   10486, 1048576},
+	[TIMELY_P_MIN_RATE_FXP20]  = {"min_rate",      "FXP20",       64,       1,  104858},
+	[TIMELY_P_INIT_RATE_FXP20] = {"init_rate",     "FXP20",  1048576,   10486, 1048576},
 };
 
 static const char *const timely_counter_names[TIMELY_NUM_COUNTERS] = {

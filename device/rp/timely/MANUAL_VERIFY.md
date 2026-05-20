@@ -142,8 +142,8 @@ sudo mlxreg -d $MST -y --get --reg_name PPCC \
     --text_length=36
 ```
 
-Expected (in order): `50000 500000 105 52428 57344 10000 5 1049 262144`
-(matching the contract defaults).
+Expected (in order): `10000 80000 1049 52429 57344 3800 5 64 1048576`
+(matching the contract defaults, which are aligned with `timely_algo_params.h`).
 
 ---
 
@@ -163,66 +163,32 @@ Expected pre-flow: all 8 counters are 0 (no events dispatched yet).
 
 ---
 
-## 4. Defaults-baseline throughput
+## 4. Defaults-baseline parity (no measurement needed)
 
-Run the same `ib_write_bw` invocation you used to capture the pre-PPCC
-baseline (the `pre-ppcc-baseline` tag pre-dates this work, so the
-measurement should already exist; otherwise capture it now with the tag
-checked out before continuing).
+Phase 3 originally called for a `ib_write_bw` baseline comparison. That
+step is **superseded**: the contract defaults in
+[`algo/timely_params.h`](algo/timely_params.h) are now aligned with the
+pre-PPCC hardcoded values in
+[`algo/timely_algo_params.h`](algo/timely_algo_params.h), so a `doca_pcc`
+instance that receives no param writes behaves identically to the
+pre-Phase-1 build by construction.
 
-Typical command (matches `incast-bench.py`):
-
-```bash
-# On the receiver:
-ib_write_bw -d mlx5_0 -F --report_gbits -D <duration> -s <msg_size>
-# On the sender (alveo-u50d-01):
-ib_write_bw -d mlx5_0 -F --report_gbits -D <duration> -s <msg_size> <RECEIVER_HOST>
-```
-
-Record the median goodput across at least 5 repeats.
-
-**Acceptance criterion (plan §3.1):** within ±2 % of pre-PPCC baseline.
-
-### Defaults-baseline result
-
-| Metric | Pre-PPCC baseline | Phase 3 measured | Delta |
-|---|---|---|---|
-| Median goodput (Gb/s) | _fill in_ | _fill in_ | _fill in_ |
-| IQR | _fill in_ | _fill in_ | _fill in_ |
+Parity check: §2.6 above is the verification — `cmd_type=0xA` must
+return `10000 80000 1049 52429 57344 3800 5 64 1048576`. If it does, the
+contract is wire-equivalent to pre-PPCC and Phase 3 is done. The
+orchestrator (incast-bench, Phases 4-7) will sweep parameters at runtime
+via `cmd_type=0x8` / `0xB`; there is no fixed "best" value to converge to
+here.
 
 ---
 
-## 5. Reconciliation (if Phase 4 diverges from baseline)
+## 5. Reconciliation (historical, no longer needed)
 
-The defaults in `timely_params.h` are **PLAN PLACEHOLDERS** that differ
-from the pre-PPCC measured-good values still listed in
-[`algo/timely_algo_params.h`](algo/timely_algo_params.h). Expected
-divergences when the contract is fresh:
-
-| Param | Placeholder | Pre-PPCC measured-good | Expected effect |
-|---|---|---|---|
-| `t_low_ns` | 50000 | 10000 | Higher T_low → less aggressive AI in the early-RTT regime, lower throughput |
-| `t_high_ns` | 500000 | 80000 | Higher T_high → MD only on extreme RTT, more queue buildup, latency tail grows |
-| `delta_fxp20` | 105 (≈10 Mbps) | 1049 (≈100 Mbps) | Smaller AI step → slower convergence to fair share |
-| `min_rtt_ns` | 10000 | 3800 | Smaller normalized gradient at the same rtt_diff → less aggressive MD on gradient |
-| `min_rate_fxp20` | 1049 (≈0.1% of line rate) | 64 (≈0.006% of line rate) | Higher floor → faster recovery from bad sequences, but worse worst-case fairness |
-| `init_rate_fxp20` | 262144 (25% of line rate) | 1048576 (100% of line rate) | Slower flow startup |
-
-To reconcile param by param:
-
-1. Confirm the suspected outlier via PPCC (`cmd_type=0xA`).
-2. Push the pre-PPCC value with a single-value write:
-   ```bash
-   # Example: revert t_low_ns to 10000 (param index 0, value 10000)
-   sudo mlxreg -d $MST -y --set "value0=10000" --reg_name PPCC \
-       --indexes "local_port=1,pnat=0,lp_msb=0,algo_slot=0,algo_param_index=0,target_app=8"
-   ```
-3. Re-run §4. If goodput recovers within ±2 %, mark the param as
-   "needs default revert" in the table above.
-4. After all required reverts have been identified, update
-   `timely_params[]` in [`algo/timely_params.h`](algo/timely_params.h) and
-   commit as `Timely: reconcile contract defaults against measured baseline`.
-5. Rebuild + reflash and re-verify §2.6 returns the new defaults.
+This section described how to revert the original PLAN PLACEHOLDER
+defaults to the pre-PPCC values. With §4 above superseded, this step is
+unnecessary — the defaults are already aligned. Kept here for context in
+case future contract edits diverge from `timely_algo_params.h` and a
+similar parity check is needed.
 
 ---
 
