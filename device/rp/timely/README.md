@@ -11,6 +11,7 @@ specifically Algorithm 1 in §4.3 with the default parameters from §6.
 | `algo/timely.h` | Public API: `timely_init`, `timely_algo`, `timely_set_algo_params` |
 | `algo/timely_ctxt.h` | Per-flow state struct (cur_rate, prev_rtt, signed rtt_diff, HAI counter, RTT-probe abort machinery) |
 | `algo/timely_algo_params.h` | Default parameters (T_low, T_high, δ, β, α, minRTT, HAI threshold, min rate) — every value either cites a paper section or is marked `FIXME:` if the paper is silent |
+| `algo/timely_params.h` | The PPCC **contract**: 10-param (9 tuning + 1 diagnostic `trace_on`) / 8-counter table (name, unit, default, min, max), shared between the DPA algorithm and the host-side `timely_params_dump`. Single source of truth for runtime overrides |
 | `algo/timely.c` | Algorithm 1 implementation (see [§Algorithm 1 mapping](#algorithm-1-mapping)) |
 | `rp_timely_dev_main.c` | DPA entry points (`doca_pcc_dev_user_algo`, `doca_pcc_dev_user_init`); slot-15 fallback bypass |
 | `timely-prettify.sh` | Trace post-processor — translates numeric ev_type/branch into names, with colors and filters |
@@ -26,10 +27,16 @@ ninja -C /tmp/build
 /tmp/build/pcc/doca_pcc --rp-timely -d mlx5_0 -l 70
 ```
 
-Tracing is debug-on by default. To build a quiet binary (no format 6/11/12/14 emissions):
+Per-event traces (format 6/11/12/14) are **compiled in but quiet by default**: the DPA
+emits nothing until asked. Turn them on at runtime — no rebuild — by setting the `trace_on`
+PPCC param to 1 (and back to 0 to silence), as described in *Runtime override via PPCC* below.
+
+To instead force traces on from boot — e.g. to catch the earliest events, before a param
+write can land — build with `TIMELY_DEBUG=1`, which emits unconditionally and ignores the
+runtime param:
 
 ```bash
-TIMELY_DEBUG=0 meson setup --wipe /tmp/build -Denable_all_applications=false -Denable_pcc=true
+TIMELY_DEBUG=1 meson setup --wipe /tmp/build -Denable_all_applications=false -Denable_pcc=true
 ```
 
 ## Reading the trace output
@@ -88,6 +95,12 @@ chosen vector via `mlxreg` `cmd_type=0xB` (bulk set params), and scrapes the
 the `--timely-param` / `--timely-params` flags. Re-tuning the compiled-in
 defaults is still worthwhile (faster startup, sane values when nothing pushes
 overrides), but for sweeps the PPCC path is what you want.
+
+The same channel carries the diagnostic `trace_on` toggle (param index 9): push
+`trace_on=1` to start the format 6/11/12/14 trace stream and `trace_on=0` to stop it,
+without restarting the binary. It defaults to 0 and is **not** an algorithm tuning knob,
+so parameter sweeps should leave it alone. (Building with `TIMELY_DEBUG=1` forces tracing
+on regardless of this param — see [Build & run](#build--run).)
 
 ## Trace format reference
 
