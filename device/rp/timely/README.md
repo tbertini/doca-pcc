@@ -81,7 +81,7 @@ four `#define` lines you should paste into `algo/timely_algo_params.h`. See
 The 9 parameters in `algo/timely_params.h` are also exposed through the
 standard PPCC register interface, so a host-side orchestrator can push a new
 vector between runs without rebuilding the DPA binary. The Mac-side
-[`incast-bench`](../../../../incast-bench) orchestrator uses this path:
+[`incast-bench`](https://github.com/tbertini/incast-bench) orchestrator uses this path:
 it dumps the contract via `timely_params_dump` at start-of-run, pushes the
 chosen vector via `mlxreg` `cmd_type=0xB` (bulk set params), and scrapes the
 8 TIMELY counters via `cmd_type=0xC` / `0xD`. See `incast-bench --help` and
