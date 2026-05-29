@@ -49,7 +49,14 @@
 #define TIMELY_ALGO_ID  0xBFFD
 
 /* Parameter indices. Order matches the existing DPA registration order; INIT_RATE
- * is appended as a new 9th parameter (was hardcoded as TIMELY_NEW_FLOW_RATE_FXP20). */
+ * is appended as the 9th parameter (was hardcoded as TIMELY_NEW_FLOW_RATE_FXP20).
+ *
+ * TRACE_ON (10th) is a diagnostics-only toggle, NOT an algorithm tuning knob: it
+ * gates runtime emission of the format 6/11/12/14 device traces (see timely.h).
+ * It rides in the param array -- rather than a mailbox or a device global -- so it
+ * can be flipped at runtime over the existing, tested PPCC channel without rebuilding.
+ * Appended last so indices 0..8 stay stable for the orchestrator; sweeps should leave
+ * it at its default of 0. */
 enum timely_param_idx {
 	TIMELY_P_T_LOW_NS         = 0,
 	TIMELY_P_T_HIGH_NS        = 1,
@@ -60,6 +67,7 @@ enum timely_param_idx {
 	TIMELY_P_HAI_THRESHOLD    = 6,
 	TIMELY_P_MIN_RATE_FXP20   = 7,
 	TIMELY_P_INIT_RATE_FXP20  = 8,
+	TIMELY_P_TRACE_ON         = 9,  /* diagnostics: runtime trace toggle (0/1), not a tuning param */
 	TIMELY_NUM_PARAMS
 };
 
@@ -104,6 +112,9 @@ static const struct timely_param_desc timely_params[TIMELY_NUM_PARAMS] = {
 	[TIMELY_P_HAI_THRESHOLD]   = {"hai_threshold", "count",        5,       1,      50},
 	[TIMELY_P_MIN_RATE_FXP20]  = {"min_rate",      "FXP20",       64,       1,  104858},
 	[TIMELY_P_INIT_RATE_FXP20] = {"init_rate",     "FXP20",  1048576,   10486, 1048576},
+	/* Diagnostics-only: gates runtime device-trace emission. def=0 (quiet), range [0,1].
+	 * min MUST be 0 so traces can be turned back off at runtime. */
+	[TIMELY_P_TRACE_ON]        = {"trace_on",      "bool",         0,       0,       1},
 };
 
 static const char *const timely_counter_names[TIMELY_NUM_COUNTERS] = {
