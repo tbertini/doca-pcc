@@ -94,8 +94,8 @@ then
         PCC_APP_DEVICE_ALGO_SRCS=`ls ${PCC_DEV_RP_TIMELY_DIR}/algo/*.c`
         PCC_DEVICE_SRC_FILES="${PCC_APP_DEVICE_SRCS} ${PCC_APP_DEVICE_ALGO_SRCS}"
         APP_INC_LIST="${DOCA_INC_LIST} -I${PCC_DEV_RP_TIMELY_DIR}/algo"
-        # Debug tracing: default-on. Build with TIMELY_DEBUG=0 to silence format 6/11/12/14.
-        if [ "${TIMELY_DEBUG:-1}" = "1" ]; then
+        # Debug tracing: default-off. Build with TIMELY_DEBUG=1 to enable format 6/11/12/14.
+        if [ "${TIMELY_DEBUG:-0}" = "1" ]; then
                 TIMELY_DEBUG_FLAG="-DTIMELY_DEBUG"
         fi
         if [ ${AMALGAMATION_BUILD_MODE} = "true" ]; then

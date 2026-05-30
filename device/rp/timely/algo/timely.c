@@ -43,23 +43,30 @@
 
 #include "utils.h"
 #include "timely_ctxt.h"
+#include "timely_params.h"
 #include "timely_algo_params.h"
 #include "timely.h"
 
 #pragma clang diagnostic ignored "-Wunused-parameter"
 
-/* Define TIMELY_DEBUG at compile time to enable detailed tracing.
- * WARNING: significant performance overhead on hot path (every RTT event). */
-#ifdef TIMELY_DEBUG
-#define TIMELY_TRACE(fmt_id, a1, a2, a3, a4, a5) \
-	doca_pcc_dev_trace_5(fmt_id, (uint64_t)(a1), (uint64_t)(a2), (uint64_t)(a3), (uint64_t)(a4), (uint64_t)(a5))
-#define TIMELY_TRACE_FLUSH() doca_pcc_dev_trace_flush()
-#else
-#define TIMELY_TRACE(fmt_id, a1, a2, a3, a4, a5) do {} while (0)
-#define TIMELY_TRACE_FLUSH() do {} while (0)
-#endif
+/* Per-event trace emission, gated by TIMELY_TRACE_ENABLED(param) (see timely.h):
+ * compiled in unconditionally, emitted only when the trace_on PPCC param is set at
+ * runtime (or always under -DTIMELY_DEBUG). The flush is gated too -- flushing with
+ * nothing buffered is wasted work on the hot path.
+ * WARNING: when enabled this adds significant overhead on every RTT event. */
+#define TIMELY_TRACE(param, fmt_id, a1, a2, a3, a4, a5) \
+	do { \
+		if (TIMELY_TRACE_ENABLED(param)) \
+			doca_pcc_dev_trace_5(fmt_id, (uint64_t)(a1), (uint64_t)(a2), \
+					     (uint64_t)(a3), (uint64_t)(a4), (uint64_t)(a5)); \
+	} while (0)
+#define TIMELY_TRACE_FLUSH(param) \
+	do { \
+		if (TIMELY_TRACE_ENABLED(param)) \
+			doca_pcc_dev_trace_flush(); \
+	} while (0)
 
-/* Debug trace format IDs (only active when TIMELY_DEBUG is defined).
+/* Trace format IDs (emitted when TIMELY_TRACE_ENABLED(param) is true; see timely.h).
  * Format IDs 7-10 are reserved for DCQCN (so the two algorithms can share a
  * single trace_message_formats[] table when both branches are merged). */
 #define TIMELY_TRACE_FMT_NEW_FLOW (11)
@@ -92,168 +99,169 @@ static inline uint32_t timely_diff_with_wrap32(uint32_t greater_num, uint32_t sm
 	return greater_num - smaller_num;
 }
 
-/* Configurable parameter indices (8 parameters) */
-typedef enum {
-	TIMELY_PARAM_T_LOW         = 0, /* T_low in nanoseconds */
-	TIMELY_PARAM_T_HIGH        = 1, /* T_high in nanoseconds */
-	TIMELY_PARAM_DELTA         = 2, /* Additive increment δ in FXP20 */
-	TIMELY_PARAM_BETA          = 3, /* Multiplicative decrement β in FXP16 */
-	TIMELY_PARAM_ALPHA         = 4, /* EWMA weight α in FXP16 (FIXME: paper does not specify) */
-	TIMELY_PARAM_MIN_RTT_NS    = 5, /* min RTT in nanoseconds (FIXME: paper does not specify magnitude) */
-	TIMELY_PARAM_HAI_THRESHOLD = 6, /* Consecutive negative-gradient events to trigger HAI */
-	TIMELY_PARAM_MIN_RATE      = 7, /* Minimum rate floor in FXP20 (FIXME: paper does not define) */
-	TIMELY_PARAM_NUM
-} timely_params_t;
-
-/* Counter indices (3 counters) */
-enum {
-	TIMELY_COUNTER_RTT_EVENT = 0, /* Number of RTT events handled */
-	TIMELY_COUNTER_INC_EVENT = 1, /* Number of rate-increase events (T_low or gradient ≤ 0) */
-	TIMELY_COUNTER_DEC_EVENT = 2, /* Number of rate-decrease events (T_high or gradient > 0) */
-	TIMELY_COUNTER_NUM
-} timely_counter_t;
+/* Param indices, counter indices, and default/min/max values come from
+ * timely_params.h (the PPCC contract; single source of truth). */
 
 /* Description strings (kept volatile to prevent dead-code elimination by LTO) */
 const volatile char timely_desc[] = "TIMELY v1.0 (Mittal et al. SIGCOMM 2015)";
 static const volatile char timely_param_t_low_desc[] = "T_LOW, RTT low threshold in ns";
 static const volatile char timely_param_t_high_desc[] = "T_HIGH, RTT high threshold in ns";
-static const volatile char timely_param_delta_desc[] = "DELTA, additive increment step (FXP20)";
+static const volatile char timely_param_delta_desc[] = "DELTA, additive increment step (FXP20 of line rate)";
 static const volatile char timely_param_beta_desc[] = "BETA, multiplicative decrement factor (FXP16)";
 static const volatile char timely_param_alpha_desc[] = "ALPHA, EWMA weight for rtt_diff (FXP16)";
 static const volatile char timely_param_min_rtt_desc[] = "MIN_RTT_NS, wire propagation delay in ns";
 static const volatile char timely_param_hai_threshold_desc[] = "HAI_THRESHOLD, consecutive neg-gradient events for HAI";
-static const volatile char timely_param_min_rate_desc[] = "MIN_RATE, minimum rate floor (FXP20)";
-static const volatile char timely_counter_rtt_desc[] = "COUNTER_RTT_EVENT, number of RTT events handled";
-static const volatile char timely_counter_inc_desc[] = "COUNTER_INC_EVENT, number of rate-increase events";
-static const volatile char timely_counter_dec_desc[] = "COUNTER_DEC_EVENT, number of rate-decrease events";
+static const volatile char timely_param_min_rate_desc[] = "MIN_RATE, minimum rate floor (FXP20 of line rate)";
+static const volatile char timely_param_init_rate_desc[] = "INIT_RATE, initial rate for new flows (FXP20 of line rate)";
+static const volatile char timely_param_trace_on_desc[] = "TRACE_ON, runtime diagnostic trace toggle (0=off, 1=on); always on if built -DTIMELY_DEBUG";
+static const volatile char timely_counter_events_desc[] = "EVENTS, total events dispatched";
+static const volatile char timely_counter_md_gradient_desc[] = "MD_GRADIENT, multiplicative decrease on positive RTT gradient";
+static const volatile char timely_counter_md_thigh_desc[] = "MD_THIGH, multiplicative decrease on RTT > T_high";
+static const volatile char timely_counter_ai_desc[] = "AI, additive increase";
+static const volatile char timely_counter_hai_desc[] = "HAI, hyper-additive increase";
+static const volatile char timely_counter_rtt_lt_tlow_desc[] = "RTT_LT_TLOW, instantaneous RTT < T_low";
+static const volatile char timely_counter_rtt_gt_thigh_desc[] = "RTT_GT_THIGH, instantaneous RTT > T_high";
+static const volatile char timely_counter_rate_clamped_min_desc[] = "RATE_CLAMPED_MIN, rate clamped to min floor";
 
 void timely_init(uint32_t algo_idx)
 {
 	struct doca_pcc_dev_algo_meta_data algo_def = {0};
 
-	/* algo_id 0xBFFD distinguishes TIMELY from DCQCN (0xBFFE) and rtt_template (0xBFFF) */
-	algo_def.algo_id = 0xBFFD;
+	algo_def.algo_id = TIMELY_ALGO_ID;
 	algo_def.algo_major_version = 0x01;
 	algo_def.algo_minor_version = 0x00;
 	algo_def.algo_desc_size = sizeof(timely_desc);
 	algo_def.algo_desc_addr = (uint64_t)timely_desc;
 
-	uint32_t total_param_num = TIMELY_PARAM_NUM;
-	uint32_t total_counter_num = TIMELY_COUNTER_NUM;
-	uint32_t param_num = 0;
-	uint32_t counter_num = 0;
+	doca_pcc_dev_algo_init_metadata(algo_idx, &algo_def,
+					TIMELY_NUM_PARAMS, TIMELY_NUM_COUNTERS);
 
-	doca_pcc_dev_algo_init_metadata(algo_idx, &algo_def, total_param_num, total_counter_num);
-
-	doca_pcc_dev_algo_init_param(algo_idx,
-				     param_num++,
-				     TIMELY_T_LOW_NS,
-				     UINT32_MAX,
-				     1,
-				     1,
+	doca_pcc_dev_algo_init_param(algo_idx, TIMELY_P_T_LOW_NS,
+				     timely_params[TIMELY_P_T_LOW_NS].def,
+				     timely_params[TIMELY_P_T_LOW_NS].max,
+				     1, 1,
 				     sizeof(timely_param_t_low_desc),
 				     (uint64_t)timely_param_t_low_desc);
-	doca_pcc_dev_algo_init_param(algo_idx,
-				     param_num++,
-				     TIMELY_T_HIGH_NS,
-				     UINT32_MAX,
-				     1,
-				     1,
+	doca_pcc_dev_algo_init_param(algo_idx, TIMELY_P_T_HIGH_NS,
+				     timely_params[TIMELY_P_T_HIGH_NS].def,
+				     timely_params[TIMELY_P_T_HIGH_NS].max,
+				     1, 1,
 				     sizeof(timely_param_t_high_desc),
 				     (uint64_t)timely_param_t_high_desc);
-	doca_pcc_dev_algo_init_param(algo_idx,
-				     param_num++,
-				     TIMELY_DELTA_FXP20,
-				     TIMELY_RATE_MAX,
-				     1,
-				     1,
+	doca_pcc_dev_algo_init_param(algo_idx, TIMELY_P_DELTA_FXP20,
+				     timely_params[TIMELY_P_DELTA_FXP20].def,
+				     timely_params[TIMELY_P_DELTA_FXP20].max,
+				     1, 1,
 				     sizeof(timely_param_delta_desc),
 				     (uint64_t)timely_param_delta_desc);
-	doca_pcc_dev_algo_init_param(algo_idx,
-				     param_num++,
-				     TIMELY_BETA_FXP16,
-				     TIMELY_FXP16_ONE,
-				     1,
-				     1,
+	doca_pcc_dev_algo_init_param(algo_idx, TIMELY_P_BETA_FXP16,
+				     timely_params[TIMELY_P_BETA_FXP16].def,
+				     timely_params[TIMELY_P_BETA_FXP16].max,
+				     1, 1,
 				     sizeof(timely_param_beta_desc),
 				     (uint64_t)timely_param_beta_desc);
-	doca_pcc_dev_algo_init_param(algo_idx,
-				     param_num++,
-				     TIMELY_ALPHA_FXP16,
-				     TIMELY_FXP16_ONE,
-				     1,
-				     1,
+	doca_pcc_dev_algo_init_param(algo_idx, TIMELY_P_ALPHA_FXP16,
+				     timely_params[TIMELY_P_ALPHA_FXP16].def,
+				     timely_params[TIMELY_P_ALPHA_FXP16].max,
+				     1, 1,
 				     sizeof(timely_param_alpha_desc),
 				     (uint64_t)timely_param_alpha_desc);
-	doca_pcc_dev_algo_init_param(algo_idx,
-				     param_num++,
-				     TIMELY_MIN_RTT_NS,
-				     UINT32_MAX,
-				     1,
-				     1,
+	doca_pcc_dev_algo_init_param(algo_idx, TIMELY_P_MIN_RTT_NS,
+				     timely_params[TIMELY_P_MIN_RTT_NS].def,
+				     timely_params[TIMELY_P_MIN_RTT_NS].max,
+				     1, 1,
 				     sizeof(timely_param_min_rtt_desc),
 				     (uint64_t)timely_param_min_rtt_desc);
-	doca_pcc_dev_algo_init_param(algo_idx,
-				     param_num++,
-				     TIMELY_HAI_THRESHOLD,
-				     UINT16_MAX,
-				     1,
-				     1,
+	doca_pcc_dev_algo_init_param(algo_idx, TIMELY_P_HAI_THRESHOLD,
+				     timely_params[TIMELY_P_HAI_THRESHOLD].def,
+				     timely_params[TIMELY_P_HAI_THRESHOLD].max,
+				     1, 1,
 				     sizeof(timely_param_hai_threshold_desc),
 				     (uint64_t)timely_param_hai_threshold_desc);
-	doca_pcc_dev_algo_init_param(algo_idx,
-				     param_num++,
-				     TIMELY_MIN_RATE_FXP20,
-				     TIMELY_RATE_MAX,
-				     1,
-				     1,
+	doca_pcc_dev_algo_init_param(algo_idx, TIMELY_P_MIN_RATE_FXP20,
+				     timely_params[TIMELY_P_MIN_RATE_FXP20].def,
+				     timely_params[TIMELY_P_MIN_RATE_FXP20].max,
+				     1, 1,
 				     sizeof(timely_param_min_rate_desc),
 				     (uint64_t)timely_param_min_rate_desc);
+	doca_pcc_dev_algo_init_param(algo_idx, TIMELY_P_INIT_RATE_FXP20,
+				     timely_params[TIMELY_P_INIT_RATE_FXP20].def,
+				     timely_params[TIMELY_P_INIT_RATE_FXP20].max,
+				     1, 1,
+				     sizeof(timely_param_init_rate_desc),
+				     (uint64_t)timely_param_init_rate_desc);
+	/* Diagnostics toggle. Registers min from the contract (0) -- unlike the tuning
+	 * params above which hardcode min=1 -- so the framework accepts a write of 0 to
+	 * silence traces at runtime. */
+	doca_pcc_dev_algo_init_param(algo_idx, TIMELY_P_TRACE_ON,
+				     timely_params[TIMELY_P_TRACE_ON].def,
+				     timely_params[TIMELY_P_TRACE_ON].max,
+				     timely_params[TIMELY_P_TRACE_ON].min, 1,
+				     sizeof(timely_param_trace_on_desc),
+				     (uint64_t)timely_param_trace_on_desc);
 
-	doca_pcc_dev_algo_init_counter(algo_idx,
-				       counter_num++,
-				       UINT32_MAX,
-				       2,
-				       sizeof(timely_counter_rtt_desc),
-				       (uint64_t)timely_counter_rtt_desc);
-	doca_pcc_dev_algo_init_counter(algo_idx,
-				       counter_num++,
-				       UINT32_MAX,
-				       2,
-				       sizeof(timely_counter_inc_desc),
-				       (uint64_t)timely_counter_inc_desc);
-	doca_pcc_dev_algo_init_counter(algo_idx,
-				       counter_num++,
-				       UINT32_MAX,
-				       2,
-				       sizeof(timely_counter_dec_desc),
-				       (uint64_t)timely_counter_dec_desc);
+	doca_pcc_dev_algo_init_counter(algo_idx, TIMELY_C_EVENTS,
+				       UINT32_MAX, 2,
+				       sizeof(timely_counter_events_desc),
+				       (uint64_t)timely_counter_events_desc);
+	doca_pcc_dev_algo_init_counter(algo_idx, TIMELY_C_MD_GRADIENT,
+				       UINT32_MAX, 2,
+				       sizeof(timely_counter_md_gradient_desc),
+				       (uint64_t)timely_counter_md_gradient_desc);
+	doca_pcc_dev_algo_init_counter(algo_idx, TIMELY_C_MD_THIGH,
+				       UINT32_MAX, 2,
+				       sizeof(timely_counter_md_thigh_desc),
+				       (uint64_t)timely_counter_md_thigh_desc);
+	doca_pcc_dev_algo_init_counter(algo_idx, TIMELY_C_AI,
+				       UINT32_MAX, 2,
+				       sizeof(timely_counter_ai_desc),
+				       (uint64_t)timely_counter_ai_desc);
+	doca_pcc_dev_algo_init_counter(algo_idx, TIMELY_C_HAI,
+				       UINT32_MAX, 2,
+				       sizeof(timely_counter_hai_desc),
+				       (uint64_t)timely_counter_hai_desc);
+	doca_pcc_dev_algo_init_counter(algo_idx, TIMELY_C_RTT_LT_TLOW,
+				       UINT32_MAX, 2,
+				       sizeof(timely_counter_rtt_lt_tlow_desc),
+				       (uint64_t)timely_counter_rtt_lt_tlow_desc);
+	doca_pcc_dev_algo_init_counter(algo_idx, TIMELY_C_RTT_GT_THIGH,
+				       UINT32_MAX, 2,
+				       sizeof(timely_counter_rtt_gt_thigh_desc),
+				       (uint64_t)timely_counter_rtt_gt_thigh_desc);
+	doca_pcc_dev_algo_init_counter(algo_idx, TIMELY_C_RATE_CLAMPED_MIN,
+				       UINT32_MAX, 2,
+				       sizeof(timely_counter_rate_clamped_min_desc),
+				       (uint64_t)timely_counter_rate_clamped_min_desc);
 }
 
 /*
- * Clamp the rate to [min_rate, DOCA_PCC_DEV_MAX_RATE]. Sets *clamp_flag if
- * either bound was hit (used to annotate the format-12 RTT trace; we do not
- * emit a separate format-13 line because at min-rate floor it would fire on
- * every event).
+ * Clamp the rate to [min_rate, DOCA_PCC_DEV_MAX_RATE]. Reports the two bounds
+ * separately so the caller can drive TIMELY_C_RATE_CLAMPED_MIN distinctly from
+ * the trace's combined clamped-bit annotation.
  *
  * @cur_rate [in]: candidate rate (FXP20)
  * @min_rate [in]: minimum allowed rate (FXP20)
- * @clamp_flag [out]: set to 1 if rate was clamped, 0 otherwise (may be NULL)
+ * @clamp_min_flag [out]: set to 1 if rate was below min_rate (may be NULL)
+ * @clamp_max_flag [out]: set to 1 if rate exceeded DOCA_PCC_DEV_MAX_RATE (may be NULL)
  * @return: clamped rate (FXP20)
  */
-static inline uint32_t timely_clamp_rate(uint32_t cur_rate, uint32_t min_rate, uint32_t *clamp_flag)
+static inline uint32_t timely_clamp_rate(uint32_t cur_rate, uint32_t min_rate,
+					 uint32_t *clamp_min_flag,
+					 uint32_t *clamp_max_flag)
 {
-	uint32_t flag = 0;
+	uint32_t min_hit = 0, max_hit = 0;
 	if (cur_rate > DOCA_PCC_DEV_MAX_RATE) {
 		cur_rate = DOCA_PCC_DEV_MAX_RATE;
-		flag = 1;
+		max_hit = 1;
 	}
 	if (cur_rate < min_rate) {
 		cur_rate = min_rate;
-		flag = 1;
+		min_hit = 1;
 	}
-	if (clamp_flag != NULL)
-		*clamp_flag = flag;
+	if (clamp_min_flag != NULL)
+		*clamp_min_flag = min_hit;
+	if (clamp_max_flag != NULL)
+		*clamp_max_flag = max_hit;
 	return cur_rate;
 }
 
@@ -311,7 +319,7 @@ static inline void timely_handle_new_flow(doca_pcc_dev_event_t *event,
 					  doca_pcc_dev_results_t *results)
 {
 	uint32_t timestamp = doca_pcc_dev_get_timestamp(event);
-	uint32_t new_flow_rate = TIMELY_NEW_FLOW_RATE_FXP20;
+	uint32_t new_flow_rate = param[TIMELY_P_INIT_RATE_FXP20];
 
 	ccctx->cur_rate = new_flow_rate;
 	ccctx->prev_rtt = 0;
@@ -325,8 +333,8 @@ static inline void timely_handle_new_flow(doca_pcc_dev_event_t *event,
 	results->rate = new_flow_rate;
 	results->rtt_req = 1; /* Request first RTT probe */
 
-	TIMELY_TRACE(TIMELY_TRACE_FMT_NEW_FLOW, new_flow_rate, timestamp, 0, 0, 0);
-	TIMELY_TRACE_FLUSH();
+	TIMELY_TRACE(param, TIMELY_TRACE_FMT_NEW_FLOW, new_flow_rate, timestamp, 0, 0, 0);
+	TIMELY_TRACE_FLUSH(param);
 }
 
 /*
@@ -413,14 +421,14 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 	uint32_t new_rtt = timely_diff_with_wrap32(end_rtt, start_rtt);
 
 	/* Load parameters */
-	uint32_t t_low = param[TIMELY_PARAM_T_LOW];
-	uint32_t t_high = param[TIMELY_PARAM_T_HIGH];
-	uint32_t delta = param[TIMELY_PARAM_DELTA];
-	uint32_t beta = param[TIMELY_PARAM_BETA];
-	uint32_t alpha = param[TIMELY_PARAM_ALPHA];
-	uint32_t min_rtt_ns = param[TIMELY_PARAM_MIN_RTT_NS];
-	uint32_t hai_threshold = param[TIMELY_PARAM_HAI_THRESHOLD];
-	uint32_t min_rate = param[TIMELY_PARAM_MIN_RATE];
+	uint32_t t_low = param[TIMELY_P_T_LOW_NS];
+	uint32_t t_high = param[TIMELY_P_T_HIGH_NS];
+	uint32_t delta = param[TIMELY_P_DELTA_FXP20];
+	uint32_t beta = param[TIMELY_P_BETA_FXP16];
+	uint32_t alpha = param[TIMELY_P_ALPHA_FXP16];
+	uint32_t min_rtt_ns = param[TIMELY_P_MIN_RTT_NS];
+	uint32_t hai_threshold = param[TIMELY_P_HAI_THRESHOLD];
+	uint32_t min_rate = param[TIMELY_P_MIN_RATE_FXP20];
 
 	uint32_t cur_rate = ccctx->cur_rate;
 	int32_t prev_rtt_diff = ccctx->rtt_diff;
@@ -454,8 +462,10 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 		cur_rate += delta;
 		ccctx->neg_gradient_count = 0;
 		branch_taken = TIMELY_BRANCH_T_LOW;
-		if (counter != NULL)
-			counter[TIMELY_COUNTER_INC_EVENT]++;
+		if (counter != NULL) {
+			counter[TIMELY_C_RTT_LT_TLOW]++;
+			counter[TIMELY_C_AI]++;
+		}
 		goto done;
 	}
 
@@ -472,8 +482,10 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 		cur_rate = doca_pcc_dev_fxp_mult(factor_fxp16, cur_rate);
 		ccctx->neg_gradient_count = 0;
 		branch_taken = TIMELY_BRANCH_T_HIGH;
-		if (counter != NULL)
-			counter[TIMELY_COUNTER_DEC_EVENT]++;
+		if (counter != NULL) {
+			counter[TIMELY_C_RTT_GT_THIGH]++;
+			counter[TIMELY_C_MD_THIGH]++;
+		}
 		goto done;
 	}
 
@@ -487,13 +499,15 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 		uint32_t n_factor = (neg_count >= (uint16_t)hai_threshold) ? TIMELY_HAI_FACTOR : 1;
 		cur_rate += n_factor * delta;
 		branch_taken = TIMELY_BRANCH_GRAD_LE;
-		if (counter != NULL)
-			counter[TIMELY_COUNTER_INC_EVENT]++;
+		if (counter != NULL) {
+			if (n_factor != 1)
+				counter[TIMELY_C_HAI]++;
+			else
+				counter[TIMELY_C_AI]++;
+		}
 
-#ifdef TIMELY_DEBUG
 		if (n_factor != 1)
-			TIMELY_TRACE(TIMELY_TRACE_FMT_HAI, neg_count, n_factor, cur_rate, delta, 0);
-#endif
+			TIMELY_TRACE(param, TIMELY_TRACE_FMT_HAI, neg_count, n_factor, cur_rate, delta, 0);
 		goto done;
 	}
 
@@ -521,10 +535,10 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 		ccctx->neg_gradient_count = 0;
 		branch_taken = TIMELY_BRANCH_GRAD_GT;
 		if (counter != NULL)
-			counter[TIMELY_COUNTER_DEC_EVENT]++;
+			counter[TIMELY_C_MD_GRADIENT]++;
 	}
 
-done:; 
+done:;
 	/* Paper §5 scales rate updates by (completions per minRTT) because their algorithm
 	 * runs on every data-segment ACK (high cadence at small segment sizes). DOCA PCC
 	 * decouples our handler from data ACKs: it runs only on RTT events driven by
@@ -532,20 +546,20 @@ done:;
 	 * on our setup is ~16 ms ≫ minRTT (~µs), i.e. far fewer than 1 update per minRTT.
 	 * Paper's "≤1 completion per minRTT" assumption holds → no scaling needed. */
 
-	uint32_t clamp_flag = 0;
-	cur_rate = timely_clamp_rate(cur_rate, min_rate, &clamp_flag);
-	if (clamp_flag)
+	uint32_t clamp_min = 0, clamp_max = 0;
+	cur_rate = timely_clamp_rate(cur_rate, min_rate, &clamp_min, &clamp_max);
+	if (clamp_min || clamp_max)
 		branch_taken |= TIMELY_BRANCH_CLAMPED_BIT;
+	if (clamp_min && counter != NULL)
+		counter[TIMELY_C_RATE_CLAMPED_MIN]++;
 	ccctx->cur_rate = cur_rate;
 	results->rate = cur_rate;
 	results->rtt_req = 1; /* Request next RTT probe */
 	ccctx->rtt_req_to_rtt_sent = 1;
 
-	TIMELY_TRACE(TIMELY_TRACE_FMT_RTT, new_rtt, (uint32_t)rtt_diff, (uint32_t)normalized_gradient,
+	TIMELY_TRACE(param, TIMELY_TRACE_FMT_RTT, new_rtt, (uint32_t)rtt_diff, (uint32_t)normalized_gradient,
 		     branch_taken, cur_rate);
-	TIMELY_TRACE_FLUSH();
-
-	(void)branch_taken; /* silence unused warning when TIMELY_DEBUG is off */
+	TIMELY_TRACE_FLUSH(param);
 }
 
 /*
@@ -563,7 +577,7 @@ static inline void timely_handle_nack(doca_pcc_dev_event_t *event,
 {
 	uint32_t cur_rate = ccctx->cur_rate >> 1;
 
-	cur_rate = timely_clamp_rate(cur_rate, param[TIMELY_PARAM_MIN_RATE], NULL);
+	cur_rate = timely_clamp_rate(cur_rate, param[TIMELY_P_MIN_RATE_FXP20], NULL, NULL);
 	ccctx->cur_rate = cur_rate;
 	ccctx->neg_gradient_count = 0;
 	results->rate = cur_rate;
@@ -598,12 +612,13 @@ void timely_algo(doca_pcc_dev_event_t *event,
 	uint32_t ev_type = ev_attr.ev_type;
 	uint32_t cur_rate = timely_ctx->cur_rate;
 
+	if (counter != NULL)
+		counter[TIMELY_C_EVENTS]++;
+
 	if (unlikely(cur_rate == 0)) {
 		timely_handle_new_flow(event, param, timely_ctx, results);
 	} else if (ev_type == DOCA_PCC_DEV_EVNT_RTT) {
 		timely_handle_rtt(event, param, counter, timely_ctx, results);
-		if (counter != NULL)
-			counter[TIMELY_COUNTER_RTT_EVENT]++;
 	} else if (ev_type == DOCA_PCC_DEV_EVNT_ROCE_TX) {
 		timely_handle_tx(event, param, timely_ctx, results);
 	} else if (ev_type == DOCA_PCC_DEV_EVNT_ROCE_NACK) {
@@ -621,7 +636,7 @@ doca_pcc_dev_error_t timely_set_algo_params(uint32_t param_id_base,
 					    const uint32_t *new_param_values,
 					    uint32_t *params)
 {
-	if ((param_num > TIMELY_PARAM_NUM) || (param_id_base >= TIMELY_PARAM_NUM))
+	if ((param_num > TIMELY_NUM_PARAMS) || (param_id_base >= TIMELY_NUM_PARAMS))
 		return DOCA_PCC_DEV_STATUS_FAIL;
 
 	if ((new_param_values == NULL) || (params == NULL))
