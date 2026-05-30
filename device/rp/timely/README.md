@@ -90,7 +90,7 @@ both, or rely on the PPCC runtime path below to override without recompiling.
 The 9 parameters in `algo/timely_params.h` are also exposed through the
 standard PPCC register interface, so a host-side orchestrator can push a new
 vector between runs without rebuilding the DPA binary. The Mac-side
-[`incast-bench`](https://github.com/tbertini/incast-bench) orchestrator uses this path:
+[`incast-bench`](../../../../incast-bench) orchestrator uses this path:
 it dumps the contract via `timely_params_dump` at start-of-run, pushes the
 chosen vector via `mlxreg` `cmd_type=0xB` (bulk set params), and scrapes the
 8 TIMELY counters via `cmd_type=0xC` / `0xD`. See `incast-bench --help` and
@@ -103,6 +103,29 @@ The same channel carries the diagnostic `trace_on` toggle (param index 9): push
 without restarting the binary. It defaults to 0 and is **not** an algorithm tuning knob,
 so parameter sweeps should leave it alone. (Building with `TIMELY_DEBUG=1` forces tracing
 on regardless of this param — see [Build & run](#build--run).)
+
+To flip it on a *running* `doca_pcc` (default build only — `TIMELY_DEBUG=1` ignores it),
+use `mlxreg` `cmd_type=0x8` (`set_param`) on `algo_slot=0`, `algo_param_index=9`. Note that
+for writes `cmd_type` goes **inside `--set`** (no `--op`, no `--get`), and `value` holds the
+new value:
+
+```bash
+sudo mst status                       # find your device, e.g. /dev/mst/mt41692_pciconf0
+MST=/dev/mst/mt41692_pciconf0
+
+# traces ON  (trace_on = 1)
+sudo mlxreg -d $MST -y --reg_name PPCC \
+    --indexes "local_port=1,pnat=0,lp_msb=0,algo_slot=0,algo_param_index=9,target_app=0" \
+    --set "cmd_type=0x8,value=0x1"
+
+# traces OFF (trace_on = 0)
+sudo mlxreg -d $MST -y --reg_name PPCC \
+    --indexes "local_port=1,pnat=0,lp_msb=0,algo_slot=0,algo_param_index=9,target_app=0" \
+    --set "cmd_type=0x8,value=0x0"
+```
+
+`algo_slot=0` because the dispatcher always reads slot-0 params (see [Slot 0 vs slot 15](#slot-0-vs-slot-15)).
+To read the value back, bulk-get all params (`cmd_type=0xA`) and inspect `text[9]`.
 
 ## Slot 0 vs slot 15
 
