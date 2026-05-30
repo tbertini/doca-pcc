@@ -10,11 +10,13 @@ specifically Algorithm 1 in §4.3 with the default parameters from §6.
 |---|---|
 | `algo/timely.h` | Public API: `timely_init`, `timely_algo`, `timely_set_algo_params` |
 | `algo/timely_ctxt.h` | Per-flow state struct (cur_rate, prev_rtt, signed rtt_diff, HAI counter, RTT-probe abort machinery) |
-| `algo/timely_algo_params.h` | Default parameters (T_low, T_high, δ, β, α, minRTT, HAI threshold, min rate) — every value either cites a paper section or is marked `FIXME:` if the paper is silent |
+| `algo/timely_algo_params.h` | Compiled-in default `#define`s (T_low, T_high, δ, β, α, minRTT, HAI threshold, min rate) — every value either cites a paper section or is marked `FIXME:` if the paper is silent |
 | `algo/timely_params.h` | The PPCC **contract**: 10-param (9 tuning + 1 diagnostic `trace_on`) / 8-counter table (name, unit, default, min, max), shared between the DPA algorithm and the host-side `timely_params_dump`. Single source of truth for runtime overrides |
 | `algo/timely.c` | Algorithm 1 implementation (see [§Algorithm 1 mapping](#algorithm-1-mapping)) |
-| `rp_timely_dev_main.c` | DPA entry points (`doca_pcc_dev_user_algo`, `doca_pcc_dev_user_init`); slot-15 fallback bypass |
-| `timely-prettify.sh` | Trace post-processor — translates numeric ev_type/branch into names, with colors and filters |
+| `rp_timely_dev_main.c` | DPA entry points (`doca_pcc_dev_user_algo`, `doca_pcc_dev_user_init`); slot-15 fallback bypass (see [§Slot 0 vs slot 15](#slot-0-vs-slot-15)) |
+
+Host-side helper scripts (trace prettifier, mlxreg decoder) live in
+[`tools/`](../../../tools) at the application root — they are not DPA code.
 
 ## Build & run
 
@@ -45,8 +47,11 @@ Pipe the live program through the prettifier:
 
 ```bash
 /tmp/build/pcc/doca_pcc --rp-timely -d mlx5_0 -l 70 2>&1 \
-    | bash device/rp/timely/timely-prettify.sh
+    | bash tools/timely-prettify.sh
 ```
+
+For decoding raw `mlxreg` PPCC register reads (param/counter dumps) into
+labelled fields, see [`tools/mlxreg-pretty.py`](../../../tools/mlxreg-pretty.py).
 
 Useful flags:
 
@@ -69,19 +74,16 @@ format 12 - timely rtt: new_rtt=600000 rtt_diff=2484 norm_grad=0 branch=GRAD_LE+
 
 ## Tuning parameters for your fabric
 
-The defaults in `algo/timely_algo_params.h` (`MIN_RTT_NS=25000`, `T_LOW=50000`,
-`T_HIGH=500000`, `DELTA_FXP20=105`) come from **paper §6.1, tuned for a 10 Gbps
-fabric with ~20 µs base RTT**. On a different fabric you must retune. To get
-recommended values for your specific link:
-
-```bash
-bash device/rp/timely/timely-recommend-params.sh --receiver <HOST> --iface mlx5_0
-```
-
-The script measures base RTT (via `ping`, taking the minimum to approximate
-wire propagation delay) and reads the local NIC line rate, then prints the
-four `#define` lines you should paste into `algo/timely_algo_params.h`. See
-`--help` for flags. Re-run it any time the fabric or NIC speed changes.
+The compiled-in defaults in `algo/timely_algo_params.h` are
+`MIN_RTT_NS=3800`, `T_LOW_NS=10000`, `T_HIGH_NS=80000`, `DELTA_FXP20=1049`,
+`BETA_FXP16=52429`, `ALPHA_FXP16=57344`. These were retuned for this cluster's
+**100 Gbps BlueField-3 fabric with ~3.8 µs 1:1 base RTT** — they are *not* the
+paper's 10 Gbps / ~20 µs §6.1 values. On a different fabric you must retune:
+measure base RTT (e.g. minimum `ib_write_lat` or `ping`, approximating wire
+propagation delay), and scale δ with the NIC line rate (δ/line_rate is the
+dimensionless additive step). The two header values (`timely_algo_params.h`
+`#define`s and the `timely_params.h` contract defaults) are kept in sync — edit
+both, or rely on the PPCC runtime path below to override without recompiling.
 
 ### Runtime override via PPCC (no recompile)
 
@@ -101,6 +103,32 @@ The same channel carries the diagnostic `trace_on` toggle (param index 9): push
 without restarting the binary. It defaults to 0 and is **not** an algorithm tuning knob,
 so parameter sweeps should leave it alone. (Building with `TIMELY_DEBUG=1` forces tracing
 on regardless of this param — see [Build & run](#build--run).)
+
+## Slot 0 vs slot 15
+
+You will see two `algo_slot` values in the traces: **0** and **15**.
+
+- **Slot 0** is where `doca_pcc_dev_user_init` registers TIMELY (`algo_idx=0`).
+  Its periodic `rate=64 flow_tag=0` lines are framework heartbeat, not real
+  traffic.
+- **Slot 15** is the NIC's default fallback slot for QPs that did not negotiate
+  a specific algorithm via ECE. Your `ib_write_bw` flows land here, so the real
+  `format 12 - timely rtt` events carry `algo_slot=15`.
+
+Both run TIMELY because `doca_pcc_dev_user_algo` **ignores the negotiated slot
+and always reads slot 0's params/counters** (`rp_timely_dev_main.c`):
+
+```c
+uint32_t *param   = doca_pcc_dev_get_algo_params(port_num, 0);
+uint32_t *counter = doca_pcc_dev_get_counters(port_num, 0);
+```
+
+This is deliberate: TIMELY is the only algorithm in the binary, so slot
+negotiation is irrelevant. The practical consequence for tuning: **a parameter
+vector pushed via PPCC `algo_slot=0` governs the slot-15 benchmark traffic**,
+and the 8 TIMELY counters read from slot 0 aggregate that traffic. If a future
+build runs several algorithms side-by-side, this dispatcher must instead read
+`attr->algo_slot` and map it to the matching algorithm.
 
 ## Trace format reference
 
@@ -150,19 +178,19 @@ Pseudocode from paper §4.3, with code line refs:
 
 ```
 Input: new_rtt
-new_rtt_diff  ← new_rtt - prev_rtt              # timely.c:443
-prev_rtt      ← new_rtt                         # timely.c:444
-rtt_diff      ← (1-α)·rtt_diff + α·new_rtt_diff # timely.c:451-455 (signed FXP16 EWMA)
-normalized_gradient ← rtt_diff / minRTT         # timely.c:459
+new_rtt_diff  ← new_rtt - prev_rtt
+prev_rtt      ← new_rtt
+rtt_diff      ← (1-α)·rtt_diff + α·new_rtt_diff   (signed FXP16 EWMA)
+normalized_gradient ← rtt_diff / minRTT
 
-if new_rtt < T_low: rate ← rate + δ; return     # timely.c:466-474   (TIMELY_BRANCH_T_LOW)
-if new_rtt > T_high:                            # timely.c:481-495   (TIMELY_BRANCH_T_HIGH)
+if new_rtt < T_low: rate ← rate + δ; return       (TIMELY_BRANCH_T_LOW)
+if new_rtt > T_high:                              (TIMELY_BRANCH_T_HIGH)
     rate ← rate · (1 - β·(1 - T_high/new_rtt))
     return
-if normalized_gradient ≤ 0:                     # timely.c:498-516   (TIMELY_BRANCH_GRAD_LE)
-    N = 5 if neg_streak ≥ 5 else 1              # HAI; paper §4.3
+if normalized_gradient ≤ 0:                       (TIMELY_BRANCH_GRAD_LE)
+    N = 5 if neg_streak ≥ 5 else 1                (HAI; paper §4.3)
     rate ← rate + N·δ
-else:                                           # timely.c:518-540   (TIMELY_BRANCH_GRAD_GT)
+else:                                             (TIMELY_BRANCH_GRAD_GT)
     rate ← rate · (1 - β·normalized_gradient)
 ```
 
@@ -178,15 +206,19 @@ grep -rn "FIXME:" device/rp/timely/algo/ device/rp/timely/rp_timely_dev_main.c
 
 Highlights:
 - **α (EWMA weight):** paper labels it but never gives a value. Default 0.875 (FXP16 = 57344).
-- **minRTT:** paper says "fixed value… known ahead of time" without specifying. Default 25 µs.
+- **minRTT:** paper says "fixed value… known ahead of time" without specifying. Default 3.8 µs (`3800` ns — measured BF3-to-BF3 1:1 `ib_write_bw`).
 - **min_rate:** paper does not define a floor. Default `1<<6` (FXP20), matches DCQCN.
 - **NACK handling:** paper assumes PFC fabric where NACKs shouldn't happen. We do a conservative 50% cut.
 - **CNP:** explicitly ignored per paper §1.
 - **Rate update scaling per minRTT (§5):** paper mentions but doesn't formalize. We do naive per-event update.
-- **δ (10 Mbps):** paper specifies as absolute bandwidth; we encode as FXP20 line-rate fraction (105 ≈ 10 Mbps on a 100 Gbps NIC). Re-tune if NIC speed changes.
+- **δ:** paper specifies as absolute bandwidth (10 Mbps); we encode as an FXP20 line-rate fraction. Default `1049` ≈ 100 Mbps on a 100 Gbps NIC (retuned 2026-05-03; the paper's 10 Mbps would be ~`105`). Re-tune if NIC speed changes.
 
 ## Hardware / branch context
 
 - Tested on BlueField-3 (DPA) at `alveo-u50d-01`.
 - Independent sibling of the `dcqcn` branch — no shared algorithm code, but the build/host glue is structured so both can coexist when merged (format IDs 7–10 are reserved for DCQCN's debug traces, 11–14 for TIMELY's).
 - The default app in `host/pcc.c` is **unchanged from main** — TIMELY is selected at runtime via `--rp-timely` / `-rp-tm`.
+- On a PFC + ECN fabric the NIC's DCQCN co-fires alongside TIMELY: you will see
+  receiver-side CNPs even when TIMELY is driving the rate. When reading the
+  TIMELY counters, remember that measured throughput is the joint result of
+  TIMELY's RTT-based rate control **and** DCQCN's ECN reaction, not TIMELY alone.
