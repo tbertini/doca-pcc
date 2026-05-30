@@ -26,6 +26,28 @@
 #ifndef TIMELY_H
 #define TIMELY_H
 
+#include "timely_params.h"	/* TIMELY_P_TRACE_ON */
+
+/*
+ * Runtime trace gate.
+ *
+ * TIMELY's format 6/11/12/14 device traces are compiled in unconditionally and
+ * gated here, so they can be toggled at runtime via the trace_on PPCC param
+ * (param[TIMELY_P_TRACE_ON]) WITHOUT rebuilding the DPA binary. Default is off.
+ *
+ * Building with -DTIMELY_DEBUG forces them on from boot (e.g. to capture the
+ * earliest events, before a param write can land), ignoring the param.
+ *
+ * Cost when off: one well-predicted branch per event. The trace-record write and
+ * the buffer flush -- the expensive part -- are skipped, so an untoggled build is
+ * cheaper on the hot path than the old always-emitting TIMELY_DEBUG build.
+ */
+#ifdef TIMELY_DEBUG
+#define TIMELY_TRACE_ENABLED(param) (1)
+#else
+#define TIMELY_TRACE_ENABLED(param) ((param)[TIMELY_P_TRACE_ON] != 0)
+#endif
+
 /*
  * Entry point to TIMELY user algorithm
  * This function starts the algorithm code of a single event for the TIMELY algorithm.
