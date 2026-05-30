@@ -36,18 +36,17 @@ void doca_pcc_dev_user_algo(doca_pcc_dev_algo_ctxt_t *algo_ctxt,
 
 	timely_algo(event, param, counter, algo_ctxt, results);
 
-#ifdef TIMELY_DEBUG
-	doca_pcc_dev_trace_5(PCC_TRACE_FMT_EVENT,
-			     (uint64_t)doca_pcc_dev_get_ev_attr(event).ev_type,
-			     (uint64_t)doca_pcc_dev_get_flowtag(event),
-			     (uint64_t)port_num,
-			     (uint64_t)attr->algo_slot,
-			     (uint64_t)results->rate);
-
-	doca_pcc_dev_trace_flush();
-#else
-	(void)attr; /* attr only used inside the TIMELY_DEBUG trace */
-#endif
+	/* Format 6 (per-event) trace: compiled in, emitted only when the trace_on PPCC
+	 * param is set at runtime (or always if built -DTIMELY_DEBUG). See timely.h. */
+	if (TIMELY_TRACE_ENABLED(param)) {
+		doca_pcc_dev_trace_5(PCC_TRACE_FMT_EVENT,
+				     (uint64_t)doca_pcc_dev_get_ev_attr(event).ev_type,
+				     (uint64_t)doca_pcc_dev_get_flowtag(event),
+				     (uint64_t)port_num,
+				     (uint64_t)attr->algo_slot,
+				     (uint64_t)results->rate);
+		doca_pcc_dev_trace_flush();
+	}
 }
 
 /*

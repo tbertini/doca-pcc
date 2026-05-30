@@ -49,18 +49,24 @@
 
 #pragma clang diagnostic ignored "-Wunused-parameter"
 
-/* Define TIMELY_DEBUG at compile time to enable detailed tracing.
- * WARNING: significant performance overhead on hot path (every RTT event). */
-#ifdef TIMELY_DEBUG
-#define TIMELY_TRACE(fmt_id, a1, a2, a3, a4, a5) \
-	doca_pcc_dev_trace_5(fmt_id, (uint64_t)(a1), (uint64_t)(a2), (uint64_t)(a3), (uint64_t)(a4), (uint64_t)(a5))
-#define TIMELY_TRACE_FLUSH() doca_pcc_dev_trace_flush()
-#else
-#define TIMELY_TRACE(fmt_id, a1, a2, a3, a4, a5) do {} while (0)
-#define TIMELY_TRACE_FLUSH() do {} while (0)
-#endif
+/* Per-event trace emission, gated by TIMELY_TRACE_ENABLED(param) (see timely.h):
+ * compiled in unconditionally, emitted only when the trace_on PPCC param is set at
+ * runtime (or always under -DTIMELY_DEBUG). The flush is gated too -- flushing with
+ * nothing buffered is wasted work on the hot path.
+ * WARNING: when enabled this adds significant overhead on every RTT event. */
+#define TIMELY_TRACE(param, fmt_id, a1, a2, a3, a4, a5) \
+	do { \
+		if (TIMELY_TRACE_ENABLED(param)) \
+			doca_pcc_dev_trace_5(fmt_id, (uint64_t)(a1), (uint64_t)(a2), \
+					     (uint64_t)(a3), (uint64_t)(a4), (uint64_t)(a5)); \
+	} while (0)
+#define TIMELY_TRACE_FLUSH(param) \
+	do { \
+		if (TIMELY_TRACE_ENABLED(param)) \
+			doca_pcc_dev_trace_flush(); \
+	} while (0)
 
-/* Debug trace format IDs (only active when TIMELY_DEBUG is defined).
+/* Trace format IDs (emitted when TIMELY_TRACE_ENABLED(param) is true; see timely.h).
  * Format IDs 7-10 are reserved for DCQCN (so the two algorithms can share a
  * single trace_message_formats[] table when both branches are merged). */
 #define TIMELY_TRACE_FMT_NEW_FLOW (11)
@@ -107,6 +113,7 @@ static const volatile char timely_param_min_rtt_desc[] = "MIN_RTT_NS, wire propa
 static const volatile char timely_param_hai_threshold_desc[] = "HAI_THRESHOLD, consecutive neg-gradient events for HAI";
 static const volatile char timely_param_min_rate_desc[] = "MIN_RATE, minimum rate floor (FXP20 of line rate)";
 static const volatile char timely_param_init_rate_desc[] = "INIT_RATE, initial rate for new flows (FXP20 of line rate)";
+static const volatile char timely_param_trace_on_desc[] = "TRACE_ON, runtime diagnostic trace toggle (0=off, 1=on); always on if built -DTIMELY_DEBUG";
 static const volatile char timely_counter_events_desc[] = "EVENTS, total events dispatched";
 static const volatile char timely_counter_md_gradient_desc[] = "MD_GRADIENT, multiplicative decrease on positive RTT gradient";
 static const volatile char timely_counter_md_thigh_desc[] = "MD_THIGH, multiplicative decrease on RTT > T_high";
@@ -183,6 +190,15 @@ void timely_init(uint32_t algo_idx)
 				     1, 1,
 				     sizeof(timely_param_init_rate_desc),
 				     (uint64_t)timely_param_init_rate_desc);
+	/* Diagnostics toggle. Registers min from the contract (0) -- unlike the tuning
+	 * params above which hardcode min=1 -- so the framework accepts a write of 0 to
+	 * silence traces at runtime. */
+	doca_pcc_dev_algo_init_param(algo_idx, TIMELY_P_TRACE_ON,
+				     timely_params[TIMELY_P_TRACE_ON].def,
+				     timely_params[TIMELY_P_TRACE_ON].max,
+				     timely_params[TIMELY_P_TRACE_ON].min, 1,
+				     sizeof(timely_param_trace_on_desc),
+				     (uint64_t)timely_param_trace_on_desc);
 
 	doca_pcc_dev_algo_init_counter(algo_idx, TIMELY_C_EVENTS,
 				       UINT32_MAX, 2,
@@ -317,8 +333,8 @@ static inline void timely_handle_new_flow(doca_pcc_dev_event_t *event,
 	results->rate = new_flow_rate;
 	results->rtt_req = 1; /* Request first RTT probe */
 
-	TIMELY_TRACE(TIMELY_TRACE_FMT_NEW_FLOW, new_flow_rate, timestamp, 0, 0, 0);
-	TIMELY_TRACE_FLUSH();
+	TIMELY_TRACE(param, TIMELY_TRACE_FMT_NEW_FLOW, new_flow_rate, timestamp, 0, 0, 0);
+	TIMELY_TRACE_FLUSH(param);
 }
 
 /*
@@ -490,10 +506,8 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 				counter[TIMELY_C_AI]++;
 		}
 
-#ifdef TIMELY_DEBUG
 		if (n_factor != 1)
-			TIMELY_TRACE(TIMELY_TRACE_FMT_HAI, neg_count, n_factor, cur_rate, delta, 0);
-#endif
+			TIMELY_TRACE(param, TIMELY_TRACE_FMT_HAI, neg_count, n_factor, cur_rate, delta, 0);
 		goto done;
 	}
 
@@ -543,11 +557,9 @@ done:;
 	results->rtt_req = 1; /* Request next RTT probe */
 	ccctx->rtt_req_to_rtt_sent = 1;
 
-	TIMELY_TRACE(TIMELY_TRACE_FMT_RTT, new_rtt, (uint32_t)rtt_diff, (uint32_t)normalized_gradient,
+	TIMELY_TRACE(param, TIMELY_TRACE_FMT_RTT, new_rtt, (uint32_t)rtt_diff, (uint32_t)normalized_gradient,
 		     branch_taken, cur_rate);
-	TIMELY_TRACE_FLUSH();
-
-	(void)branch_taken; /* silence unused warning when TIMELY_DEBUG is off */
+	TIMELY_TRACE_FLUSH(param);
 }
 
 /*
