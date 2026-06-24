@@ -1,3 +1,0 @@
-/Users/thomas/Desktop/doca/applications/pcc/cmake-build-debug/CMakeFiles/pcc_index.dir
-/Users/thomas/Desktop/doca/applications/pcc/cmake-build-debug/CMakeFiles/edit_cache.dir
-/Users/thomas/Desktop/doca/applications/pcc/cmake-build-debug/CMakeFiles/rebuild_cache.dir

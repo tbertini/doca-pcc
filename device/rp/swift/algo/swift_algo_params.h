@@ -168,25 +168,6 @@
  */
 #define SWIFT_RETX_RESET_THRESHOLD  (3)
 
-/*
- * ACK-driven RTT-probe recovery period (ns).
- *
- * Swift's only congestion signal is the fabric RTT, carried by RTT events. The probe
- * loop is normally re-armed by the RTT handler (after each measurement) and, on probe
- * loss, by the TX abort machine (swift_handle_tx). On this BF3 workload NO TX events are
- * delivered, so a lost probe would stall the loop forever (observed on hardware: a
- * relentless NACK stream, zero RTT events, rate pinned at the floor). swift_handle_ack
- * therefore re-arms the probe from the ACK path: if no RTT event has refreshed the loop
- * within this period, the next ACK presumes the outstanding probe was lost and requests a
- * fresh one. The time gate caps probe-request frequency regardless of ACK rate.
- *
- * FIXME: DOCA mapping -- recovering probes from ACKs (vs TX events) and this value are
- * heuristics for the BF3 event model. Tune against the observed format-16 RTT cadence:
- * if RTT events arrive faster than this, the gate never fires and the cadence is
- * HW-paced; if slower, this becomes the effective recovery latency.
- */
-#define SWIFT_PROBE_RETRY_NS  (256000)  /* 256 us */
-
 /* ===== cwnd -> rate actuation (BDP identity) ===== */
 
 /*
