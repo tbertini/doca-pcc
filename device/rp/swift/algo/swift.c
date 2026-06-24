@@ -375,6 +375,7 @@ static inline void swift_handle_new_flow(doca_pcc_dev_event_t *event,
 	ccctx->rtt_meas_psn = 0;
 	ccctx->abort_cnt = 0;
 	ccctx->rtt_req_to_rtt_sent = 1;
+	ccctx->t_last_probe = timestamp;   /* arm the ACK-driven probe-loss recovery gate */
 
 	results->rate = rate;
 	results->rtt_req = 1; /* request first RTT probe */
@@ -585,6 +586,7 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 	results->rate = rate;
 	results->rtt_req = 1; /* request next RTT probe */
 	ccctx->rtt_req_to_rtt_sent = 1;
+	ccctx->t_last_probe = now; /* refresh the ACK-driven recovery gate: the loop is alive */
 
 	/* Two-line decision trace (joined by order): delay side then window side. */
 	/* delay_minus_target is signed (negative when the queue is draining). Pass it as a
@@ -668,6 +670,63 @@ static inline void swift_handle_cnp(doca_pcc_dev_event_t *event,
 	results->rtt_req = 0;
 }
 
+/*
+ * Handle ACK event (paper Algorithm 1, "On Receiving ACK"). Two jobs, both essential on
+ * this DOCA mapping:
+ *
+ *   1. retransmit_cnt <- 0 (paper). An ACK is forward progress, so it clears the loss
+ *      counter -- exactly as RTT events do. Without this, isolated NACKs ratchet retx_cnt
+ *      up monotonically (it was reset ONLY on RTT events) until it crosses the threshold
+ *      and swift_handle_nack pins cwnd at min_cwnd. Observed on hardware: a 2:1 incast
+ *      starts both senders at line rate -> real drops -> a NACK stream with no RTT events,
+ *      and the flow latched at the rate floor forever. Resetting on ACK lets a few
+ *      interleaved NACKs decay (gentle once-per-RTT MD) instead of collapsing the window.
+ *
+ *   2. Re-arm the RTT probe loop. Swift's ONLY congestion signal is the fabric RTT carried
+ *      by RTT events; they are normally re-requested by swift_handle_rtt and, on probe
+ *      loss, by the TX abort machine (swift_handle_tx). This workload delivers no TX
+ *      events, so a lost probe stalls the loop permanently and Swift runs blind. If no RTT
+ *      event has refreshed the loop within SWIFT_PROBE_RETRY_NS, presume the outstanding
+ *      probe was lost and request a fresh one (time-gated so we never flood probes).
+ *
+ * ACK carries no usable fabric-delay sample here, so Swift runs NO AIMD on ACK -- the
+ * window moves only on RTT events (delay) and NACK events (loss). See the SWIFT_PROBE_RETRY_NS
+ * FIXME (swift_algo_params.h) on the cadence heuristic.
+ */
+static inline void swift_handle_ack(doca_pcc_dev_event_t *event,
+				    uint32_t *param,
+				    uint32_t *counter,
+				    cc_ctxt_swift_t *ccctx,
+				    doca_pcc_dev_results_t *results)
+{
+	uint32_t now = doca_pcc_dev_get_timestamp(event);
+	uint16_t retx_was = ccctx->retx_cnt;
+
+	/* Job 1: forward progress resets the loss counter (paper Algorithm 1). */
+	ccctx->retx_cnt = 0;
+
+	/* Job 2: re-arm a presumed-lost probe if the RTT loop has gone quiet. rtt_meas_psn==0
+	 * means no probe is mid-flight per the TX machine (which never advances it here), so
+	 * the time gate alone bounds the request rate. */
+	uint32_t rtt_req = 0;
+	uint32_t since_probe = swift_diff_with_wrap32(now, ccctx->t_last_probe);
+	if ((ccctx->rtt_meas_psn == 0) && (since_probe >= SWIFT_PROBE_RETRY_NS)) {
+		rtt_req = 1;
+		ccctx->rtt_req_to_rtt_sent = 1; /* keep handle_rtt's drop-guard from dropping the reply */
+		ccctx->t_last_probe = now;
+	}
+
+	results->rate = ccctx->cur_rate;
+	results->rtt_req = rtt_req;
+
+	/* Trace only when we actually re-arm (one line per recovery, not per ACK). */
+	if (rtt_req) {
+		SWIFT_TRACE(param, SWIFT_TRACE_FMT_ACK, since_probe, retx_was,
+			    ccctx->fcwnd, ccctx->cur_rate, rtt_req);
+		SWIFT_TRACE_FLUSH(param);
+	}
+}
+
 void swift_algo(doca_pcc_dev_event_t *event,
 		uint32_t *param,
 		uint32_t *counter,
@@ -686,6 +745,8 @@ void swift_algo(doca_pcc_dev_event_t *event,
 		swift_handle_new_flow(event, param, counter, swift_ctx, results);
 	} else if (ev_type == DOCA_PCC_DEV_EVNT_RTT) {
 		swift_handle_rtt(event, param, counter, swift_ctx, results);
+	} else if (ev_type == DOCA_PCC_DEV_EVNT_ROCE_ACK) {
+		swift_handle_ack(event, param, counter, swift_ctx, results);
 	} else if (ev_type == DOCA_PCC_DEV_EVNT_ROCE_TX) {
 		swift_handle_tx(event, param, swift_ctx, results);
 	} else if (ev_type == DOCA_PCC_DEV_EVNT_ROCE_NACK) {

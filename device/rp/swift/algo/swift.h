@@ -52,7 +52,7 @@
  *
  * Per-event summaries reuse the shared generic format 6 (see rp_swift_dev_main.c), as
  * TIMELY does. Format IDs 6-14 are owned by the generic/DCQCN/TIMELY traces in the
- * merged trace_message_formats[] table; Swift claims 15-18.
+ * merged trace_message_formats[] table; Swift claims 15-19.
  *
  * The two RTT-decision lines are split because doca_pcc_dev_trace_5 carries only five
  * 64-bit args and the per-event decision has more than five fields worth checking by
@@ -63,6 +63,7 @@
 #define SWIFT_TRACE_FMT_RTT_DELAY  (16)  /* fabric_rtt, np_turnaround, delay(signed), target, branch */
 #define SWIFT_TRACE_FMT_RTT_WINDOW (17)  /* cwnd_prev, cwnd, rate, fs_term, flags */
 #define SWIFT_TRACE_FMT_LOSS       (18)  /* ev_type, retx_cnt, cwnd, rate, reset_flag */
+#define SWIFT_TRACE_FMT_ACK        (19)  /* since_probe_ns, retx_was, cwnd, rate, rtt_req (only when re-arming) */
 
 /*
  * Branch identifiers used in the format-16 trace.
