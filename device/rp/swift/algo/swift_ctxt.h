@@ -63,7 +63,10 @@ typedef struct {
 	uint16_t abort_cnt;		/* Consecutive abort/retry rounds (exponential backoff) */
 	uint16_t rtt_req_to_rtt_sent;	/* TX events between rtt_req=1 and RTT_REQ_SENT flag */
 
-	uint32_t reserved[4];		/* Pad to 48 bytes total (12 dwords). Do not exceed. */
+	uint32_t t_last_probe;		/* Timestamp (ns) of the last RTT-probe request; ACK-driven probe-loss
+					 * recovery gate (the TX abort machine never runs -- no TX events on
+					 * this workload -- so ACKs re-arm a lost probe; see swift_handle_ack) */
+	uint32_t reserved[3];		/* Pad to 48 bytes total (12 dwords). Do not exceed. */
 } cc_ctxt_swift_t;
 
 #endif /* SWIFT_CTXT_H_ */
