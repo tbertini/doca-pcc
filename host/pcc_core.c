@@ -48,7 +48,7 @@ static char *trace_message_formats[] = {
 	 * 7 and 8 TEMPORARILY repurposed for TIMELY param-propagation diagnostics —
 	 * revert to "reserved for DCQCN" once the param issue is resolved. */
 	"format 7 - DIAG live_params: t_low=%lu t_high=%lu trace_on=%lu delta=%lu min_rtt=%lu\n",
-	"format 8 - DIAG post_copy: port=%lu base=%lu params[base]=%lu ret=%lu a5=%lu\n",
+	"format 8 - DIAG post_copy: port=%lu base=%lu params[base]=%lu ret=%lu params[base+1]=%lu\n",
 	"format 9 - reserved for DCQCN\n",
 	"format 10 - reserved for DCQCN\n",
 	"format 11 - timely new_flow: rate=%lu ts=%lu arg3=%lu arg4=%lu arg5=%lu\n",
