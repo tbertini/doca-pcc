@@ -74,13 +74,6 @@
 /* Format ID 13 retired — clamp info now folded into format 12's branch_taken */
 #define TIMELY_TRACE_FMT_HAI      (14)
 
-/* DIAGNOSTIC (param-propagation debug): echo the LIVE param array the algo just
- * loaded, every RTT event. Shows exactly what doca_pcc_dev_get_algo_params()
- * returns on the hot path, so we can see whether a PPCC bulk_set actually reached
- * the device-side array — independent of what cmd_type=0xA reads back (firmware
- * image). Reuses format ID 7 (unused on the timely branch). Remove once resolved. */
-#define TIMELY_TRACE_FMT_DIAG_LIVE_PARAMS (7)
-
 /* Branch identifiers used in the format-12 trace.
  * Low 4 bits = which Algorithm-1 branch was taken.
  * Bit 7 (0x80) = rate was clamped (to either MIN_RATE or DOCA_PCC_DEV_MAX_RATE). */
@@ -436,13 +429,6 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 	uint32_t min_rtt_ns = param[TIMELY_P_MIN_RTT_NS];
 	uint32_t hai_threshold = param[TIMELY_P_HAI_THRESHOLD];
 	uint32_t min_rate = param[TIMELY_P_MIN_RATE_FXP20];
-
-	/* DIAGNOSTIC: echo what the LIVE param array actually holds this event. If a
-	 * PPCC push of t_high=500000 landed in the device array, t_high here reads
-	 * 500000; if it shows 80000 the push never reached this buffer. Gated like the
-	 * other traces (always on under -DTIMELY_DEBUG). Remove once resolved. */
-	TIMELY_TRACE(param, TIMELY_TRACE_FMT_DIAG_LIVE_PARAMS,
-		     t_low, t_high, param[TIMELY_P_TRACE_ON], delta, min_rtt_ns);
 
 	uint32_t cur_rate = ccctx->cur_rate;
 	int32_t prev_rtt_diff = ccctx->rtt_diff;

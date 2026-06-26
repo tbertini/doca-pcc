@@ -44,17 +44,15 @@ static char *trace_message_formats[] = {
 	"format 4 - pcc_np dev: thread_idx = %#lx, rq = %#lx, rq_pi = %#lx, rqcq = %#lx, rqcq_ci = %#lx\n",
 	"format 5 - pcc_np dev: thread_idx = %#lx, sq = %#lx, sq_pi = %#lx, sqcq = %#lx. end %u\n",
 	"format 6 - pcc event: ev_type=%lu flow_tag=%lu port=%lu algo_slot=%lu rate=%lu\n",
-	/* Format IDs 7-10 reserved for DCQCN traces (when DCQCN branch is merged in).
-	 * 7 and 8 TEMPORARILY repurposed for TIMELY param-propagation diagnostics —
-	 * revert to "reserved for DCQCN" once the param issue is resolved. */
-	"format 7 - DIAG live_params: t_low=%lu t_high=%lu trace_on=%lu delta=%lu min_rtt=%lu\n",
-	"format 8 - DIAG post_copy: port=%lu base=%lu params[base]=%lu ret=%lu params[base+1]=%lu\n",
+	/* Format IDs 7-10 reserved for DCQCN traces (when DCQCN branch is merged in). */
+	"format 7 - reserved for DCQCN\n",
+	"format 8 - reserved for DCQCN\n",
 	"format 9 - reserved for DCQCN\n",
 	"format 10 - reserved for DCQCN\n",
 	"format 11 - timely new_flow: rate=%lu ts=%lu arg3=%lu arg4=%lu arg5=%lu\n",
 	/* branch low nibble = T_LOW(0)/T_HIGH(1)/GRAD_LE(2)/GRAD_GT(3); bit 0x80 = clamped */
 	"format 12 - timely rtt: new_rtt=%lu rtt_diff=%ld norm_grad=%ld branch=0x%lx new_rate=%lu\n",
-	"format 13 - DIAG set_params: port=%lu slot=%lu base=%lu num=%lu val0=%lu\n",
+	"format 13 - retired (clamp folded into format 12 branch bit 0x80)\n",
 	"format 14 - timely hai: neg_count=%lu N=%lu new_rate=%lu delta=%lu arg5=%lu\n",
 	NULL};
 
