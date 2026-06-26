@@ -74,6 +74,13 @@
 /* Format ID 13 retired — clamp info now folded into format 12's branch_taken */
 #define TIMELY_TRACE_FMT_HAI      (14)
 
+/* DIAGNOSTIC (param-propagation debug): echo the LIVE param array the algo just
+ * loaded, every RTT event. Shows exactly what doca_pcc_dev_get_algo_params()
+ * returns on the hot path, so we can see whether a PPCC bulk_set actually reached
+ * the device-side array — independent of what cmd_type=0xA reads back (firmware
+ * image). Reuses format ID 7 (unused on the timely branch). Remove once resolved. */
+#define TIMELY_TRACE_FMT_DIAG_LIVE_PARAMS (7)
+
 /* Branch identifiers used in the format-12 trace.
  * Low 4 bits = which Algorithm-1 branch was taken.
  * Bit 7 (0x80) = rate was clamped (to either MIN_RATE or DOCA_PCC_DEV_MAX_RATE). */
@@ -430,6 +437,13 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 	uint32_t hai_threshold = param[TIMELY_P_HAI_THRESHOLD];
 	uint32_t min_rate = param[TIMELY_P_MIN_RATE_FXP20];
 
+	/* DIAGNOSTIC: echo what the LIVE param array actually holds this event. If a
+	 * PPCC push of t_high=500000 landed in the device array, t_high here reads
+	 * 500000; if it shows 80000 the push never reached this buffer. Gated like the
+	 * other traces (always on under -DTIMELY_DEBUG). Remove once resolved. */
+	TIMELY_TRACE(param, TIMELY_TRACE_FMT_DIAG_LIVE_PARAMS,
+		     t_low, t_high, param[TIMELY_P_TRACE_ON], delta, min_rtt_ns);
+
 	uint32_t cur_rate = ccctx->cur_rate;
 	int32_t prev_rtt_diff = ccctx->rtt_diff;
 
@@ -636,11 +650,26 @@ doca_pcc_dev_error_t timely_set_algo_params(uint32_t param_id_base,
 					    const uint32_t *new_param_values,
 					    uint32_t *params)
 {
-	if ((param_num > TIMELY_NUM_PARAMS) || (param_id_base >= TIMELY_NUM_PARAMS))
+	/* Reject writes that would run off the end of the param array. param_id_base
+	 * and param_num are bounded individually AND together: param_id_base+param_num
+	 * must stay within TIMELY_NUM_PARAMS, otherwise the copy below writes OOB. */
+	if ((param_id_base >= TIMELY_NUM_PARAMS) ||
+	    (param_num > TIMELY_NUM_PARAMS) ||
+	    (param_id_base + param_num > TIMELY_NUM_PARAMS))
 		return DOCA_PCC_DEV_STATUS_FAIL;
 
 	if ((new_param_values == NULL) || (params == NULL))
 		return DOCA_PCC_DEV_STATUS_FAIL;
+
+	/* Commit the validated values into the live param array. The framework does
+	 * NOT auto-copy: per the doca_pcc_dev_user_set_algo_params contract, returning
+	 * OK means "the callback set them" (FAIL means "nothing changed"). Without this
+	 * loop, the array returned by doca_pcc_dev_get_algo_params() keeps the init-time
+	 * defaults, so PPCC writes read back correctly (register image) yet never reach
+	 * the running algorithm. Range is already enforced by the min/max registered in
+	 * timely_init(), so no per-field re-validation is needed here. */
+	for (uint32_t i = 0; i < param_num; i++)
+		params[param_id_base + i] = new_param_values[i];
 
 	return DOCA_PCC_DEV_STATUS_OK;
 }

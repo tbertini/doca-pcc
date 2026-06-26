@@ -115,6 +115,16 @@ doca_pcc_dev_error_t doca_pcc_dev_user_set_algo_params(uint32_t port_num,
 {
 	doca_pcc_dev_error_t ret = DOCA_PCC_DEV_STATUS_OK;
 
+	/* DIAGNOSTIC (param-propagation debug): prove this callback actually fires on a
+	 * PPCC bulk_set, and with what (port, slot, base, num, first value). Unconditional
+	 * (control-plane event, rare) so it shows even on a non-DTIMELY_DEBUG build. If
+	 * this line never appears on a push, the firmware never invoked the DPA callback
+	 * (hypothesis B). If port_num != the port the algo's events carry (format 6 port=),
+	 * the copy targets the wrong (port,slot) array (hypothesis C). Format ID 13. */
+	doca_pcc_dev_trace_5(13, (uint64_t)port_num, (uint64_t)algo_slot,
+			     (uint64_t)param_id_base, (uint64_t)param_num,
+			     (uint64_t)(new_param_values ? new_param_values[0] : 0xFFFFFFFFu));
+
 	switch (algo_slot) {
 		case 0: {
 			uint32_t algo_idx = doca_pcc_dev_get_algo_index(port_num, algo_slot);
@@ -129,5 +139,16 @@ doca_pcc_dev_error_t doca_pcc_dev_user_set_algo_params(uint32_t port_num,
 		default:
 			break;
 		}
+
+	/* DIAGNOSTIC: read the buffer back AFTER the copy. If params[param_id_base] here
+	 * shows the pushed value but the algo's format-7 echo still shows the default,
+	 * the `params` pointer handed to this callback is a DIFFERENT buffer than
+	 * doca_pcc_dev_get_algo_params(port_num, 0) returns on the hot path (hypothesis
+	 * C: wrong port/slot). Format ID 8. */
+	doca_pcc_dev_trace_5(8, (uint64_t)port_num, (uint64_t)param_id_base,
+			     (uint64_t)((params != NULL) ? params[param_id_base] : 0xFFFFFFFFu),
+			     (uint64_t)ret, 0);
+	doca_pcc_dev_trace_flush();
+
 	return ret;
 }
