@@ -139,11 +139,12 @@ You will see two `algo_slot` values in the traces: **0** and **15**.
   `format 12 - timely rtt` events carry `algo_slot=15`.
 
 Both run TIMELY because `doca_pcc_dev_user_algo` **ignores the negotiated slot
-and always reads slot 0's params/counters** (`rp_timely_dev_main.c`):
+and always reads slot 0's params/counters** — and, for the same reason, pins to
+**port 0** rather than the event's port (`rp_timely_dev_main.c`):
 
 ```c
-uint32_t *param   = doca_pcc_dev_get_algo_params(port_num, 0);
-uint32_t *counter = doca_pcc_dev_get_counters(port_num, 0);
+uint32_t *param   = doca_pcc_dev_get_algo_params(0, 0);
+uint32_t *counter = doca_pcc_dev_get_counters(0, 0);
 ```
 
 This is deliberate: TIMELY is the only algorithm in the binary, so slot
@@ -152,6 +153,18 @@ vector pushed via PPCC `algo_slot=0` governs the slot-15 benchmark traffic**,
 and the 8 TIMELY counters read from slot 0 aggregate that traffic. If a future
 build runs several algorithms side-by-side, this dispatcher must instead read
 `attr->algo_slot` and map it to the matching algorithm.
+
+**Why port 0 (not the event port).** Param/counter arrays are per `(port, slot)`.
+The orchestrator pushes params and scrapes counters over mlxreg PPCC with
+`local_port=1`, which the firmware maps to **DPA `port_num=0`** (the
+`doca_pcc_dev_user_set_algo_params` callback fires with `port_num=0`). But RoCE
+traffic on `mlx5_0` reaches the algo on **DPA `port_num=1`** (format-6 events show
+`port=1`). Fetching params/counters for the *event* port would read an array the
+push never touched — so a pushed `t_high` would read back fine via `cmd_type=0xA`
+yet never reach the running algorithm, and counter increments would strand on a
+port the orchestrator never scrapes. Pinning to port 0 — the port the PPCC channel
+actually targets — keeps the algo, the param push, and the counter scrape on one
+array. Revisit if a build ever drives multiple physical ports.
 
 ## Trace format reference
 
