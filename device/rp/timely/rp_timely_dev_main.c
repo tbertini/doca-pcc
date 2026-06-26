@@ -30,9 +30,20 @@ void doca_pcc_dev_user_algo(doca_pcc_dev_algo_ctxt_t *algo_ctxt,
 {
 	uint32_t port_num = doca_pcc_dev_get_ev_attr(event).port_num;
 
-	/* Always use slot 0 params/counters for TIMELY, regardless of negotiated algo_slot. */
-	uint32_t *param = doca_pcc_dev_get_algo_params(port_num, 0);
-	uint32_t *counter = doca_pcc_dev_get_counters(port_num, 0);
+	/* Param/counter arrays are per (port, slot). The orchestrator pushes params and
+	 * scrapes counters over mlxreg PPCC with local_port=1, which the firmware maps to
+	 * DPA port_num 0 -- confirmed empirically: the set_algo_params callback fires with
+	 * port_num=0 (format-13 DIAG). But RoCE traffic on this BF3 (mlx5_0) reaches the
+	 * algo on port_num=1 (format-6 events show port=1). Fetching params/counters for
+	 * the *event* port (1) therefore reads a never-pushed array (defaults) and strands
+	 * counter increments on a port the orchestrator never reads -- which is exactly why
+	 * a pushed t_high=500000 read back fine via cmd_type=0xA yet the algo kept using
+	 * 80000. Pin to the port the PPCC channel actually targets (0) so a single-port-
+	 * per-host deployment sees its pushed params and gets its counters scraped. Mirrors
+	 * the "always slot 0" simplification; revisit if a build ever drives multiple ports. */
+	const uint32_t TIMELY_PPCC_PORT = 0;
+	uint32_t *param = doca_pcc_dev_get_algo_params(TIMELY_PPCC_PORT, 0);
+	uint32_t *counter = doca_pcc_dev_get_counters(TIMELY_PPCC_PORT, 0);
 
 	timely_algo(event, param, counter, algo_ctxt, results);
 
@@ -147,7 +158,9 @@ doca_pcc_dev_error_t doca_pcc_dev_user_set_algo_params(uint32_t port_num,
 	 * C: wrong port/slot). Format ID 8. */
 	doca_pcc_dev_trace_5(8, (uint64_t)port_num, (uint64_t)param_id_base,
 			     (uint64_t)((params != NULL) ? params[param_id_base] : 0xFFFFFFFFu),
-			     (uint64_t)ret, 0);
+			     (uint64_t)ret,
+			     (uint64_t)((params != NULL && (param_id_base + 1) < TIMELY_NUM_PARAMS)
+						? params[param_id_base + 1] : 0xFFFFFFFFu));
 	doca_pcc_dev_trace_flush();
 
 	return ret;
