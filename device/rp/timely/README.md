@@ -10,8 +10,7 @@ specifically Algorithm 1 in §4.3 with the default parameters from §6.
 |---|---|
 | `algo/timely.h` | Public API: `timely_init`, `timely_algo`, `timely_set_algo_params` |
 | `algo/timely_ctxt.h` | Per-flow state struct (cur_rate, prev_rtt, signed rtt_diff, HAI counter, RTT-probe abort machinery) |
-| `algo/timely_algo_params.h` | Compiled-in default `#define`s (T_low, T_high, δ, β, α, minRTT, HAI threshold, min rate) — every value either cites a paper section or is marked `FIXME:` if the paper is silent |
-| `algo/timely_params.h` | The PPCC **contract**: 10-param (9 tuning + 1 diagnostic `trace_on`) / 8-counter table (name, unit, default, min, max), shared between the DPA algorithm and the host-side `timely_params_dump`. Single source of truth for runtime overrides |
+| `algo/timely_params.h` | The PPCC **contract** AND the single source of truth for defaults: 10-param (9 tuning + 1 diagnostic `trace_on`) / 8-counter table (name, unit, default, min, max), shared between the DPA algorithm and the host-side `timely_params_dump` |
 | `algo/timely.c` | Algorithm 1 implementation (see [§Algorithm 1 mapping](#algorithm-1-mapping)) |
 | `rp_timely_dev_main.c` | DPA entry points (`doca_pcc_dev_user_algo`, `doca_pcc_dev_user_init`); slot-15 fallback bypass (see [§Slot 0 vs slot 15](#slot-0-vs-slot-15)) |
 
@@ -74,16 +73,16 @@ format 12 - timely rtt: new_rtt=600000 rtt_diff=2484 norm_grad=0 branch=GRAD_LE+
 
 ## Tuning parameters for your fabric
 
-The compiled-in defaults in `algo/timely_algo_params.h` are
-`MIN_RTT_NS=3800`, `T_LOW_NS=10000`, `T_HIGH_NS=80000`, `DELTA_FXP20=1049`,
-`BETA_FXP16=52429`, `ALPHA_FXP16=57344`. These were retuned for this cluster's
+The compiled-in defaults in the `timely_params[]` table in `algo/timely_params.h`
+are `min_rtt_ns=3800`, `t_low=10000`, `t_high=80000`, `delta=1049`,
+`beta=52429`, `alpha=57344`. These were retuned for this cluster's
 **100 Gbps BlueField-3 fabric with ~3.8 µs 1:1 base RTT** — they are *not* the
 paper's 10 Gbps / ~20 µs §6.1 values. On a different fabric you must retune:
 measure base RTT (e.g. minimum `ib_write_lat` or `ping`, approximating wire
 propagation delay), and scale δ with the NIC line rate (δ/line_rate is the
-dimensionless additive step). The two header values (`timely_algo_params.h`
-`#define`s and the `timely_params.h` contract defaults) are kept in sync — edit
-both, or rely on the PPCC runtime path below to override without recompiling.
+dimensionless additive step). `timely_params.h` is the single source of truth —
+edit the table there, or rely on the PPCC runtime path below to override without
+recompiling.
 
 ### Runtime override via PPCC (no recompile)
 
