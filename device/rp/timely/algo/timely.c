@@ -249,6 +249,21 @@ static inline int32_t timely_signed_fxp16_mult(int32_t a_fxp16, int32_t b)
 }
 
 /*
+ * Multiplicative decrease: rate ← rate · (1 - β·ratio_fxp16), all FXP16.
+ * Shared by the T_high and gradient>0 branches. The beta_term clamp is the
+ * saturation the gradient branch needs on large gradients; in the T_high branch
+ * beta_term ≤ β < 1 always, so it is a no-op there.
+ */
+static inline uint32_t timely_apply_md(uint32_t cur_rate, uint32_t beta, uint32_t ratio_fxp16)
+{
+	uint32_t beta_term = doca_pcc_dev_fxp_mult(beta, ratio_fxp16);
+	if (beta_term >= TIMELY_FXP16_ONE)
+		beta_term = TIMELY_FXP16_ONE - 1;
+	uint32_t factor_fxp16 = TIMELY_FXP16_ONE - beta_term;
+	return doca_pcc_dev_fxp_mult(factor_fxp16, cur_rate);
+}
+
+/*
  * Handle new flow initialization.
  *
  * Initialize cur_rate to line rate and request the first RTT probe so that
@@ -319,10 +334,11 @@ static inline void timely_handle_tx(doca_pcc_dev_event_t *event,
 			rtt_till_now = 0;
 			ccctx->rtt_req_to_rtt_sent += 1;
 		}
-		if (unlikely((rtt_till_now > ((uint32_t)TIMELY_ABORT_TIME_NS << ccctx->abort_cnt)) ||
+		uint32_t abort_threshold = (uint32_t)TIMELY_ABORT_TIME_NS << ccctx->abort_cnt;
+		if (unlikely((rtt_till_now > abort_threshold) ||
 			     (ccctx->rtt_req_to_rtt_sent > 2))) {
 			rtt_req = 1;
-			if (rtt_till_now > ((uint32_t)TIMELY_ABORT_TIME_NS << ccctx->abort_cnt))
+			if (rtt_till_now > abort_threshold)
 				ccctx->abort_cnt += 1;
 			ccctx->rtt_req_to_rtt_sent = 1;
 		}
@@ -411,12 +427,8 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 	/* T_high: multiplicative decrease, rate ← rate·(1 - β·(1 - T_high/new_rtt)).
 	 * Paper §4.3 decides on INSTANTANEOUS new_rtt here, not the smoothed value. */
 	if (new_rtt > t_high) {
-		uint32_t ratio_fxp16 = timely_t_high_over_rtt_fxp16(t_high, new_rtt);
-		uint32_t one_minus_ratio = TIMELY_FXP16_ONE - ratio_fxp16;
-		uint32_t beta_term = doca_pcc_dev_fxp_mult(beta, one_minus_ratio);
-		/* β · (1 - T_high/new_rtt) ≤ β < 1, so factor ≥ 1 - β > 0 */
-		uint32_t factor_fxp16 = TIMELY_FXP16_ONE - beta_term;
-		cur_rate = doca_pcc_dev_fxp_mult(factor_fxp16, cur_rate);
+		uint32_t one_minus_ratio = TIMELY_FXP16_ONE - timely_t_high_over_rtt_fxp16(t_high, new_rtt);
+		cur_rate = timely_apply_md(cur_rate, beta, one_minus_ratio);
 		ccctx->neg_gradient_count = 0;
 		branch_taken = TIMELY_BRANCH_T_HIGH;
 		if (counter != NULL) {
@@ -457,12 +469,7 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 		uint32_t grad_fxp16 = (grad_fxp16_signed >= TIMELY_FXP16_ONE)
 					      ? (uint32_t)(TIMELY_FXP16_ONE - 1)
 					      : (uint32_t)grad_fxp16_signed;
-
-		uint32_t beta_term = doca_pcc_dev_fxp_mult(beta, grad_fxp16);
-		if (beta_term >= TIMELY_FXP16_ONE)
-			beta_term = TIMELY_FXP16_ONE - 1;
-		uint32_t factor_fxp16 = TIMELY_FXP16_ONE - beta_term;
-		cur_rate = doca_pcc_dev_fxp_mult(factor_fxp16, cur_rate);
+		cur_rate = timely_apply_md(cur_rate, beta, grad_fxp16);
 		ccctx->neg_gradient_count = 0;
 		branch_taken = TIMELY_BRANCH_GRAD_GT;
 		if (counter != NULL)
