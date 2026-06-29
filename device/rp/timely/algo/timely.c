@@ -163,7 +163,8 @@ void timely_init(uint32_t algo_idx)
 					     param_desc[i].size, param_desc[i].addr);
 	}
 
-	/* Counters all register identically (max=UINT32_MAX, mask=2); only index + desc vary. */
+	/* Counters all register identically (max=UINT32_MAX, permissions=2, matching the
+	 * NVIDIA reference rtt_template); only index + desc vary. */
 	const struct { uint64_t addr; uint32_t size; } counter_desc[TIMELY_NUM_COUNTERS] = {
 		[TIMELY_C_EVENTS]           = {(uint64_t)timely_counter_events_desc,           sizeof(timely_counter_events_desc)},
 		[TIMELY_C_MD_GRADIENT]      = {(uint64_t)timely_counter_md_gradient_desc,      sizeof(timely_counter_md_gradient_desc)},
