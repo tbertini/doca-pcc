@@ -101,6 +101,18 @@ struct timely_param_desc {
  * fabric. FXP20 values assume a 100 Gbps line rate:
  *   N Mbps -> N*1e6 / 100e9 * (1<<20) = N*10.486 (rounded).
  */
+
+/* Paper-silent choices (the README "Known unknowns / FIXMEs"); revisit if retuning:
+ * FIXME: alpha=57344 (0.875 in FXP16) -- the paper names the EWMA weight but gives no value;
+ *   0.875 weights recent RTT samples heavily, matching TIMELY's fast gradient-reaction goal.
+ * FIXME: delta=1049 (FXP20) -- the paper gives delta as absolute bandwidth (10 Mbps); we encode
+ *   it as a line-rate fraction, 1049 ~= 100 Mbps on 100 Gbps (the paper's 10 Mbps ~= 105).
+ *   Re-tune with the NIC line rate.
+ * FIXME: min_rtt_ns=3800 -- the paper says "a fixed value known ahead of time" without a number;
+ *   measured BF3-to-BF3 1:1 ib_write_bw. Its magnitude scales the gradient-branch decrease.
+ * FIXME: min_rate=64 (1<<6 in FXP20) -- the paper defines no rate floor; matches DCQCN and keeps
+ *   the rate from collapsing to zero on a long decrease run.
+ */
 static const struct timely_param_desc timely_params[TIMELY_NUM_PARAMS] = {
 	[TIMELY_P_T_LOW_NS]        = {"t_low",         "ns",       10000,    1000,  200000},
 	[TIMELY_P_T_HIGH_NS]       = {"t_high",        "ns",       80000,   10000, 2000000},
