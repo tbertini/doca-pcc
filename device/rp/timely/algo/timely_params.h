@@ -39,10 +39,9 @@
  * conversion using the configured line rate. Time parameters are nanoseconds. Alpha
  * and beta are FXP16 (1<<16 = 1.0). HAI threshold is a raw count.
  *
- * Defaults are aligned with the pre-PPCC hardcoded values in timely_algo_params.h
- * so that a doca_pcc instance running without any param writes behaves identically
- * to the pre-Phase-1 build. The orchestrator (incast-bench) overrides these at
- * runtime via PPCC cmd_type=0x8/0xB when sweeping the parameter space.
+ * Defaults are the pre-PPCC measured-good values: a doca_pcc instance running
+ * without any param writes uses them. The orchestrator (incast-bench) overrides
+ * them at runtime via PPCC cmd_type=0x8/0xB when sweeping the parameter space.
  */
 
 /* TIMELY algorithm ID. Project convention: DCQCN=0xBFFE, rtt_template=0xBFFF. */
@@ -98,8 +97,8 @@ struct timely_param_desc {
 
 /* THE contract. Edit only here.
  *
- * Defaults match timely_algo_params.h (pre-PPCC measured-good values on a
- * 100 Gbps BlueField-3 fabric). FXP20 values assume a 100 Gbps line rate:
+ * Defaults are the pre-PPCC measured-good values on a 100 Gbps BlueField-3
+ * fabric. FXP20 values assume a 100 Gbps line rate:
  *   N Mbps -> N*1e6 / 100e9 * (1<<20) = N*10.486 (rounded).
  */
 static const struct timely_param_desc timely_params[TIMELY_NUM_PARAMS] = {
