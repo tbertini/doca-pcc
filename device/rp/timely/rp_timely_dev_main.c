@@ -139,6 +139,10 @@ doca_pcc_dev_error_t doca_pcc_dev_user_set_algo_params(uint32_t port_num,
 			break;
 		}
 		default:
+			/* A PPCC set targeting a slot other than 0 is a misroute, not a
+			 * success. Return FAIL so it surfaces instead of silently no-op'ing
+			 * (contract: OK means "parameters were set"). */
+			ret = DOCA_PCC_DEV_STATUS_FAIL;
 			break;
 		}
 	return ret;
