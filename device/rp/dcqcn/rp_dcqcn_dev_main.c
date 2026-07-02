@@ -25,25 +25,28 @@ void doca_pcc_dev_user_algo(doca_pcc_dev_algo_ctxt_t *algo_ctxt,
 			    const doca_pcc_dev_attr_t *attr,
 			    doca_pcc_dev_results_t *results) {
 
-	uint32_t port_num = doca_pcc_dev_get_ev_attr(event).port_num;
-
-	/* Always use slot 0 params/counters for DCQCN, regardless of negotiated algo_slot.
-	 * The NIC defaults to slot 15 (internal algo) when ECE negotiation doesn't select
-	 * a custom slot. Per NVIDIA docs, users may run a specific algorithm without
-	 * considering the algorithm negotiation. */
-	uint32_t *param = doca_pcc_dev_get_algo_params(port_num, 0);
-	uint32_t *counter = doca_pcc_dev_get_counters(port_num, 0);
+	/* Always slot 0 (DCQCN is the only algo, so ECE slot negotiation is moot) and
+	 * always port 0. The orchestrator pushes params / scrapes counters over mlxreg
+	 * PPCC local_port=1, which maps to DPA port 0, but mlx5_0 traffic reaches the algo
+	 * on port 1 -- fetching the event's port would read a never-pushed array and
+	 * strand counters where the scrape can't see them (HW-confirmed on timely). */
+	uint32_t *param = doca_pcc_dev_get_algo_params(0, 0);
+	uint32_t *counter = doca_pcc_dev_get_counters(0, 0);
 
 	dcqcn_algo(event, param, counter, algo_ctxt, results);
 
+	/* Per-event trace is hot-path (every TX); gate on DCQCN_DEBUG like the dcqcn.c
+	 * traces so a default build pays nothing. */
+#ifdef DCQCN_DEBUG
 	doca_pcc_dev_trace_5(PCC_TRACE_FMT_EVENT,
 			     (uint64_t)doca_pcc_dev_get_ev_attr(event).ev_type,
 			     (uint64_t)doca_pcc_dev_get_flowtag(event),
-			     (uint64_t)port_num,
+			     (uint64_t)doca_pcc_dev_get_ev_attr(event).port_num,
 			     (uint64_t)attr->algo_slot,
 			     (uint64_t)results->rate);
 
 	doca_pcc_dev_trace_flush();
+#endif
 }
 
 /*
@@ -112,6 +115,8 @@ doca_pcc_dev_error_t doca_pcc_dev_user_set_algo_params(uint32_t port_num,
 			break;
 		}
 		default:
+			/* A set targeting a non-zero slot is a misroute; fail loudly. */
+			ret = DOCA_PCC_DEV_STATUS_FAIL;
 			break;
 		}
 	return ret;

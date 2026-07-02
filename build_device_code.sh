@@ -91,7 +91,10 @@ then
         PCC_APP_DEVICE_ALGO_SRCS=`ls ${PCC_DEV_RP_DCQCN_DIR}/algo/*.c`
         PCC_DEVICE_SRC_FILES="${PCC_APP_DEVICE_SRCS} ${PCC_APP_DEVICE_ALGO_SRCS}"
         APP_INC_LIST="${DOCA_INC_LIST} -I${PCC_DEV_RP_DCQCN_DIR}/algo"
-        DCQCN_DEBUG_FLAG="-DDCQCN_DEBUG"
+        # Device tracing: default-off (was hardwired). DCQCN_DEBUG=1 enables format 6-10.
+        if [ "${DCQCN_DEBUG:-0}" = "1" ]; then
+                DCQCN_DEBUG_FLAG="-DDCQCN_DEBUG"
+        fi
         if [ ${AMALGAMATION_BUILD_MODE} = "true" ]; then
                 APP_INC_LIST="${APP_INC_LIST} -I${DOCA_PCC_DIR}/device/include/rp -I${DOCA_PCC_DIR}/device/adb_gen/"
         fi

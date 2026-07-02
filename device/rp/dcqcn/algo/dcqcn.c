@@ -94,7 +94,7 @@ typedef enum {
 } dcqcn_params_t;
 
 /* Counter indices */
-enum {
+typedef enum {
 	DCQCN_COUNTER_TX_EVENT = 0,   /* Number of TX events handled */
 	DCQCN_COUNTER_CNP_EVENT = 1,  /* Number of CNP events handled */
 	DCQCN_COUNTER_NACK_EVENT = 2, /* Number of NACK events handled */
@@ -148,10 +148,12 @@ void dcqcn_init(uint32_t algo_idx)
 				     1,
 				     sizeof(dcqcn_param_byte_counter_th_desc),
 				     (uint64_t)dcqcn_param_byte_counter_th_desc);
+	/* max=16: g_shift>16 makes 1<<(16-g_shift) a negative shift (UB) in
+	 * dcqcn_alpha_update_cnp. */
 	doca_pcc_dev_algo_init_param(algo_idx,
 				     param_num++,
 				     DCQCN_G_SHIFT,
-				     20,
+				     16,
 				     1,
 				     1,
 				     sizeof(dcqcn_param_g_shift_desc),
@@ -565,11 +567,20 @@ doca_pcc_dev_error_t dcqcn_set_algo_params(uint32_t param_id_base,
 					    const uint32_t *new_param_values,
 					    uint32_t *params)
 {
-	if ((param_num > DCQCN_PARAM_NUM) || (param_id_base >= DCQCN_PARAM_NUM))
+	/* Bound base and num individually AND together, else the copy below writes OOB. */
+	if ((param_id_base >= DCQCN_PARAM_NUM) ||
+	    (param_num > DCQCN_PARAM_NUM) ||
+	    (param_id_base + param_num > DCQCN_PARAM_NUM))
 		return DOCA_PCC_DEV_STATUS_FAIL;
 
 	if ((new_param_values == NULL) || (params == NULL))
 		return DOCA_PCC_DEV_STATUS_FAIL;
+
+	/* Copy the validated values into the live array -- the framework does not
+	 * auto-copy (contract: OK means the callback set them). Without this, PPCC writes
+	 * read back via cmd_type=0xA yet the algo keeps its init-time defaults. */
+	for (uint32_t i = 0; i < param_num; i++)
+		params[param_id_base + i] = new_param_values[i];
 
 	return DOCA_PCC_DEV_STATUS_OK;
 }
