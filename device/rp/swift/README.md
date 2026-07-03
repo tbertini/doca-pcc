@@ -43,7 +43,7 @@ ninja -C /tmp/build
 /tmp/build/pcc/doca_pcc --rp-swift -d mlx5_0 -l 70
 ```
 
-Per-event traces (format 6/15/16/17/18) are **compiled in but quiet by default**. Turn
+Per-event traces (formats 6 and 15–19) are **compiled in but quiet by default**. Turn
 them on at runtime — no rebuild — by setting the `trace_on` PPCC param to 1 (back to 0
 to silence). To force them on from boot (catch the earliest events), build with
 `SWIFT_DEBUG=1`:
@@ -115,7 +115,8 @@ Both terms are *durations* each measured within a single clock, so subtracting t
 processing time — the largest non-fabric term. The residual local NIC-Rx delay stays in
 `fabric_rtt`; that is endpoint signal, deferred to `ecwnd` (phase 2). If the NP does not
 populate `resp_send`/`req_recv` on BF3, the code falls back to `fabric_rtt = total_rtt`
-(== what TIMELY uses) — verify via the `np_turn` field of format 16.
+(== what TIMELY uses) — verify via the `np_turn` field of format 16, or directly via
+format 19, which dumps the four raw timestamps plus a `populated` bitmap per event.
 
 **Serialization** is *not* subtracted: per the design decision (and matching TIMELY,
 which subtracts none and folds everything into its empirically-retuned thresholds) it is
@@ -164,9 +165,10 @@ instead dispatch on `attr->algo_slot`.)
 | 16 | Swift `rtt` (delay side) | `fabric_rtt` (ns); `np_turn` (ns); `delay_minus_target` (**signed** ns); `target` (ns); `branch` (table below) |
 | 17 | Swift `rtt` (window side) | `cwnd_prev`, `cwnd` (FXP16 pkts); `rate` (FXP20); `fs_term` (ns, = target − base); `can_decr` |
 | 18 | Swift `loss` (NACK) | `ev_type`; `retx_cnt`; `cwnd` (FXP16); `rate` (FXP20); `reset` (1 = collapsed to min_cwnd) |
+| 19 | Swift `rtt` raw timestamps | `t1_req_send`, `t2_req_recv`, `t4_resp_send`, `t6_arrival` (raw ns, wrapping u32); `populated` (bit0 = t2≠0, bit1 = t4≠0; **3 = receiver stamped both**, else `fabric_rtt` fell back to `total_rtt`) |
 
 Formats 16 and 17 are two halves of one RTT decision (split because `trace_5` carries
-only five args); join them by order.
+only five args); join them by order. Format 19 precedes them for the same RTT event.
 
 ### `ev_type`
 
@@ -240,7 +242,7 @@ Highlights:
 - Independent sibling of the `timely` (`0xBFFD`) and `dcqcn` (`0xBFFE`) branches — no
   shared algorithm code (disjoint `device/rp/*` trees). The build/host glue is additive
   so all three can merge into one runtime-selectable build; trace format IDs 6–14 mirror
-  the timely/dcqcn reservations so the merge is conflict-free, with 15–18 owned by Swift.
+  the timely/dcqcn reservations so the merge is conflict-free, with 15–19 owned by Swift.
 - The default app in `host/pcc.c` is **unchanged from main** — Swift is selected at
   runtime via `--rp-swift` / `-rp-sw`.
 - One ACTIVE PCC process per BlueField (firmware HA): you cannot run Swift and another

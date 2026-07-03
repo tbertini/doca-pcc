@@ -37,7 +37,7 @@ ninja -C /tmp/build
 |---|---|---|---|
 | `timely` | TIMELY (RTT gradient) | 0xBFFD | 11–14 (13 retired) |
 | `dcqcn` | DCQCN (ECN/CNP) | 0xBFFE | 7–10 |
-| `swift` | Swift (absolute delay, windowed) | 0xBFFC | 15–18 |
+| `swift` | Swift (absolute delay, windowed) | 0xBFFC | 15–19 |
 | all | templates (`rtt_template` = 0xBFFF) | — | 6 = shared per-event summary |
 
 Trace-format IDs and algo_ids are a cross-branch registry — never reuse another branch's. Host-side helper scripts (`tools/mlxreg-pretty.py`, trace prettifiers) live on the `timely` branch. `timely-runtime-trace-toggle` was the structural template for the swift branch.

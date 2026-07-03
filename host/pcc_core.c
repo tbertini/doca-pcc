@@ -55,12 +55,15 @@ static char *trace_message_formats[] = {
 	"format 12 - timely rtt: new_rtt=%lu rtt_diff=%ld norm_grad=%ld branch=0x%lx new_rate=%lu\n",
 	"format 13 - retired (clamp folded into format 12 branch bit 0x80)\n",
 	"format 14 - timely hai: neg_count=%lu N=%lu new_rate=%lu delta=%lu arg5=%lu\n",
-	/* Format IDs 15-18 owned by Swift (sender RP); per-event summaries reuse format 6. */
+	/* Format IDs 15-19 owned by Swift (sender RP); per-event summaries reuse format 6. */
 	"format 15 - swift new_flow: init_cwnd=%lu rate=%lu ts=%lu line_mbps=%lu bdp_fxp16=%lu\n",
 	/* format 16 branch: low nibble AI(0)/MD(1)/MD_BLOCKED(2); 0x80=clamped 0x40=cwnd<1 0x20=fs_sat */
 	"format 16 - swift rtt: fabric_rtt=%lu np_turn=%lu delay_minus_target=%ld target=%lu branch=0x%lx\n",
 	"format 17 - swift win: cwnd_prev=%lu cwnd=%lu rate=%lu fs_term=%lu can_decr=%lu\n",
 	"format 18 - swift loss: ev_type=%lu retx_cnt=%lu cwnd=%lu rate=%lu reset=%lu\n",
+	/* format 19 populated: bit0 = t2 (req_recv) nonzero, bit1 = t4 (resp_send) nonzero;
+	 * 3 = receiver stamps both -> np_turn genuine, else fabric_rtt == total_rtt. */
+	"format 19 - swift rtt_ts: t1_req_send=%lu t2_req_recv=%lu t4_resp_send=%lu t6_arrival=%lu populated=%lu\n",
 	NULL};
 
 
