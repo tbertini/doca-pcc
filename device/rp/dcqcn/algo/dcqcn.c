@@ -71,16 +71,13 @@ static inline uint32_t dcqcn_diff_with_wrap32(uint32_t greater_num, uint32_t sma
 	return greater_num - smaller_num;
 }
 
-/* FIXME: paper does not define a maximum number of alpha decay catch-up iterations.
- * We bound the loop at 32 to prevent unbounded execution on the DPA.
- * After 32 decays with g=1/256, α is reduced by factor (255/256)^32 ≈ 0.88,
- * which is still significant. For very long idle periods (n >> 32), we set α = 0. */
+/* Bound on alpha-decay catch-up iterations per event (keeps the loop finite on the
+ * DPA). 32 decays at g=1/256 only reduce α by (255/256)^32 ≈ 0.88, so a gap longer
+ * than the bound means a long-idle flow: α snaps to 0 instead of iterating. */
 #define DCQCN_MAX_ALPHA_CATCHUP (32)
 
-/* Maximum number of timer catch-up steps per TX event */
 #define DCQCN_MAX_TIMER_CATCHUP (8)
 
-/* Configurable parameter indices */
 typedef enum {
 	DCQCN_PARAM_TIMER_PERIOD = 0,	  /* Timer period T in nanoseconds */
 	DCQCN_PARAM_BYTE_COUNTER_TH = 1, /* Byte counter threshold B in bytes */
@@ -93,15 +90,13 @@ typedef enum {
 	DCQCN_PARAM_NUM		  /* Total number of configurable parameters */
 } dcqcn_params_t;
 
-/* Counter indices */
 typedef enum {
-	DCQCN_COUNTER_TX_EVENT = 0,   /* Number of TX events handled */
-	DCQCN_COUNTER_CNP_EVENT = 1,  /* Number of CNP events handled */
-	DCQCN_COUNTER_NACK_EVENT = 2, /* Number of NACK events handled */
-	DCQCN_COUNTER_NUM	      /* Total number of counters */
+	DCQCN_COUNTER_TX_EVENT = 0,
+	DCQCN_COUNTER_CNP_EVENT = 1,
+	DCQCN_COUNTER_NACK_EVENT = 2,
+	DCQCN_COUNTER_NUM
 } dcqcn_counter_t;
 
-/* Description strings */
 const volatile char dcqcn_desc[] = "DCQCN v1.0 (Zhu et al. SIGCOMM 2015)";
 static const volatile char dcqcn_param_timer_period_desc[] = "TIMER_PERIOD, rate increase timer period in ns";
 static const volatile char dcqcn_param_byte_counter_th_desc[] = "BYTE_COUNTER_TH, byte counter threshold in bytes";
@@ -148,8 +143,6 @@ void dcqcn_init(uint32_t algo_idx)
 				     1,
 				     sizeof(dcqcn_param_byte_counter_th_desc),
 				     (uint64_t)dcqcn_param_byte_counter_th_desc);
-	/* max=16: g_shift>16 makes 1<<(16-g_shift) a negative shift (UB) in
-	 * dcqcn_alpha_update_cnp. */
 	doca_pcc_dev_algo_init_param(algo_idx,
 				     param_num++,
 				     DCQCN_G_SHIFT,
@@ -361,8 +354,6 @@ static inline void dcqcn_handle_cnp(doca_pcc_dev_event_t *event,
 		uint32_t n_alpha = alpha_elapsed / timer_period;
 
 		if (n_alpha > DCQCN_MAX_ALPHA_CATCHUP) {
-			/* FIXME: paper does not define behavior for very long idle periods.
-			 * After many timer periods without CNP, α should be near 0. */
 			alpha = 0;
 		} else {
 			for (uint32_t i = 0; i < n_alpha; i++)
@@ -392,7 +383,6 @@ static inline void dcqcn_handle_cnp(doca_pcc_dev_event_t *event,
 	ccctx->last_alpha_ts = timestamp;
 	ccctx->bytes_accumulated = 0;
 
-	/* Enforce minimum rate */
 	if (cur_rate < param[DCQCN_PARAM_MIN_RATE])
 		cur_rate = param[DCQCN_PARAM_MIN_RATE];
 
@@ -413,9 +403,9 @@ static inline void dcqcn_handle_cnp(doca_pcc_dev_event_t *event,
  *   2. Rate increase timer (Figure 7): increment T, increase rate every timer_period ns
  *   3. Byte counter (Figure 7): increment BC, increase rate every B bytes sent
  *
- * FIXME: paper assumes hardware timers that fire asynchronously.
- * In the DOCA PCC event-driven model, we check timers on TX events.
- * For active flows this is equivalent; for idle flows, catch-up is applied.
+ * The paper assumes NIC hardware timers that fire asynchronously; in DOCA's
+ * event-driven model we advance them on TX events instead — equivalent for active
+ * flows, with bounded catch-up covering idle gaps.
  */
 static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 				    uint32_t *param,
@@ -436,8 +426,6 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 		uint32_t n_alpha = alpha_elapsed / timer_period;
 
 		if (n_alpha > DCQCN_MAX_ALPHA_CATCHUP) {
-			/* FIXME: paper does not define behavior for very long idle periods.
-			 * After many timer periods without CNP, α converges to 0. */
 			alpha = 0;
 			ccctx->last_alpha_ts = timestamp;
 		} else {
@@ -454,8 +442,7 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 	if (timer_period > 0 && timer_elapsed >= timer_period) {
 		uint32_t n_timer = timer_elapsed / timer_period;
 
-		/* FIXME: paper does not define behavior when multiple timer periods elapse
-		 * between events. We cap catch-up to avoid rate jumps after idle periods. */
+		/* Cap catch-up so a long idle gap can't compound into a rate jump. */
 		if (n_timer > DCQCN_MAX_TIMER_CATCHUP)
 			n_timer = DCQCN_MAX_TIMER_CATCHUP;
 
@@ -467,10 +454,8 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 	}
 
 	/* --- Byte Counter (Figure 7: ByteCounter expires → BC++; rate increase) ---
-	 *
-	 * FIXME: paper defines B in bytes. The DOCA PCC TX event provides per-flow
-	 * cumulative byte counts via sent_32bytes (in units of 32 bytes, 16-bit wrapping).
-	 * We track the delta and accumulate actual bytes. */
+	 * B is in bytes; the TX event exposes a cumulative sent_32bytes counter
+	 * (32-byte units, 16-bit wrapping), so accumulate the wrapped delta * 32. */
 	doca_pcc_dev_roce_tx_cntrs_t tx_cntrs = doca_pcc_dev_get_roce_tx_cntrs(event);
 	uint16_t cur_sent_32bytes = tx_cntrs.sent_32bytes;
 	uint16_t delta_32bytes = cur_sent_32bytes - ccctx->last_sent_32bytes; /* 16-bit wrap is fine */
@@ -484,7 +469,6 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 		cur_rate = dcqcn_rate_increase(ccctx, cur_rate, param);
 	}
 
-	/* Clamp rate to [MIN_RATE, MAX_RATE] */
 	if (cur_rate > DOCA_PCC_DEV_MAX_RATE)
 		cur_rate = DOCA_PCC_DEV_MAX_RATE;
 	if (cur_rate < param[DCQCN_PARAM_MIN_RATE])
@@ -500,9 +484,8 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 /*
  * Handle NACK event.
  *
- * FIXME: paper does not define NACK handling for DCQCN. NACKs indicate packet loss
- * in RoCEv2, which should be rare with PFC enabled. We apply a conservative 50%
- * rate cut and reset the recovery state, similar to the rtt_template approach.
+ * The paper does not define NACK handling (it assumes a PFC fabric where loss is
+ * rare). We apply a conservative 50% rate cut and reset the recovery state.
  */
 static inline void dcqcn_handle_nack(doca_pcc_dev_event_t *event,
 				      uint32_t *param,
@@ -512,7 +495,6 @@ static inline void dcqcn_handle_nack(doca_pcc_dev_event_t *event,
 	uint32_t timestamp = doca_pcc_dev_get_timestamp(event);
 	uint32_t cur_rate = ccctx->cur_rate;
 
-	/* 50% rate cut */
 	cur_rate = cur_rate >> 1;
 
 	if (cur_rate < param[DCQCN_PARAM_MIN_RATE])

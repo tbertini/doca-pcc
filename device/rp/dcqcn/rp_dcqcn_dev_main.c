@@ -13,7 +13,8 @@
  * Main entry point of CC algorithm
  * This function starts the algorithm code of a single event.
  * It receives the flow context data, the event info and outputs the new rate parameters.
- * The function dispatches to DCQCN for slot 0 and to the default internal algo for other slots.
+ * Every event is dispatched to DCQCN with slot-0/port-0 params, regardless of the
+ * negotiated algo_slot (see comment below).
  *
  * @algo_ctxt [in]: A pointer to a flow context data retrieved by libpcc.
  * @event [in]: A pointer to an event data structure to be passed to extractor functions
@@ -63,11 +64,9 @@ void doca_pcc_dev_user_init(uint32_t *disable_event_bitmask) {
 
 	uint32_t algo_idx = 0, algo_slot = 0, algo_en = 1;
 
-	/* Initialize DCQCN algorithm with algo_idx=0 */
 	dcqcn_init(algo_idx);
 
 	for (int port_num = 0; port_num < DOCA_PCC_DEV_MAX_NUM_PORTS; ++port_num) {
-		/* Slot 0 will use algo_idx 0 (DCQCN), default enabled */
 		doca_pcc_dev_init_algo_slot(port_num, algo_slot, algo_idx, algo_en);
 		doca_pcc_dev_trace_5(0, port_num, algo_idx, algo_slot, algo_en, DOCA_PCC_DEV_EVNT_ROCE_ACK_MASK);
 	}
