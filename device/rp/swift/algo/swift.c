@@ -586,6 +586,11 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 	results->rtt_req = 1; /* request next RTT probe */
 	ccctx->rtt_req_to_rtt_sent = 1;
 
+	/* Raw probe timestamps (format 19): answers "does the responder populate t2/t4 at
+	 * all?" (FIXME above). populated: bit0 = t2 nonzero, bit1 = t4 nonzero; 3 means
+	 * np_turnaround is genuine, anything else means fabric_rtt fell back to total_rtt. */
+	SWIFT_TRACE(param, SWIFT_TRACE_FMT_RTT_TS, req_send, req_recv, resp_send, arrival,
+		    (uint64_t)(req_recv != 0) | ((uint64_t)(resp_send != 0) << 1));
 	/* Two-line decision trace (joined by order): delay side then window side. */
 	/* delay_minus_target is signed (negative when the queue is draining). Pass it as a
 	 * 64-bit signed value so the (uint64_t) trace cast sign-extends and the host's %ld
