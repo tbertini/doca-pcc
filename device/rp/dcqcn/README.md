@@ -185,20 +185,19 @@ On rate-increase (Timer T or ByteCtr BC):
 wraparound. Idle catch-up on the timers is bounded (`DCQCN_MAX_ALPHA_CATCHUP`,
 `DCQCN_MAX_TIMER_CATCHUP`) to avoid unbounded loops / rate jumps after idle.
 
-## Known unknowns / FIXMEs
+## Paper-silent design choices
 
-The paper is silent on several points; each choice is flagged in the source:
+The paper leaves several points undefined; the decisions made here are:
 
-```bash
-grep -rn "FIXME:" device/rp/dcqcn/algo/ device/rp/dcqcn/rp_dcqcn_dev_main.c
-```
-
-Highlights: NACK handling (paper assumes a PFC fabric where NACKs are rare — we do
-a 50% cut); mapping the paper's hardware timers onto DOCA's event-driven model
-(timers are advanced on TX events with bounded catch-up); long-idle α behaviour
-(clamped to 0 after `DCQCN_MAX_ALPHA_CATCHUP` periods); byte-counter units (paper
-uses bytes; the TX event exposes cumulative 32-byte counts, tracked as a wrapping
-delta).
+- **NACK handling**: paper assumes a PFC fabric where NACKs are rare — we apply a
+  conservative 50% cut and reset the recovery state.
+- **Hardware timers**: the paper's asynchronous NIC timers are advanced on TX
+  events in DOCA's event-driven model (equivalent for active flows), with bounded
+  catch-up after idle gaps.
+- **Long-idle α**: clamped to 0 past `DCQCN_MAX_ALPHA_CATCHUP` elapsed periods
+  (32 decays at g=1/256 would only reach ≈0.88·α anyway).
+- **Byte-counter units**: paper defines B in bytes; the TX event exposes a
+  cumulative 32-byte-unit counter (16-bit wrapping), tracked as a wrapping delta.
 
 ## Hardware / branch context
 

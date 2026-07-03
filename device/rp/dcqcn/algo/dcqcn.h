@@ -61,7 +61,9 @@ void dcqcn_init(uint32_t algo_idx);
  * @param_num [in]: number of all parameters that were changed
  * @new_param_values [in]: pointer to an array which holds param_num number of new values for parameters
  * @params [in]: pointer to an array which holds beginning of the current parameters to be changed
- * @return: DOCA_PCC_DEV_STATUS_FAIL if input parameters (one or more) are not legal.
+ * @return: DOCA_PCC_DEV_STATUS_OK if the values were validated and written into params
+ * (the framework does not auto-copy); DOCA_PCC_DEV_STATUS_FAIL if input parameters
+ * (one or more) are not legal — nothing is changed.
  */
 doca_pcc_dev_error_t dcqcn_set_algo_params(uint32_t param_id_base,
 					    uint32_t param_num,
