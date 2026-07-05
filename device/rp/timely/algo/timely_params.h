@@ -39,10 +39,9 @@
  * conversion using the configured line rate. Time parameters are nanoseconds. Alpha
  * and beta are FXP16 (1<<16 = 1.0). HAI threshold is a raw count.
  *
- * Defaults are aligned with the pre-PPCC hardcoded values in timely_algo_params.h
- * so that a doca_pcc instance running without any param writes behaves identically
- * to the pre-Phase-1 build. The orchestrator (incast-bench) overrides these at
- * runtime via PPCC cmd_type=0x8/0xB when sweeping the parameter space.
+ * Defaults are the pre-PPCC measured-good values: a doca_pcc instance running
+ * without any param writes uses them. The orchestrator (incast-bench) overrides
+ * them at runtime via PPCC cmd_type=0x8/0xB when sweeping the parameter space.
  */
 
 /* TIMELY algorithm ID. Project convention: DCQCN=0xBFFE, rtt_template=0xBFFF. */
@@ -98,9 +97,21 @@ struct timely_param_desc {
 
 /* THE contract. Edit only here.
  *
- * Defaults match timely_algo_params.h (pre-PPCC measured-good values on a
- * 100 Gbps BlueField-3 fabric). FXP20 values assume a 100 Gbps line rate:
+ * Defaults are the pre-PPCC measured-good values on a 100 Gbps BlueField-3
+ * fabric. FXP20 values assume a 100 Gbps line rate:
  *   N Mbps -> N*1e6 / 100e9 * (1<<20) = N*10.486 (rounded).
+ */
+
+/* Paper-silent choices (the README "Known unknowns / FIXMEs"); revisit if retuning:
+ * FIXME: alpha=57344 (0.875 in FXP16) -- the paper names the EWMA weight but gives no value;
+ *   0.875 weights recent RTT samples heavily, matching TIMELY's fast gradient-reaction goal.
+ * FIXME: delta=1049 (FXP20) -- the paper gives delta as absolute bandwidth (10 Mbps); we encode
+ *   it as a line-rate fraction, 1049 ~= 100 Mbps on 100 Gbps (the paper's 10 Mbps ~= 105).
+ *   Re-tune with the NIC line rate.
+ * FIXME: min_rtt_ns=3800 -- the paper says "a fixed value known ahead of time" without a number;
+ *   measured BF3-to-BF3 1:1 ib_write_bw. Its magnitude scales the gradient-branch decrease.
+ * FIXME: min_rate=64 (1<<6 in FXP20) -- the paper defines no rate floor; matches DCQCN and keeps
+ *   the rate from collapsing to zero on a long decrease run.
  */
 static const struct timely_param_desc timely_params[TIMELY_NUM_PARAMS] = {
 	[TIMELY_P_T_LOW_NS]        = {"t_low",         "ns",       10000,    1000,  200000},
