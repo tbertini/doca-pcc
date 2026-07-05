@@ -144,6 +144,14 @@ orchestrator pushes a new vector between runs without rebuilding the DPA. The Ma
 counters via `cmd_type=0xC`/`0xD`. The diagnostic `trace_on` toggle (last param index)
 rides the same channel; sweeps should leave it at 0.
 
+**Target `local_port=1`, not `mlx5_0`'s data port:** per [§ Slot 0 vs slot
+15](#slot-0-vs-slot-15) below, the device dispatcher pins params/counters to DPA
+`port_num=0` / `algo_slot=0` regardless of where traffic actually lands, so
+`mlxreg ... local_port=1 ...` (which the firmware maps to DPA port 0) is the address
+that reaches the running algorithm — pushing to any other `local_port` silently no-ops
+(read-back via `cmd_type=0xA` looks fine; the algorithm never sees it). A set targeting
+`algo_slot != 0` now returns `DOCA_PCC_DEV_STATUS_FAIL` rather than silently no-op'ing.
+
 ## Slot 0 vs slot 15
 
 `doca_pcc_dev_user_algo` **ignores the negotiated `algo_slot` and always reads slot 0's
