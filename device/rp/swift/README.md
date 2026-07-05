@@ -153,6 +153,18 @@ consequence: a param vector pushed via PPCC `algo_slot=0` governs the slot-15 be
 traffic, and the slot-0 counters aggregate it. (A future multi-algorithm binary must
 instead dispatch on `attr->algo_slot`.)
 
+For the same reason the dispatcher pins to **port 0** rather than the event's port
+(`rp_swift_dev_main.c`). Param/counter arrays are per `(port, slot)`: the orchestrator
+pushes params and scrapes counters over mlxreg PPCC with `local_port=1`, which the
+firmware maps to **DPA `port_num=0`** (the `doca_pcc_dev_user_set_algo_params` callback
+fires with `port_num=0`), but RoCE traffic on `mlx5_0` reaches the algo on **DPA
+`port_num=1`** (format-6 events show `port=1`). Fetching params/counters for the *event*
+port would read an array the push never touched — a pushed param would read back fine via
+`cmd_type=0xA` yet never reach the running algorithm, and counter increments would strand
+on a port the orchestrator never scrapes (root-caused on TIMELY, confirmed on BF3
+hardware). Pinning to port 0 keeps the algo, the param push, and the counter scrape on
+one array. Revisit if a build ever drives multiple physical ports.
+
 ## Trace format reference
 
 | ID | Source | Field meanings |

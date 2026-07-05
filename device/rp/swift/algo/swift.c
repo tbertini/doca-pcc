@@ -708,15 +708,28 @@ doca_pcc_dev_error_t swift_set_algo_params(uint32_t param_id_base,
 					   const uint32_t *new_param_values,
 					   uint32_t *params)
 {
-	if ((param_num > SWIFT_NUM_PARAMS) || (param_id_base >= SWIFT_NUM_PARAMS))
+	/* Reject writes that would run off the end of the param array. param_id_base
+	 * and param_num are bounded individually AND together: param_id_base+param_num
+	 * must stay within SWIFT_NUM_PARAMS, otherwise the copy below writes OOB. */
+	if ((param_id_base >= SWIFT_NUM_PARAMS) ||
+	    (param_num > SWIFT_NUM_PARAMS) ||
+	    (param_id_base + param_num > SWIFT_NUM_PARAMS))
 		return DOCA_PCC_DEV_STATUS_FAIL;
 
 	if ((new_param_values == NULL) || (params == NULL))
 		return DOCA_PCC_DEV_STATUS_FAIL;
 
-	/* The framework already enforces the per-param [min,max] registered in swift_init.
-	 * The fs_min_cwnd < fs_max_cwnd ordering invariant is additionally guarded on-device
-	 * in swift_flow_scaled_target (denom <= 0 -> fs_term = 0), so a transient bad pair
-	 * degrades gracefully rather than dividing by zero. */
+	/* Commit the validated values into the live param array. The framework does
+	 * NOT auto-copy: per the doca_pcc_dev_user_set_algo_params contract, returning
+	 * OK means "the callback set them" (FAIL means "nothing changed"). Without this
+	 * loop, the array returned by doca_pcc_dev_get_algo_params() keeps the init-time
+	 * defaults, so PPCC writes read back correctly (register image) yet never reach
+	 * the running algorithm. Range is already enforced by the min/max registered in
+	 * swift_init(); the fs_min_cwnd < fs_max_cwnd ordering invariant is additionally
+	 * guarded on-device in swift_flow_scaled_target (denom <= 0 -> fs_term = 0), so
+	 * a transient bad pair degrades gracefully rather than dividing by zero. */
+	for (uint32_t i = 0; i < param_num; i++)
+		params[param_id_base + i] = new_param_values[i];
+
 	return DOCA_PCC_DEV_STATUS_OK;
 }
