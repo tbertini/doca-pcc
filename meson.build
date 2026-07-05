@@ -97,3 +97,16 @@ doca_pcc_test = executable(DOCA_PREFIX + APP_NAME,
 	dependencies : [app_dependencies, pcc_rp_rtt_template_app, pcc_rp_switch_telemetry_app, pcc_rp_dcqcn_app, pcc_np_nic_telemetry_app, pcc_np_switch_telemetry_app],
 	install: install_apps
 )
+
+# Standalone host-side tool: emits the DCQCN PPCC parameter/counter contract as JSON on
+# stdout. incast-bench invokes this on the sender host at session startup to learn the
+# wire-format contract (algo ID, parameter indices, units, defaults, counter indices),
+# avoiding contract drift between the DPA's compiled-in values and the orchestrator's
+# encoder. No DOCA dependencies.
+dcqcn_params_dump = executable('dcqcn_params_dump',
+	files(['host/dcqcn_params_dump.c']),
+	c_args : base_c_args,
+	include_directories: [include_directories('device/rp/dcqcn/algo')],
+	install_dir : app_install_dir,
+	install: install_apps
+)

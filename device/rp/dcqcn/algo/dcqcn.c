@@ -38,6 +38,7 @@
 
 #include "utils.h"
 #include "dcqcn_ctxt.h"
+#include "dcqcn_params.h"
 #include "dcqcn_algo_params.h"
 #include "dcqcn.h"
 
@@ -78,25 +79,11 @@ static inline uint32_t dcqcn_diff_with_wrap32(uint32_t greater_num, uint32_t sma
 
 #define DCQCN_MAX_TIMER_CATCHUP (8)
 
-typedef enum {
-	DCQCN_PARAM_TIMER_PERIOD = 0,	  /* Timer period T in nanoseconds */
-	DCQCN_PARAM_BYTE_COUNTER_TH = 1, /* Byte counter threshold B in bytes */
-	DCQCN_PARAM_G_SHIFT = 2,	  /* g = 1/(1 << G_SHIFT) */
-	DCQCN_PARAM_F_THRESHOLD = 3,	  /* Fast recovery threshold F */
-	DCQCN_PARAM_R_AI = 4,		  /* Additive increase step R_AI (FXP20) */
-	DCQCN_PARAM_R_HAI = 5,		  /* Hyper additive increase step R_HAI (FXP20) */
-	DCQCN_PARAM_NEW_FLOW_RATE = 6,	  /* New flow initial rate (FXP20) */
-	DCQCN_PARAM_MIN_RATE = 7,	  /* Minimum rate floor (FXP20) */
-	DCQCN_PARAM_NUM		  /* Total number of configurable parameters */
-} dcqcn_params_t;
-
-typedef enum {
-	DCQCN_COUNTER_TX_EVENT = 0,
-	DCQCN_COUNTER_CNP_EVENT = 1,
-	DCQCN_COUNTER_NACK_EVENT = 2,
-	DCQCN_COUNTER_NUM
-} dcqcn_counter_t;
-
+/* Param/counter indices and default/min/max values come from dcqcn_params.h (the
+ * PPCC contract; single source of truth). Description strings are kept const
+ * volatile to prevent dead-code elimination by LTO (they are read out-of-band by the
+ * host, never dereferenced on-device, so without volatile the contract strings
+ * vanish). */
 const volatile char dcqcn_desc[] = "DCQCN v1.0 (Zhu et al. SIGCOMM 2015)";
 static const volatile char dcqcn_param_timer_period_desc[] = "TIMER_PERIOD, rate increase timer period in ns";
 static const volatile char dcqcn_param_byte_counter_th_desc[] = "BYTE_COUNTER_TH, byte counter threshold in bytes";
@@ -114,102 +101,39 @@ void dcqcn_init(uint32_t algo_idx)
 {
 	struct doca_pcc_dev_algo_meta_data algo_def = {0};
 
-	algo_def.algo_id = 0xBFFE;
+	algo_def.algo_id = DCQCN_ALGO_ID;
 	algo_def.algo_major_version = 0x01;
 	algo_def.algo_minor_version = 0x00;
 	algo_def.algo_desc_size = sizeof(dcqcn_desc);
 	algo_def.algo_desc_addr = (uint64_t)dcqcn_desc;
 
-	uint32_t total_param_num = DCQCN_PARAM_NUM;
-	uint32_t total_counter_num = DCQCN_COUNTER_NUM;
-	uint32_t param_num = 0;
-	uint32_t counter_num = 0;
+	doca_pcc_dev_algo_init_metadata(algo_idx, &algo_def, DCQCN_PARAM_NUM, DCQCN_COUNTER_NUM);
 
-	doca_pcc_dev_algo_init_metadata(algo_idx, &algo_def, total_param_num, total_counter_num);
+	/* Register every parameter from the contract table. min/max/def come from
+	 * dcqcn_params[]; permissions=1 (updatable). Passing the table's min (not a
+	 * hardcoded 1) keeps this value-identical with the pre-contract calls, all of
+	 * which happened to pass MIN=1 -- see dcqcn_params.h for the transcription. */
+#define DCQCN_REG_PARAM(idx, desc) \
+	doca_pcc_dev_algo_init_param(algo_idx, (idx), dcqcn_params[(idx)].def, dcqcn_params[(idx)].max, \
+				     dcqcn_params[(idx)].min, 1, sizeof(desc), (uint64_t)(desc))
 
-	doca_pcc_dev_algo_init_param(algo_idx,
-				     param_num++,
-				     DCQCN_TIMER_PERIOD_NS,
-				     UINT32_MAX,
-				     1,
-				     1,
-				     sizeof(dcqcn_param_timer_period_desc),
-				     (uint64_t)dcqcn_param_timer_period_desc);
-	doca_pcc_dev_algo_init_param(algo_idx,
-				     param_num++,
-				     DCQCN_BYTE_COUNTER_TH,
-				     UINT32_MAX,
-				     1,
-				     1,
-				     sizeof(dcqcn_param_byte_counter_th_desc),
-				     (uint64_t)dcqcn_param_byte_counter_th_desc);
-	doca_pcc_dev_algo_init_param(algo_idx,
-				     param_num++,
-				     DCQCN_G_SHIFT,
-				     16,
-				     1,
-				     1,
-				     sizeof(dcqcn_param_g_shift_desc),
-				     (uint64_t)dcqcn_param_g_shift_desc);
-	doca_pcc_dev_algo_init_param(algo_idx,
-				     param_num++,
-				     DCQCN_F_THRESHOLD,
-				     100,
-				     1,
-				     1,
-				     sizeof(dcqcn_param_f_threshold_desc),
-				     (uint64_t)dcqcn_param_f_threshold_desc);
-	doca_pcc_dev_algo_init_param(algo_idx,
-				     param_num++,
-				     DCQCN_R_AI,
-				     DCQCN_RATE_MAX,
-				     1,
-				     1,
-				     sizeof(dcqcn_param_r_ai_desc),
-				     (uint64_t)dcqcn_param_r_ai_desc);
-	doca_pcc_dev_algo_init_param(algo_idx,
-				     param_num++,
-				     DCQCN_R_HAI,
-				     DCQCN_RATE_MAX,
-				     1,
-				     1,
-				     sizeof(dcqcn_param_r_hai_desc),
-				     (uint64_t)dcqcn_param_r_hai_desc);
-	doca_pcc_dev_algo_init_param(algo_idx,
-				     param_num++,
-				     DCQCN_NEW_FLOW_RATE,
-				     DCQCN_RATE_MAX,
-				     1,
-				     1,
-				     sizeof(dcqcn_param_new_flow_rate_desc),
-				     (uint64_t)dcqcn_param_new_flow_rate_desc);
-	doca_pcc_dev_algo_init_param(algo_idx,
-				     param_num++,
-				     DCQCN_MIN_RATE,
-				     DCQCN_RATE_MAX,
-				     1,
-				     1,
-				     sizeof(dcqcn_param_min_rate_desc),
-				     (uint64_t)dcqcn_param_min_rate_desc);
+	DCQCN_REG_PARAM(DCQCN_PARAM_TIMER_PERIOD,    dcqcn_param_timer_period_desc);
+	DCQCN_REG_PARAM(DCQCN_PARAM_BYTE_COUNTER_TH, dcqcn_param_byte_counter_th_desc);
+	DCQCN_REG_PARAM(DCQCN_PARAM_G_SHIFT,         dcqcn_param_g_shift_desc);
+	DCQCN_REG_PARAM(DCQCN_PARAM_F_THRESHOLD,     dcqcn_param_f_threshold_desc);
+	DCQCN_REG_PARAM(DCQCN_PARAM_R_AI,            dcqcn_param_r_ai_desc);
+	DCQCN_REG_PARAM(DCQCN_PARAM_R_HAI,           dcqcn_param_r_hai_desc);
+	DCQCN_REG_PARAM(DCQCN_PARAM_NEW_FLOW_RATE,   dcqcn_param_new_flow_rate_desc);
+	DCQCN_REG_PARAM(DCQCN_PARAM_MIN_RATE,        dcqcn_param_min_rate_desc);
+#undef DCQCN_REG_PARAM
 
-	doca_pcc_dev_algo_init_counter(algo_idx,
-				       counter_num++,
-				       UINT32_MAX,
-				       2,
-				       sizeof(dcqcn_counter_tx_desc),
-				       (uint64_t)dcqcn_counter_tx_desc);
-	doca_pcc_dev_algo_init_counter(algo_idx,
-				       counter_num++,
-				       UINT32_MAX,
-				       2,
-				       sizeof(dcqcn_counter_cnp_desc),
-				       (uint64_t)dcqcn_counter_cnp_desc);
-	doca_pcc_dev_algo_init_counter(algo_idx,
-				       counter_num++,
-				       UINT32_MAX,
-				       2,
-				       sizeof(dcqcn_counter_nack_desc),
-				       (uint64_t)dcqcn_counter_nack_desc);
+#define DCQCN_REG_COUNTER(idx, desc) \
+	doca_pcc_dev_algo_init_counter(algo_idx, (idx), UINT32_MAX, 2, sizeof(desc), (uint64_t)(desc))
+
+	DCQCN_REG_COUNTER(DCQCN_COUNTER_TX_EVENT,   dcqcn_counter_tx_desc);
+	DCQCN_REG_COUNTER(DCQCN_COUNTER_CNP_EVENT,  dcqcn_counter_cnp_desc);
+	DCQCN_REG_COUNTER(DCQCN_COUNTER_NACK_EVENT, dcqcn_counter_nack_desc);
+#undef DCQCN_REG_COUNTER
 }
 
 /*
