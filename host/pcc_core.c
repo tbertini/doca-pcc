@@ -43,6 +43,35 @@ static char *trace_message_formats[] = {
 	"format 3 - pcc_np dev: thread_idx = %#lx, cnt_recv_packet = %#lx, cnt_sent_packet = %#lx, cnt_user_func_err = %#lx. end %u\n",
 	"format 4 - pcc_np dev: thread_idx = %#lx, rq = %#lx, rq_pi = %#lx, rqcq = %#lx, rqcq_ci = %#lx\n",
 	"format 5 - pcc_np dev: thread_idx = %#lx, sq = %#lx, sq_pi = %#lx, sqcq = %#lx. end %u\n",
+	"format 6 - pcc event: ev_type=%lu flow_tag=%lu port=%lu algo_slot=%lu rate=%lu\n",
+	/* Format IDs 7-10 reserved for DCQCN traces (when DCQCN branch is merged in). */
+	"format 7 - reserved for DCQCN\n",
+	"format 8 - reserved for DCQCN\n",
+	"format 9 - reserved for DCQCN\n",
+	"format 10 - reserved for DCQCN\n",
+	/* Format IDs 11/12/14 reserved for TIMELY (13 retired); strings mirror the TIMELY
+	 * branch verbatim so the 6-14 prefix merges conflict-free. */
+	"format 11 - timely new_flow: rate=%lu ts=%lu arg3=%lu arg4=%lu arg5=%lu\n",
+	"format 12 - timely rtt: new_rtt=%lu rtt_diff=%ld norm_grad=%ld branch=0x%lx new_rate=%lu\n",
+	"format 13 - retired (clamp folded into format 12 branch bit 0x80)\n",
+	"format 14 - timely hai: neg_count=%lu N=%lu new_rate=%lu delta=%lu arg5=%lu\n",
+	/* Format IDs 15-19 owned by Swift (sender RP); per-event summaries reuse format 6. */
+	"format 15 - swift new_flow: init_cwnd=%lu rate=%lu ts=%lu line_mbps=%lu bdp_fxp16=%lu\n",
+	/* format 16 branch: low nibble AI(0)/MD(1)/MD_BLOCKED(2); 0x80=clamped 0x40=cwnd<1 0x20=fs_sat */
+	"format 16 - swift rtt: fabric_rtt=%lu np_turn=%lu delay_minus_target=%ld target=%lu branch=0x%lx\n",
+	"format 17 - swift win: cwnd_prev=%lu cwnd=%lu rate=%lu fs_term=%lu can_decr=%lu\n",
+	"format 18 - swift loss: ev_type=%lu retx_cnt=%lu cwnd=%lu rate=%lu reset=%lu\n",
+	/* format 19 populated: bit0 = t2 (req_recv) nonzero, bit1 = t4 (resp_send) nonzero;
+	 * 3 = receiver stamps both -> np_turn genuine, else fabric_rtt == total_rtt. */
+	"format 19 - swift rtt_ts: t1_req_send=%lu t2_req_recv=%lu t4_resp_send=%lu t6_arrival=%lu populated=%lu\n",
+	/* Format IDs 20-24 owned by SMaRTT-REPS (sender RP); per-event summaries reuse format 6.
+	 * format 20 branch: low nibble 0=FD 1=MD 2=FI 3=MI 4=wtd_blocked 5=blackout 6=fastinc
+	 * 7=qa_adapted; OR-ed high bits: 0x80 clamped, 0x40 ecn, 0x20 can_decrease. */
+	"format 20 - smartt ack: branch=0x%lx rtt=%lu cwnd=%lu rate=%lu acked_pkts=%lu\n",
+	"format 21 - smartt qa: acked_epoch=%lu new_cwnd=%lu ignore_pkts=%lu rate=%lu src=%lu\n",
+	"format 22 - smartt fastinc: count=%lu cwnd=%lu rate=%lu rtt=%lu ncoal=%lu\n",
+	"format 23 - smartt sig: first_sn=%lu sn=%lu delta_pkts=%lu ncoal=%lu avg_wtd=%lu\n",
+	"format 24 - smartt loss: first_sn=%lu cwnd=%lu rate=%lu ignored_pkts=%lu trigger_qa=%lu\n",
 	NULL};
 
 
@@ -472,6 +501,32 @@ static doca_error_t rp_switch_telemetry_callback(void *param, void *config)
 }
 
 /*
+ * ARGP Callback - Handle PCC RP SMaRTT-REPS parameter
+ *
+ * @param [in]: Input parameter
+ * @config [in/out]: Program configuration context
+ * @return: DOCA_SUCCESS on success and DOCA_ERROR otherwise
+ */
+static doca_error_t rp_smartt_reps_callback(void *param, void *config)
+{
+	struct pcc_config *pcc_cfg = (struct pcc_config *)config;
+	bool rp_smartt_reps = *((bool *)param);
+
+	if (user_set_app) {
+		PRINT_ERROR("Error: Can not set multiple runtime application.\n");
+		return DOCA_ERROR_INITIALIZATION;
+	}
+
+	if (rp_smartt_reps) {
+		pcc_cfg->app = pcc_rp_smartt_reps_app;
+	}
+	user_set_app = true;
+	PRINT_INFO("Info: Set DOCA PCC RP SMaRTT-REPS application\n");
+
+	return DOCA_SUCCESS;
+}
+
+/*
  * ARGP Callback - Handle PCC NP Switch Telemetry parameter
  *
  * @param [in]: Input parameter
@@ -694,6 +749,7 @@ doca_error_t register_pcc_params(void)
 	struct doca_argp_param *device_param;
 	struct doca_argp_param *np_nic_telemetry_param;
 	struct doca_argp_param *rp_switch_telemetry_param;
+	struct doca_argp_param *rp_smartt_reps_param;
 	struct doca_argp_param *np_switch_telemetry_param;
 	struct doca_argp_param *threads_list_param;
 	struct doca_argp_param *wait_time_param;
@@ -758,6 +814,26 @@ doca_error_t register_pcc_params(void)
 	doca_argp_param_set_callback(rp_switch_telemetry_param, rp_switch_telemetry_callback);
 	doca_argp_param_set_type(rp_switch_telemetry_param, DOCA_ARGP_TYPE_BOOLEAN);
 	result = doca_argp_register_param(rp_switch_telemetry_param);
+	if (result != DOCA_SUCCESS) {
+		PRINT_ERROR("Error: Failed to register program param: %s\n", doca_error_get_descr(result));
+		return result;
+	}
+
+	/* Create and register PCC RP SMaRTT-REPS parameter */
+	result = doca_argp_param_create(&rp_smartt_reps_param);
+	if (result != DOCA_SUCCESS) {
+		PRINT_ERROR("Error: Failed to create ARGP param: %s\n", doca_error_get_descr(result));
+		return result;
+	}
+	doca_argp_param_set_short_name(rp_smartt_reps_param, "rp-sr");
+	doca_argp_param_set_long_name(rp_smartt_reps_param, "rp-smartt-reps");
+	doca_argp_param_set_arguments(rp_smartt_reps_param, "<PCC Reaction Point SMaRTT-REPS>");
+	doca_argp_param_set_description(
+		rp_smartt_reps_param,
+		"Flag to indicate running as a Reaction Point with the SMaRTT algorithm (optional). SMaRTT is a sender-based windowed congestion control combining per-ACK ECN and delay signals with QuickAdapt (Bonato et al., arXiv:2404.01630). By default the flag is set to false.");
+	doca_argp_param_set_callback(rp_smartt_reps_param, rp_smartt_reps_callback);
+	doca_argp_param_set_type(rp_smartt_reps_param, DOCA_ARGP_TYPE_BOOLEAN);
+	result = doca_argp_register_param(rp_smartt_reps_param);
 	if (result != DOCA_SUCCESS) {
 		PRINT_ERROR("Error: Failed to register program param: %s\n", doca_error_get_descr(result));
 		return result;
