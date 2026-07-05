@@ -293,6 +293,40 @@ like swift/timely.
    paper's pacer-below-1-MTU option is not implemented (incast degree here is 2).
 9. **FastIncrease "per ACK"** scaled by `num_coalesced` (one event may carry many ACKs).
 
+## Hardware validation (2026-07-05, alveo-u50d-01/02 → alveo-u55c-03, 2:1 incast)
+
+Baseline with the compiled-in (paper-default) vector: **97.32 Gb/s aggregate** over
+10 s; two 20 s confirmation runs: **97.31 / 97.32 Gb/s**. A 13-vector single-axis PPCC
+sweep around the anchor (`incast-bench --sweep smartt-reps-grid1.json`) measured
+97.32 Gb/s on **every** vector — the aggregate is receiver-port-saturated across the
+sane parameter plane, so the paper defaults are the shipped defaults (no retune needed
+for this objective). Per-sender caps only become visible in the aggregate below the
+~48.7 Gb/s fair share on this 2:1 topology.
+
+Hardware truths established (per-vector PPCC counters, 10 s runs, per sender):
+
+- **ACK events fire on BF3** (first consumer in this repo): ~2.97 M ACK events / 10 s,
+  ~5 packets coalesced per event. The whole control loop is live.
+- **RTT probe cadence ≈ 107 µs** (~94 k probe responses / 10 s) — the stored-delay
+  adaptation refreshes far faster than feared.
+- **Loaded fabric RTT exceeds 15 µs** (idle ≈ 3.8 µs): even `target_rtt_ns=15000`
+  never flipped the loop out of the `rtt > trtt` half. Under saturation the algorithm
+  therefore lives in the **FI-dominant regime** (`!ecn ∧ rtt>trtt` ⇒ Fair Increase on
+  ~every ACK, cwnd riding the 1.25·BDP cap, rate clamped at MAX).
+- **ECN/CNP marking is live but sparse**: ~90 CNPs / 10 s vs ~3 M ACKs — the switch
+  marks only rare bursts at this load. With the default WTD threshold the EWMA never
+  reaches 0.25, so `fd/md_applied = 0`; setting `wtd_thresh=0` made the same CNPs
+  produce 36 MD (+FD) applications — the full ECN→CNP→hold→decrease path works and is
+  simply gated off by WTD at this marking rate. Tune `wtd_thresh`/`wtd_alpha`/
+  `ecn_cnp_hold_ns` on a fabric that actually marks.
+- **Actuation proof**: `max_cwnd_frac=0.75` drove `rate_clamped_max` from ~3 M to
+  exactly 0 (window bound below BDP ⇒ rate never hits MAX) while QA-scaling changes
+  modulated the post-QA blackout length (`acks_ignored` 303/462/509 at 0.5/0.8/1.0) —
+  every PPCC param demonstrably reaches the running algorithm.
+- QuickAdapt: `qa_fired == nack_events` (185) exactly — every NACK burst triggered one
+  epoch-gated QA; blackouts averaged ~2.4 ACK events (≈ one cwnd of ~15 pkts at ~5
+  pkts/event). `psn_anomaly` ≈ 96 / 2.97 M (0.003 %) — the ΔPSN acked-bytes model holds.
+
 ## Bring-up watchlist (Phase 4)
 
 - `ack_events == 0` ⇒ ACK events masked/not firing — the whole loop is dead. Check
