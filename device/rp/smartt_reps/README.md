@@ -42,7 +42,7 @@ host/smartt_reps_params_dump.c  no-DOCA-deps contract dumper (JSON for incast-be
 |---|---|---|
 | per-ACK `p.rtt` | Data ACKs carry no RTT. RTT **probe** events (`DOCA_PCC_DEV_EVNT_RTT`, requested via `results->rtt_req=1`) carry t1/t2/t4 timestamps + event ts (t6) | Keep last `fabric_rtt = (t6−t1) − (t4−t2)` in ctxt (sync-free; swift's exact formula + t2/t4==0 fallback). ACK decisions read the stored value. Swift's probe re-arm + TX abort machinery ported verbatim |
 | per-ACK `p.ecn` | ECN marks never reach the sender as ACK bits; the RoCE receiver emits **CNP** events (`DOCA_PCC_DEV_EVNT_ROCE_CNP` = 2) for marked arrivals | `p.ecn := (now − last_cnp_ts) ≤ ecn_cnp_hold_ns` (param). CNPs are receiver-rate-limited, not 1:1 with marks — WTD α/threshold are the compensating tuning levers |
-| per-ACK `p.size` | ACK/NACK/CNP events carry `first_sn` (first coalesced event's serial number) + `num_coalesced` (16-bit). **No byte count.** (`doca_pcc_dev_get_rtt_np_rx_byte_counter()` is hardcoded 0 on BF3 — no cross-check exists) | `p.size` in **packets** = wrap32 ΔPSN of `first_sn` between successive ACK/NACK events. First event or anomaly (Δ > max(2·cwnd_pkts, 256)): fall back to `num_coalesced` and bump the `psn_anomaly` counter. PSN semantics verified on HW via trace fmt 23 |
+| per-ACK `p.size` | ACK/NACK/CNP events carry `first_sn` (first coalesced event's serial number) + `num_coalesced` (16-bit). **No byte count.** (`doca_pcc_dev_get_rtt_np_rx_byte_counter()` is hardcoded 0 on BF3 — no cross-check exists) | `p.size` in **packets** = wrap32 ΔPSN of `first_sn` between successive ACK/NACK events. First event or anomaly (Δ > max(2·cwnd_pkts + 2, 256)): fall back to `num_coalesced`, itself bounded by the same cap, and bump the `psn_anomaly` counter. PSN semantics verified on HW via trace fmt 23 |
 | packet trimming | Not available on this fabric. Paper's own fallback: timeouts (§3.3, §4.2 — "at most ~2 base RTTs" cost, and **double `md`** in timeout mode) | **NACK events** (`DOCA_PCC_DEV_EVNT_ROCE_NACK` = 5) are the loss/severe-congestion trigger → Algorithm 1 lines 28–34 (trimmed/timeout branch) |
 | QuickAdapt `acked` over last trtt | No receiver byte feedback | Per-flow ΔPSN accumulator in ctxt, reset each trtt epoch (Algorithm 2 line 12) |
 | `unacked` → `bytes_to_ignore` | In-flight bytes not exposed to PCC | `bytes_to_ignore ≈ cwnd` (one window), in packets |
@@ -134,7 +134,8 @@ adapted = false
 if wrap_diff(now, qa_epoch_start) ≥ trtt:      # "now ≥ end"
     if trigger_qa and qa_epoch_valid:          # "end ≠ 0": no fire before first full epoch
         trigger_qa = false; adapted = true
-        cwnd = fxp_mult( max(acked,1) << 16 , qa_scaling )   # max(acked,mtu)·qa_scaling
+        cwnd = sat_u32( (max(acked,1) << 16) · qa_scaling >> 16 )  # max(acked,mtu)·qa_scaling, u64 math
+        cwnd = clamp(cwnd, min_cwnd, max_cwnd_frac·bdp)      # clamp BEFORE ignore_target: blackout = actuated window
         ignore_target = cwnd >> 16 (round up, ≥1)            # bytes_to_ignore = unacked ≈ cwnd
         ignored = 0
         counter[QA_FIRED]++ ; emit fmt21
