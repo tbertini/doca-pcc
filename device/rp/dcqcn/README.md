@@ -13,8 +13,10 @@ rate-based and driven by **ECN / CNPs** (Congestion Notification Packets); unlik
 | `algo/dcqcn.h` | Public API: `dcqcn_init`, `dcqcn_algo`, `dcqcn_set_algo_params` |
 | `algo/dcqcn_ctxt.h` | Per-flow state (48 B): RC/RT rates, α, the three software timers/counters |
 | `algo/dcqcn_algo_params.h` | Compiled-in default `#define`s (timer period, byte threshold, g, F, R_AI, R_HAI, rates) |
-| `algo/dcqcn.c` | Algorithm: `dcqcn_init` (param/counter registration) + the Figure-7 handlers |
+| `algo/dcqcn_params.h` | **PPCC contract** (single source of truth): param/counter indices + `{name, unit, def, min, max}` table, included by both `dcqcn.c` and the host dumper |
+| `algo/dcqcn.c` | Algorithm: `dcqcn_init` (param/counter registration from `dcqcn_params.h`) + the Figure-7 handlers |
 | `rp_dcqcn_dev_main.c` | DPA entry points (`doca_pcc_dev_user_algo`, `doca_pcc_dev_user_init`, `doca_pcc_dev_user_set_algo_params`) |
+| `../../../host/dcqcn_params_dump.c` | Host-side, no-DOCA-deps binary that emits the `dcqcn_params.h` contract as JSON for `incast-bench` |
 
 The host glue (trace format strings, arg parsing) lives in
 [`host/pcc_core.c`](../../../host/pcc_core.c); DCQCN's `algo_id` is **`0xBFFE`**.
@@ -58,9 +60,11 @@ All five DCQCN trace formats only emit when built `DCQCN_DEBUG=1`.
 
 ## Tuning parameters for your fabric
 
-The 8 runtime-tunable parameters, their compiled-in defaults
-(`algo/dcqcn_algo_params.h`), and the min/max enforced by the framework at
-registration (`dcqcn_init`):
+`algo/dcqcn_params.h` is the single source of truth for the 8 runtime-tunable
+parameters, their defaults, and the min/max enforced by the framework at
+registration (`dcqcn_init`) — it replaces the enum + inline
+`doca_pcc_dev_algo_init_param` argument lists that used to live directly in
+`dcqcn.c`. The table below is generated from that contract:
 
 | idx | name | unit | default | min | max | meaning |
 |---|---|---|---|---|---|---|
@@ -107,9 +111,46 @@ sudo mlxreg -d $MST -y --reg_name PPCC \
 The 3 counters are scraped with `cmd_type=0xC` (read) / `0xD` (read-and-clear):
 `text[0]` = TX events, `text[1]` = CNP events, `text[2]` = NACK events.
 
-> **Note:** unlike TIMELY, this branch has no `dcqcn_params_dump` binary, so the
-> `incast-bench` orchestrator has no auto-discovered contract for DCQCN — tune via
-> raw `mlxreg` (indices above) until a dumper is added.
+## Runtime tuning via PPCC (incast-bench integration)
+
+Like TIMELY and Swift, DCQCN's parameter/counter contract lives in a single header
+(`algo/dcqcn_params.h`) included by both the DPA algorithm (`dcqcn.c`) and a small
+host-side dumper (`host/dcqcn_params_dump.c`), so the orchestrator's view of the
+contract can never drift from what the device actually registers.
+
+Build the dumper alongside the app (meson adds it as its own executable target,
+same pattern as `swift_params_dump`):
+
+```bash
+ninja -C /tmp/build dcqcn_params_dump
+/tmp/build/pcc/dcqcn_params_dump | python3 -m json.tool
+```
+
+It prints `algo_id` (`0xBFFE` = 49150), one `{idx, name, unit, default, min, max}`
+entry per parameter (the 8 rows in the table above, keyed by the same `name`s), and
+one `{idx, name}` entry per counter — no DOCA dependency, so it also builds and runs
+on a plain Mac/Linux host for offline inspection.
+
+`incast-bench` dumps this contract at session start-of-run, then lets you override
+any subset of parameters by their wire `name` with `--dcqcn-param KEY=VALUE`
+(repeatable) or a full vector file via `--dcqcn-params FILE`, e.g.:
+
+```bash
+incast-bench ... --dcqcn-param g_shift=10 --dcqcn-param r_ai=838
+```
+
+Overrides are pushed as a single bulk `mlxreg cmd_type=0xB` vector; unspecified
+params keep the compiled-in defaults from the table above. As with every DCQCN
+param push, this must target `algo_slot=0`; it lands correctly only because the
+device side pins its own lookup to **port 0** regardless of where RoCE traffic
+actually arrives — see [Slot 0 / port 0 dispatch](#slot-0--port-0-dispatch) below
+for why.
+
+**No runtime `trace_on` param in this contract version.** Unlike Swift's contract,
+DCQCN's 5 device traces (format IDs 6–10) are gated purely at **compile time** by
+`DCQCN_DEBUG` (see [Build & run](#build--run)); there is intentionally no param
+index in `dcqcn_params[]` to flip them on a running binary. Toggling traces still
+requires a `meson setup --wipe` with `DCQCN_DEBUG=1` and a redeploy.
 
 ## Slot 0 / port 0 dispatch
 
