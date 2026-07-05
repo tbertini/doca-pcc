@@ -28,21 +28,33 @@ void doca_pcc_dev_user_algo(doca_pcc_dev_algo_ctxt_t *algo_ctxt,
 			    const doca_pcc_dev_attr_t *attr,
 			    doca_pcc_dev_results_t *results)
 {
-	uint32_t port_num = doca_pcc_dev_get_ev_attr(event).port_num;
-
-	/* Always use slot 0 params/counters for TIMELY, regardless of negotiated algo_slot. */
-	uint32_t *param = doca_pcc_dev_get_algo_params(port_num, 0);
-	uint32_t *counter = doca_pcc_dev_get_counters(port_num, 0);
+	/* Param/counter arrays are per (port, slot). The orchestrator pushes params and
+	 * scrapes counters over mlxreg PPCC with local_port=1, which the firmware maps to
+	 * DPA port_num 0 -- confirmed empirically: the set_algo_params callback fires with
+	 * port_num=0. But RoCE traffic on this BF3 (mlx5_0) reaches the algo on port_num=1
+	 * (format-6 events show port=1). Fetching params/counters for
+	 * the *event* port (1) therefore reads a never-pushed array (defaults) and strands
+	 * counter increments on a port the orchestrator never reads -- which is exactly why
+	 * a pushed t_high=500000 read back fine via cmd_type=0xA yet the algo kept using
+	 * 80000. Pin to the port the PPCC channel actually targets (0) so a single-port-
+	 * per-host deployment sees its pushed params and gets its counters scraped. Mirrors
+	 * the "always slot 0" simplification; revisit if a build ever drives multiple ports. */
+	const uint32_t TIMELY_PPCC_PORT = 0;
+	uint32_t *param = doca_pcc_dev_get_algo_params(TIMELY_PPCC_PORT, 0);
+	uint32_t *counter = doca_pcc_dev_get_counters(TIMELY_PPCC_PORT, 0);
 
 	timely_algo(event, param, counter, algo_ctxt, results);
 
 	/* Format 6 (per-event) trace: compiled in, emitted only when the trace_on PPCC
-	 * param is set at runtime (or always if built -DTIMELY_DEBUG). See timely.h. */
+	 * param is set at runtime (or always if built -DTIMELY_DEBUG). See timely.h.
+	 * ev_attr is decoded here, under the gate: with params pinned to port 0, the
+	 * event's port_num/ev_type are needed only for this trace. */
 	if (TIMELY_TRACE_ENABLED(param)) {
+		doca_pcc_dev_event_general_attr_t ev_attr = doca_pcc_dev_get_ev_attr(event);
 		doca_pcc_dev_trace_5(PCC_TRACE_FMT_EVENT,
-				     (uint64_t)doca_pcc_dev_get_ev_attr(event).ev_type,
+				     (uint64_t)ev_attr.ev_type,
 				     (uint64_t)doca_pcc_dev_get_flowtag(event),
-				     (uint64_t)port_num,
+				     (uint64_t)ev_attr.port_num,
 				     (uint64_t)attr->algo_slot,
 				     (uint64_t)results->rate);
 		doca_pcc_dev_trace_flush();
@@ -127,6 +139,10 @@ doca_pcc_dev_error_t doca_pcc_dev_user_set_algo_params(uint32_t port_num,
 			break;
 		}
 		default:
+			/* A PPCC set targeting a slot other than 0 is a misroute, not a
+			 * success. Return FAIL so it surfaces instead of silently no-op'ing
+			 * (contract: OK means "parameters were set"). */
+			ret = DOCA_PCC_DEV_STATUS_FAIL;
 			break;
 		}
 	return ret;

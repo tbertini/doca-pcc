@@ -52,9 +52,7 @@
  * Entry point to TIMELY user algorithm
  * This function starts the algorithm code of a single event for the TIMELY algorithm.
  * It calculates the new rate parameters based on flow context data and event info.
- *
- * Reference: Mittal et al., "TIMELY: RTT-based Congestion Control for the Datacenter",
- * SIGCOMM 2015. See Algorithm 1 in §4.3.
+ * (Algorithm 1, §4.3; full citation in timely.c.)
  *
  * @event [in]: A pointer to an event data structure to be passed to extractor functions
  * @param [in]: A pointer to an array of parameters that are used to control algo behavior (see PPCC access register)

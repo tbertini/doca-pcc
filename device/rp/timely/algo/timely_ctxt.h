@@ -29,8 +29,7 @@
 /*
  * TIMELY per-flow context structure (48 bytes).
  *
- * Implements the per-flow state required by the TIMELY algorithm
- * (Mittal et al., "TIMELY: RTT-based Congestion Control for the Datacenter", SIGCOMM 2015).
+ * Implements the per-flow state required by the TIMELY algorithm (see timely.c).
  *
  * cur_rate is in FXP20 format (1<<20 = 100% line rate).
  * RTT samples and rtt_diff are in nanoseconds.
