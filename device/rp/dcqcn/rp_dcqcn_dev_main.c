@@ -26,6 +26,11 @@ void doca_pcc_dev_user_algo(doca_pcc_dev_algo_ctxt_t *algo_ctxt,
 			    const doca_pcc_dev_attr_t *attr,
 			    doca_pcc_dev_results_t *results) {
 
+	/* attr feeds only the DCQCN_DEBUG-gated format-6 trace below; a default build
+	 * would otherwise fail -Werror=-Wunused-parameter (historical dcqcn builds were
+	 * all DCQCN_DEBUG=1, so this never surfaced before the first default build). */
+	(void)attr;
+
 	/* Always slot 0 (DCQCN is the only algo, so ECE slot negotiation is moot) and
 	 * always port 0. The orchestrator pushes params / scrapes counters over mlxreg
 	 * PPCC local_port=1, which maps to DPA port 0, but mlx5_0 traffic reaches the algo
