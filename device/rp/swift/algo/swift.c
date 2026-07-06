@@ -496,9 +496,9 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 	if (unlikely(resp_send == 0 || req_recv == 0 || np_turnaround >= total_rtt)) {
 		if (counter != NULL)
 			counter[SWIFT_C_RTT_DROPPED_UNSTAMPED]++;
-		/* The probe round-trip itself completed, so it still counts as forward
-		 * progress (Algorithm 1 line 5) and still re-arms the next probe. */
-		ccctx->retx_cnt = 0;
+		/* Fully inert otherwise: not a delay sample, and not loss-counter
+		 * progress either -- data ACKs own the retx_cnt reset (Algorithm 1
+		 * line 5, swift_handle_ack). Just re-arm the next probe. */
 		results->rate = ccctx->cur_rate;
 		results->rtt_req = 1;
 		ccctx->rtt_req_to_rtt_sent = 1;
@@ -518,7 +518,8 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 	uint32_t max_cwnd = param[SWIFT_P_MAX_CWND];
 
 	/* === Algorithm 1 line 5: "On Receiving ACK: retransmit_cnt <- 0" ===
-	 * An RTT measurement is forward progress, so reset the loss counter. */
+	 * Data ACKs reset this in swift_handle_ack; a usable RTT measurement is
+	 * equally forward progress, so it resets here too. */
 	ccctx->retx_cnt = 0;
 
 	/* === Algorithm 1 line 2: cwnd_prev <- cwnd === */
@@ -636,8 +637,11 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
  *
  * FIXME: DOCA surfaces a single NACK event and does not distinguish SACK-based fast
  * recovery (Algorithm 1 "On Fast Recovery", which resets retx_cnt) from a true RTO.
- * Both are folded here into the conservative RTO path. RTT events reset retx_cnt
- * (forward progress), so isolated NACKs decay rather than accumulate to a reset.
+ * Both are folded here into the conservative RTO path. Whether ev_subtype separates
+ * NACK causes on BF3 is unverified -- trace it on hardware; if it does, route the
+ * fast-recovery-like causes through Algorithm 1 lines 22-25 instead. Data ACKs
+ * (swift_handle_ack) and usable RTT samples reset retx_cnt, so isolated NACKs decay
+ * rather than accumulate to a reset.
  */
 static inline void swift_handle_nack(doca_pcc_dev_event_t *event,
 				     uint32_t *param,
@@ -687,6 +691,24 @@ static inline void swift_handle_nack(doca_pcc_dev_event_t *event,
 }
 
 /*
+ * Handle ACK event = Algorithm 1 line 5: "On Receiving ACK: retransmit_cnt <- 0".
+ * Data ACKs are the paper's forward-progress signal for the loss counter. Delay/cwnd
+ * are driven exclusively by RTT probe events in this port (no per-ACK delay on BF3),
+ * so an ACK changes no window state -- it only clears the consecutive-loss count and
+ * passes the current rate through. ACK events are frequent (~5-pkt coalescing at line
+ * rate), so this reset is strictly more timely than the probe-response one.
+ */
+static inline void swift_handle_ack(doca_pcc_dev_event_t *event,
+				    uint32_t *param,
+				    cc_ctxt_swift_t *ccctx,
+				    doca_pcc_dev_results_t *results)
+{
+	ccctx->retx_cnt = 0;
+	results->rate = ccctx->cur_rate;
+	results->rtt_req = 0;
+}
+
+/*
  * Handle CNP event. Swift is delay-based and does not react to ECN (paper §3.7 isolates
  * traffic via QoS, not CNP). Pass the current rate through; the next RTT event adjusts
  * cwnd from the actual delay.
@@ -718,6 +740,8 @@ void swift_algo(doca_pcc_dev_event_t *event,
 		swift_handle_new_flow(event, param, counter, swift_ctx, results);
 	} else if (ev_type == DOCA_PCC_DEV_EVNT_RTT) {
 		swift_handle_rtt(event, param, counter, swift_ctx, results);
+	} else if (ev_type == DOCA_PCC_DEV_EVNT_ROCE_ACK) {
+		swift_handle_ack(event, param, swift_ctx, results);
 	} else if (ev_type == DOCA_PCC_DEV_EVNT_ROCE_TX) {
 		swift_handle_tx(event, param, swift_ctx, results);
 	} else if (ev_type == DOCA_PCC_DEV_EVNT_ROCE_NACK) {
