@@ -43,9 +43,10 @@ ninja -C /tmp/build
 /tmp/build/pcc/doca_pcc --rp-swift -d mlx5_0 -l 70
 ```
 
-Per-event traces (formats 6 and 15–19) are **compiled in but quiet by default**. Turn
-them on at runtime — no rebuild — by setting the `trace_on` PPCC param to 1 (back to 0
-to silence). To force them on from boot (catch the earliest events), build with
+Per-event traces (formats 6, 15–17 and 19) are **compiled in but quiet by default**;
+format 18 (loss/NACK) is always emitted — NACKs are rare and a loss event is always
+worth a line. Turn the rest on at runtime — no rebuild — by setting the `trace_on` PPCC
+param to 1 (back to 0 to silence). To force them on from boot (catch the earliest events), build with
 `SWIFT_DEBUG=1`:
 
 ```bash
@@ -204,7 +205,7 @@ one array. Revisit if a build ever drives multiple physical ports.
 | 15 | Swift `new_flow` | `init_cwnd` (FXP16 pkts); `rate` (FXP20); `ts`; `line_mbps`; `bdp_fxp16` |
 | 16 | Swift `rtt` (delay side) | `fabric_rtt` (ns); `np_turn` (ns); `delay_minus_target` (**signed** ns); `target` (ns); `branch` (table below) |
 | 17 | Swift `rtt` (window side) | `cwnd_prev`, `cwnd` (FXP16 pkts); `rate` (FXP20); `fs_term` (ns, = target − base); `can_decr` |
-| 18 | Swift `loss` (NACK) | `ev_type`; `retx_cnt`; `cwnd` (FXP16); `rate` (FXP20); `reset` (1 = collapsed to min_cwnd) |
+| 18 | Swift `loss` (NACK) — **always emitted**, not gated by `trace_on` (NACKs are rare) | `ev_subtype` (raw; surveyed to learn whether firmware distinguishes NACK causes); `retx_cnt`; `cwnd` (FXP16); `rate` (FXP20); `reset` (1 = collapsed to min_cwnd) |
 | 19 | Swift `rtt` raw timestamps | `t1_req_send`, `t2_req_recv`, `t4_resp_send`, `t6_arrival` (raw ns, wrapping u32); `populated` (bit0 = t2≠0, bit1 = t4≠0; **3 = receiver stamped both**, else the sample is **dropped** and only `rtt_dropped_unstamped` moves) |
 
 Formats 16 and 17 are two halves of one RTT decision (split because `trace_5` carries

@@ -685,9 +685,13 @@ static inline void swift_handle_nack(doca_pcc_dev_event_t *event,
 	results->rate = rate;
 	results->rtt_req = 0;
 
-	SWIFT_TRACE(param, SWIFT_TRACE_FMT_LOSS, doca_pcc_dev_get_ev_attr(event).ev_type,
-		    retx_cnt, cwnd, rate, reset);
-	SWIFT_TRACE_FLUSH(param);
+	/* Always emitted (not gated by trace_on): NACKs are rare (~2 per run at ramp on
+	 * this fabric), a loss event is always worth a line, and ev_subtype is being
+	 * surveyed to learn whether firmware distinguishes NACK causes (see FIXME above --
+	 * it decides whether the fast-recovery/RTO split is implementable). */
+	doca_pcc_dev_trace_5(SWIFT_TRACE_FMT_LOSS, doca_pcc_dev_get_ev_attr(event).ev_subtype,
+			     retx_cnt, cwnd, rate, reset);
+	doca_pcc_dev_trace_flush();
 }
 
 /*
