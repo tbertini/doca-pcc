@@ -635,11 +635,15 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
  * Retransmit Timeout"). retx_cnt++; on reaching the threshold, collapse cwnd to
  * min_cwnd; otherwise apply the maximum multiplicative cut (1 - max_mdf), once per RTT.
  *
- * FIXME: DOCA surfaces a single NACK event and does not distinguish SACK-based fast
- * recovery (Algorithm 1 "On Fast Recovery", which resets retx_cnt) from a true RTO.
- * Both are folded here into the conservative RTO path. Whether ev_subtype separates
- * NACK causes on BF3 is unverified -- trace it on hardware; if it does, route the
- * fast-recovery-like causes through Algorithm 1 lines 22-25 instead. Data ACKs
+ * FIXME: every NACK is folded into the conservative RTO path (retx_cnt++ toward the
+ * collapse threshold). MEASURED 2026-07-06: ev_subtype IS populated -- ramp NACKs
+ * arrive as OOS (=2; doca_pcc_dev_nack_event_sub_type_enum: 1=RNR, 2=OOS,
+ * 3=DUP_READ) -- so the paper's split is implementable: OOS/DUP_READ are
+ * SACK/fast-recovery-class (Algorithm 1 lines 22-25: retx_cnt<-0, single MD), while
+ * RNR is receiver-app backpressure, arguably not congestion at all. The enum has NO
+ * timeout subtype: a true RTO retransmits from firmware without a received NACK
+ * packet, so it may never surface here -- which reframes what the retx_reset
+ * threshold actually guards. Unimplemented pending a design decision. Data ACKs
  * (swift_handle_ack) and usable RTT samples reset retx_cnt, so isolated NACKs decay
  * rather than accumulate to a reset.
  */

@@ -205,7 +205,7 @@ one array. Revisit if a build ever drives multiple physical ports.
 | 15 | Swift `new_flow` | `init_cwnd` (FXP16 pkts); `rate` (FXP20); `ts`; `line_mbps`; `bdp_fxp16` |
 | 16 | Swift `rtt` (delay side) | `fabric_rtt` (ns); `np_turn` (ns); `delay_minus_target` (**signed** ns); `target` (ns); `branch` (table below) |
 | 17 | Swift `rtt` (window side) | `cwnd_prev`, `cwnd` (FXP16 pkts); `rate` (FXP20); `fs_term` (ns, = target − base); `can_decr` |
-| 18 | Swift `loss` (NACK) — **always emitted**, not gated by `trace_on` (NACKs are rare) | `ev_subtype` (raw; surveyed to learn whether firmware distinguishes NACK causes); `retx_cnt`; `cwnd` (FXP16); `rate` (FXP20); `reset` (1 = collapsed to min_cwnd) |
+| 18 | Swift `loss` (NACK) — **always emitted**, not gated by `trace_on` (NACKs are rare) | `ev_subtype` (1=RNR, 2=OOS, 3=DUP_READ; measured: ramp NACKs are OOS=2); `retx_cnt`; `cwnd` (FXP16); `rate` (FXP20); `reset` (1 = collapsed to min_cwnd) |
 | 19 | Swift `rtt` raw timestamps | `t1_req_send`, `t2_req_recv`, `t4_resp_send`, `t6_arrival` (raw ns, wrapping u32); `populated` (bit0 = t2≠0, bit1 = t4≠0; **3 = receiver stamped both**, else the sample is **dropped** and only `rtt_dropped_unstamped` moves) |
 
 Formats 16 and 17 are two halves of one RTT decision (split because `trace_5` carries
@@ -281,10 +281,13 @@ Highlights:
 - **Flow-scale constants** (`fs_range`, `fs_min_cwnd`, `fs_max_cwnd`), **`md_beta`,
   `max_mdf`, `max_cwnd`, `retx_reset_threshold`:** paper gives no values — seeded, sweep.
 - **Endpoint window (`ecwnd`, §3.3):** deferred to phase 2 (params reserved, inert).
-- **NACK = loss:** DOCA does not separate SACK fast-recovery from RTO; both folded into
-  the conservative RTO path. Whether `ev_subtype` distinguishes NACK causes on BF3 is
-  unverified — trace it on hardware; if it does, the fast-recovery split (Algorithm 1
-  lines 22–25) becomes implementable.
+- **NACK = loss:** every NACK is folded into the conservative RTO path. **Measured
+  2026-07-06: `ev_subtype` is populated** — ramp NACKs are OOS (=2; enum in
+  `doca_pcc_dev.h`: 1=RNR, 2=OOS, 3=DUP_READ) — so the fast-recovery split
+  (Algorithm 1 lines 22–25) is implementable: OOS/DUP_READ ≈ SACK-class, RNR ≈
+  receiver backpressure. The enum has no timeout subtype (a true RTO never surfaces
+  as a NACK event), which reframes what the `retx_reset_thresh` collapse guards.
+  Unimplemented pending a design decision.
 - **RTO timing (§3.6):** the paper's per-flow EWMA-based retransmission timeout is loss
   *detection*, which is firmware-owned on BF3 (the RP only receives already-detected
   NACK events). Intentionally out of RP scope; only the *reaction* is implemented.
