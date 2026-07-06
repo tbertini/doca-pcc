@@ -60,7 +60,7 @@ static char *trace_message_formats[] = {
 	/* format 16 branch: low nibble AI(0)/MD(1)/MD_BLOCKED(2); 0x80=clamped 0x40=cwnd<1 0x20=fs_sat */
 	"format 16 - swift rtt: fabric_rtt=%lu np_turn=%lu delay_minus_target=%ld target=%lu branch=0x%lx\n",
 	"format 17 - swift win: cwnd_prev=%lu cwnd=%lu rate=%lu fs_term=%lu can_decr=%lu\n",
-	"format 18 - swift loss: ev_type=%lu retx_cnt=%lu cwnd=%lu rate=%lu reset=%lu\n",
+	"format 18 - swift loss: ev_subtype=%lu retx_cnt=%lu cwnd=%lu rate=%lu reset=%lu\n",
 	/* format 19 populated: bit0 = t2 (req_recv) nonzero, bit1 = t4 (resp_send) nonzero;
 	 * 3 = receiver stamps both -> usable sample; anything else means the sample was
 	 * DROPPED (rtt_dropped_unstamped counter moves, no cwnd/rate change, and no
