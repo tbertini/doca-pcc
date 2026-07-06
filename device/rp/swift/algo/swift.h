@@ -57,7 +57,9 @@
  * The two RTT-decision lines are split because doca_pcc_dev_trace_5 carries only five
  * 64-bit args and the per-event decision has more than five fields worth checking by
  * hand: format 16 carries the delay/target side, format 17 the cwnd/rate side. They
- * share the event so a reader joins them by timestamp/order.
+ * share the event so a reader joins them by timestamp/order. Format 19 fires for
+ * every probe response, including samples dropped for missing/inconsistent responder
+ * stamps; 16/17 fire only for usable samples, so a 19 line may stand alone.
  */
 #define SWIFT_TRACE_FMT_NEW_FLOW   (15)  /* init_cwnd, rate, ts, line_rate_mbps, bdp_fxp16 */
 #define SWIFT_TRACE_FMT_RTT_DELAY  (16)  /* fabric_rtt, np_turnaround, delay(signed), target, branch */

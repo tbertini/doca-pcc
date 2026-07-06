@@ -202,6 +202,8 @@ one array. Revisit if a build ever drives multiple physical ports.
 
 Formats 16 and 17 are two halves of one RTT decision (split because `trace_5` carries
 only five args); join them by order. Format 19 precedes them for the same RTT event.
+**A dropped sample emits format 19 alone** — no 16/17 pair follows it. When pairing
+16/17 by order, a 19-line with no pair after it marks a drop, not a missing trace.
 
 ### `ev_type`
 
@@ -249,7 +251,8 @@ rate ← cwnd_to_rate(cwnd)                                # BDP; realizes pacin
 ```
 
 **AI cadence (FIXME in source):** the paper's AI nets `+ai` per RTT via
-`(ai/cwnd)·num_acked`. DOCA delivers discrete RTT-probe events (~ms apart, ≫ 1 RTT) with
+`(ai/cwnd)·num_acked`. DOCA delivers discrete RTT-probe events (~107 µs apart measured
+on this fabric, ≫ 1 RTT) with
 no `num_acked`, so — matching TIMELY's validated choice on this exact fabric — Swift
 applies **one `+ai` step per RTT event** rather than scaling by `elapsed/RTT` (which
 would multiply `ai` by ~1000s and explode `cwnd`). Tune convergence via `ai` / probe
