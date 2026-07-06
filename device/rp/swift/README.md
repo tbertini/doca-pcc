@@ -77,6 +77,13 @@ cwnd≥1, paced for cwnd<1). BDP is computed on-device from the `line_rate_mbps`
 > otherwise `min_rate` — not 0.001 pkt — is the effective floor. Trace `cwnd`↔`rate`
 > (formats 16/17) to confirm they track.
 
+> Pacing-law caveat: the paper's `pacing_delay = rtt/cwnd` (Algorithm 1 lines 29–32)
+> uses the *live measured* RTT, so paper-Swift spaces packets further apart as the
+> fabric loads. This port's BDP mapping uses the constant `min_rtt` param, so a given
+> `cwnd < 1` always paces at no-load spacing — more aggressive than the paper under
+> congestion. Faithful near no-load; keep in mind for deep-incast sweeps (an optional
+> refinement: scale the mapping by measured RTT when cwnd < 1).
+
 ## The flow-scaled target (§3.5) and integer 1/√cwnd
 
 ```
@@ -211,7 +218,7 @@ only five args); join them by order. Format 19 precedes them for the same RTT ev
 |---|---|---|
 | 2 | `CNP` | RoCE CNP — **ignored** (Swift is delay-based; paper §3.7 isolates via QoS) |
 | 3 | `TX`  | TX burst ended — maintains the RTT-probe abort state machine |
-| 4 | `ACK` | RoCE ACK |
+| 4 | `ACK` | RoCE ACK — resets `retx_cnt` (Algorithm 1 line 5); no window/rate change |
 | 5 | `NACK`| RoCE NACK — the **loss/RTO** signal (format 18) |
 | 6 | `RTT` | RTT probe response — **Swift's main signal** (Algorithm 1) |
 
@@ -246,8 +253,10 @@ cwnd ← clamp(min_cwnd, cwnd, max_cwnd)
 if cwnd ≤ cwnd_prev: t_last_decrease ← now
 rate ← cwnd_to_rate(cwnd)                                # BDP; realizes pacing for cwnd<1
 
+# On ACK (Algorithm 1 line 5): retx_cnt ← 0 — data forward progress; no window change
+#   (delay is probe-driven on BF3). Usable RTT samples also reset it; dropped ones don't.
 # On NACK (loss, §3.6): retx_cnt++; if ≥ RETX_RESET_THRESHOLD → cwnd = min_cwnd,
-#   else (once/RTT) cwnd ·= (1 − max_mdf). An RTT event resets retx_cnt (forward progress).
+#   else (once/RTT) cwnd ·= (1 − max_mdf).
 ```
 
 **AI cadence (FIXME in source):** the paper's AI nets `+ai` per RTT via
@@ -271,7 +280,13 @@ Highlights:
 - **Flow-scale constants** (`fs_range`, `fs_min_cwnd`, `fs_max_cwnd`), **`md_beta`,
   `max_mdf`, `max_cwnd`, `retx_reset_threshold`:** paper gives no values — seeded, sweep.
 - **Endpoint window (`ecwnd`, §3.3):** deferred to phase 2 (params reserved, inert).
-- **NACK = loss:** DOCA does not separate SACK fast-recovery from RTO; both folded into the conservative RTO path.
+- **NACK = loss:** DOCA does not separate SACK fast-recovery from RTO; both folded into
+  the conservative RTO path. Whether `ev_subtype` distinguishes NACK causes on BF3 is
+  unverified — trace it on hardware; if it does, the fast-recovery split (Algorithm 1
+  lines 22–25) becomes implementable.
+- **RTO timing (§3.6):** the paper's per-flow EWMA-based retransmission timeout is loss
+  *detection*, which is firmware-owned on BF3 (the RP only receives already-detected
+  NACK events). Intentionally out of RP scope; only the *reaction* is implemented.
 - **`num_acked` / once-per-RTT cadence:** simplified to one step per event (see above).
 - **Serialization:** folded into `base_target` rather than subtracted (matches TIMELY; PDF §3.5).
 
