@@ -124,6 +124,7 @@ static const volatile char swift_c_clamp_min_desc[]     = "RATE_CLAMPED_MIN, rat
 static const volatile char swift_c_clamp_max_desc[]     = "RATE_CLAMPED_MAX, rate clamped down to MAX_RATE";
 static const volatile char swift_c_nack_md_desc[]       = "NACK_MD, NACK-triggered multiplicative decrease";
 static const volatile char swift_c_nack_reset_desc[]    = "NACK_RESET, NACK retx threshold reset cwnd to min";
+static const volatile char swift_c_rtt_drop_desc[]       = "RTT_DROPPED_UNSTAMPED, RTT samples dropped (responder t2/t4 missing/inconsistent)";
 
 void swift_init(uint32_t algo_idx)
 {
@@ -181,6 +182,7 @@ void swift_init(uint32_t algo_idx)
 	SWIFT_REG_COUNTER(SWIFT_C_RATE_CLAMPED_MAX,   swift_c_clamp_max_desc);
 	SWIFT_REG_COUNTER(SWIFT_C_NACK_MD,            swift_c_nack_md_desc);
 	SWIFT_REG_COUNTER(SWIFT_C_NACK_RESET,         swift_c_nack_reset_desc);
+	SWIFT_REG_COUNTER(SWIFT_C_RTT_DROPPED_UNSTAMPED, swift_c_rtt_drop_desc);
 #undef SWIFT_REG_COUNTER
 }
 
@@ -438,11 +440,13 @@ static inline void swift_handle_tx(doca_pcc_dev_event_t *event,
  *   total_rtt     = arrival_ts - req_send_ts        (local-clock duration, t6 - t1)
  *   np_turnaround = resp_send_ts - req_recv_ts       (remote-clock duration, t4 - t2)
  *   fabric_rtt    = total_rtt - np_turnaround        (NIC-to-NIC, queue-aware)
- * Both terms are durations (each within one clock), so this is sync-free. Subtracting
- * np_turnaround removes the remote NP processing time, the largest non-fabric term
- * (brief §3.3). NO serialization is subtracted: per the design decision (and matching
- * TIMELY) it is folded into base_target. The residual local NIC-Rx delay stays in
- * fabric_rtt -- that is endpoint signal, deferred to the ecwnd window (phase 2).
+ * Both terms are durations (each within one clock), so this is sync-free. np_turnaround
+ * is the paper's "remote-queuing" (§3.1 Measuring Delays), reflected by the responder
+ * and subtracted by the sender (§3.3). A response that does not carry it is dropped --
+ * the paper defines no fallback and neither do we (see the drop path below). NO
+ * serialization is subtracted: per the design decision (and matching TIMELY) it is
+ * folded into base_target. The residual local NIC-Rx delay (paper t6 - t5; BF3 exposes
+ * no t5) stays in fabric_rtt -- endpoint signal, deferred to the ecwnd window (phase 2).
  */
 static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 				    uint32_t *param,
@@ -470,12 +474,39 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 
 	uint32_t total_rtt = swift_diff_with_wrap32(arrival, req_send);
 	uint32_t np_turnaround = 0;
-	/* resp_send/req_recv are populated by the NP for RTT probes; if absent (0) or
-	 * inconsistent, fall back to total_rtt (== what TIMELY uses). FIXME: verify the NP
-	 * populates these on BF3 by tracing np_turnaround (format 16). */
-	if (likely(resp_send != 0 && req_recv != 0))
+
+	/* Raw probe timestamps (format 19): "did the responder stamp t2/t4?". Emitted for
+	 * dropped samples too -- it is the diagnostic that explains the drops. populated:
+	 * bit0 = t2 nonzero, bit1 = t4 nonzero; 3 = usable sample. */
+	SWIFT_TRACE(param, SWIFT_TRACE_FMT_RTT_TS, req_send, req_recv, resp_send, arrival,
+		    (uint64_t)(req_recv != 0) | ((uint64_t)(resp_send != 0) << 1));
+
+	if (resp_send != 0 && req_recv != 0)
 		np_turnaround = swift_diff_with_wrap32(resp_send, req_recv);
-	uint32_t fabric_rtt = (np_turnaround < total_rtt) ? (total_rtt - np_turnaround) : total_rtt;
+
+	/* Paper §3.1 (Measuring Delays): the responder reflects its Rx->Tx time (t4 - t2,
+	 * "remote-queuing") on every ACK and the sender subtracts it from the end-to-end
+	 * RTT; the paper defines NO fallback for endpoints that do not report it. An
+	 * unstamped (t2/t4 zero) or physically inconsistent (turnaround >= total RTT)
+	 * response is therefore not a delay sample: drop it, count it, keep probing. cwnd
+	 * and rate stay untouched, so a non-stamping responder (e.g. a ConnectX-5
+	 * reflecting probes without timestamps) leaves Swift visibly inert -- AI/MD
+	 * counters frozen, RTT_DROPPED_UNSTAMPED climbing -- instead of silently
+	 * regulating on total RTT. */
+	if (unlikely(resp_send == 0 || req_recv == 0 || np_turnaround >= total_rtt)) {
+		if (counter != NULL)
+			counter[SWIFT_C_RTT_DROPPED_UNSTAMPED]++;
+		/* The probe round-trip itself completed, so it still counts as forward
+		 * progress (Algorithm 1 line 5) and still re-arms the next probe. */
+		ccctx->retx_cnt = 0;
+		results->rate = ccctx->cur_rate;
+		results->rtt_req = 1;
+		ccctx->rtt_req_to_rtt_sent = 1;
+		SWIFT_TRACE_FLUSH(param);
+		return;
+	}
+
+	uint32_t fabric_rtt = total_rtt - np_turnaround; /* paper §3.3: RTT minus the endpoint term */
 	uint32_t delay = fabric_rtt;
 	uint32_t now = arrival;
 
@@ -586,12 +617,8 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 	results->rtt_req = 1; /* request next RTT probe */
 	ccctx->rtt_req_to_rtt_sent = 1;
 
-	/* Raw probe timestamps (format 19): answers "does the responder populate t2/t4 at
-	 * all?" (FIXME above). populated: bit0 = t2 nonzero, bit1 = t4 nonzero; 3 means
-	 * np_turnaround is genuine, anything else means fabric_rtt fell back to total_rtt. */
-	SWIFT_TRACE(param, SWIFT_TRACE_FMT_RTT_TS, req_send, req_recv, resp_send, arrival,
-		    (uint64_t)(req_recv != 0) | ((uint64_t)(resp_send != 0) << 1));
-	/* Two-line decision trace (joined by order): delay side then window side. */
+	/* Two-line decision trace (joined by order, after the format-19 line emitted
+	 * above): delay side then window side. */
 	/* delay_minus_target is signed (negative when the queue is draining). Pass it as a
 	 * 64-bit signed value so the (uint64_t) trace cast sign-extends and the host's %ld
 	 * renders it correctly (brief §9), rather than a uint32 that would zero-extend. */
