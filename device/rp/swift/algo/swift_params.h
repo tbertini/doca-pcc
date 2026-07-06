@@ -114,6 +114,12 @@ enum swift_param_idx {
  * branches on RTT events. DELAY_LT/GT_TARGET classify each RTT event's delay vs the
  * flow-scaled target (LT coincides with AI, GT with the MD attempt). The remaining
  * counters instrument the numeric edge cases the brief asked to watch.
+ *
+ * RTT_DROPPED_UNSTAMPED counts probe responses discarded because the responder did
+ * not stamp t2/t4 (or the stamps were inconsistent). The paper defines no fallback
+ * for unstamped responses, so neither does the algorithm: a dropped sample changes
+ * nothing. A steadily climbing value with AI/MD frozen at 0 means the responder
+ * cannot support Swift (see README, "The delay signal").
  */
 enum swift_counter_idx {
 	SWIFT_C_EVENTS             = 0,  /* total events dispatched */
@@ -128,6 +134,7 @@ enum swift_counter_idx {
 	SWIFT_C_RATE_CLAMPED_MAX   = 9,  /* actuated rate clamped down to MAX_RATE */
 	SWIFT_C_NACK_MD            = 10, /* NACK-triggered multiplicative decrease */
 	SWIFT_C_NACK_RESET         = 11, /* NACK retx threshold -> cwnd=min_cwnd */
+	SWIFT_C_RTT_DROPPED_UNSTAMPED = 12, /* RTT samples dropped: responder t2/t4 missing/inconsistent */
 	SWIFT_NUM_COUNTERS
 };
 
@@ -192,6 +199,7 @@ static const char *const swift_counter_names[SWIFT_NUM_COUNTERS] = {
 	[SWIFT_C_RATE_CLAMPED_MAX]   = "rate_clamped_max",
 	[SWIFT_C_NACK_MD]            = "nack_md",
 	[SWIFT_C_NACK_RESET]         = "nack_reset",
+	[SWIFT_C_RTT_DROPPED_UNSTAMPED] = "rtt_dropped_unstamped",
 };
 
 #endif /* SWIFT_PARAMS_H_ */

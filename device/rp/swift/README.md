@@ -24,7 +24,7 @@ window (`ecwnd`, paper §3.3) is deferred — see [FIXMEs](#known-unknowns--fixm
 | `algo/swift.h` | Public API: `swift_init`, `swift_algo`, `swift_set_algo_params`; trace gate + format IDs |
 | `algo/swift_ctxt.h` | Per-flow state struct, **exactly 48 bytes** (`fcwnd`, `cur_rate`, `t_last_decrease`, `retx_cnt`, RTT-probe abort machinery; `ecwnd`/endpoint reserved) |
 | `algo/swift_algo_params.h` | Compiled-in default `#define`s — every value cites a paper section or is marked `FIXME:` |
-| `algo/swift_params.h` | The PPCC **contract**: 20-param (19 tuning + 1 diagnostic `trace_on`) / 12-counter table (name, unit, default, min, max), shared by the DPA algorithm and the host `swift_params_dump`. Single source of truth |
+| `algo/swift_params.h` | The PPCC **contract**: 20-param (19 tuning + 1 diagnostic `trace_on`) / 13-counter table (name, unit, default, min, max), shared by the DPA algorithm and the host `swift_params_dump`. Single source of truth |
 | `algo/swift.c` | Algorithm 1 + §3.5 target (see [§ Algorithm 1 mapping](#algorithm-1-mapping)) |
 | `rp_swift_dev_main.c` | DPA entry points; slot-15 fallback bypass (see [§ Slot 0 vs slot 15](#slot-0-vs-slot-15)) |
 
@@ -111,12 +111,25 @@ delay         = fabric_rtt
 ```
 
 Both terms are *durations* each measured within a single clock, so subtracting them is
-**sync-free** (no TIME_SYNC needed). Removing `np_turnaround` strips the remote NP
-processing time — the largest non-fabric term. The residual local NIC-Rx delay stays in
-`fabric_rtt`; that is endpoint signal, deferred to `ecwnd` (phase 2). If the NP does not
-populate `resp_send`/`req_recv` on BF3, the code falls back to `fabric_rtt = total_rtt`
-(== what TIMELY uses) — verify via the `np_turn` field of format 16, or directly via
-format 19, which dumps the four raw timestamps plus a `populated` bitmap per event.
+**sync-free** (no TIME_SYNC needed). `np_turnaround` is the paper's **remote-queuing**
+(§3.1 "Measuring Delays": the receiver reflects its NIC-Rx + processing time to the
+sender on every ACK; §3.3: fabric-delay = RTT minus the endpoint terms). The residual
+local NIC-Rx delay (paper: t6 − t5) stays in `fabric_rtt` — BF3 exposes no t5, and that
+is endpoint signal anyway, deferred to `ecwnd` (phase 2).
+
+**A probe response without responder timestamps is not a delay sample.** The paper
+assumes stamping, Swift-capable endpoints and defines no fallback for their absence, so
+neither does this implementation: if `t2`/`t4` are missing (0) or inconsistent
+(`np_turnaround ≥ total_rtt`), the event is **dropped** — no cwnd/rate change, the
+`rtt_dropped_unstamped` counter increments, and the next probe is still requested. A
+non-stamping responder therefore leaves Swift *visibly inert* (rate pinned at its
+initial value, `ai`/`md` counters frozen at 0, the drop counter climbing at probe
+cadence) rather than silently regulating on total RTT including the remote turnaround.
+Measured on this testbed (2026-07-06): a ConnectX-5 Ex responder (`alveo-u55c-03`)
+reflects probes but **never stamps** — 95/95 probes arrived `populated=0` in format 19 —
+so Swift against that receiver exercises exactly this drop path by design. Swift needs a
+responder that stamps RTT probes, e.g. a BlueField running an NP PCC app
+(`doca_pcc --np-nic-telemetry`).
 
 **Serialization** is *not* subtracted: per the design decision (and matching TIMELY,
 which subtracts none and folds everything into its empirically-retuned thresholds) it is
@@ -140,7 +153,7 @@ decrease. Default seed is **10 µs**; set it from a no-load `fabric_rtt` trace (
 The 19 tuning params are exposed through the standard PPCC register interface; a host
 orchestrator pushes a new vector between runs without rebuilding the DPA. The Mac-side
 [`incast-bench`](../../../../incast-bench) orchestrator dumps the contract via
-`swift_params_dump`, pushes a vector via `mlxreg cmd_type=0xB`, and scrapes the 12
+`swift_params_dump`, pushes a vector via `mlxreg cmd_type=0xB`, and scrapes the 13
 counters via `cmd_type=0xC`/`0xD`. The diagnostic `trace_on` toggle (last param index)
 rides the same channel; sweeps should leave it at 0.
 
@@ -185,7 +198,7 @@ one array. Revisit if a build ever drives multiple physical ports.
 | 16 | Swift `rtt` (delay side) | `fabric_rtt` (ns); `np_turn` (ns); `delay_minus_target` (**signed** ns); `target` (ns); `branch` (table below) |
 | 17 | Swift `rtt` (window side) | `cwnd_prev`, `cwnd` (FXP16 pkts); `rate` (FXP20); `fs_term` (ns, = target − base); `can_decr` |
 | 18 | Swift `loss` (NACK) | `ev_type`; `retx_cnt`; `cwnd` (FXP16); `rate` (FXP20); `reset` (1 = collapsed to min_cwnd) |
-| 19 | Swift `rtt` raw timestamps | `t1_req_send`, `t2_req_recv`, `t4_resp_send`, `t6_arrival` (raw ns, wrapping u32); `populated` (bit0 = t2≠0, bit1 = t4≠0; **3 = receiver stamped both**, else `fabric_rtt` fell back to `total_rtt`) |
+| 19 | Swift `rtt` raw timestamps | `t1_req_send`, `t2_req_recv`, `t4_resp_send`, `t6_arrival` (raw ns, wrapping u32); `populated` (bit0 = t2≠0, bit1 = t4≠0; **3 = receiver stamped both**, else the sample is **dropped** and only `rtt_dropped_unstamped` moves) |
 
 Formats 16 and 17 are two halves of one RTT decision (split because `trace_5` carries
 only five args); join them by order. Format 19 precedes them for the same RTT event.
@@ -214,6 +227,9 @@ only five args); join them by order. Format 19 precedes them for the same RTT ev
 ## Algorithm 1 mapping
 
 ```
+# precondition: the probe response carries responder timestamps t2/t4 (§3.1).
+#   Unstamped/inconsistent → drop the sample: rtt_dropped_unstamped++, rate and cwnd
+#   unchanged, next probe re-requested. The paper defines no fallback, so none exists.
 cwnd_prev    ← cwnd
 can_decrease ← (now − t_last_decrease ≥ rtt)              [§3.2: MD at most once/RTT]
 target       ← TargetDelay(cwnd)                         [§3.5, swift_flow_scaled_target]
