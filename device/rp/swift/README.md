@@ -135,9 +135,22 @@ initial value, `ai`/`md` counters frozen at 0, the drop counter climbing at prob
 cadence) rather than silently regulating on total RTT including the remote turnaround.
 Measured on this testbed (2026-07-06): a ConnectX-5 Ex responder (`alveo-u55c-03`)
 reflects probes but **never stamps** — 95/95 probes arrived `populated=0` in format 19 —
-so Swift against that receiver exercises exactly this drop path by design. Swift needs a
-responder that stamps RTT probes, e.g. a BlueField running an NP PCC app
-(`doca_pcc --np-nic-telemetry`).
+so Swift against that receiver exercises exactly this drop path by design.
+
+Responder support matrix (measured 2026-07-08; NVIDIA publishes none — the DOCA PCC
+guide only states that for CCMAD, "responses are handled by the remote node's hardware"
+when no NP process is set, and that non-CCMAD probe formats always require a remote NP
+process):
+- **BlueField-3** (`alveo-u50d-02`): stamps t2/t4 on every probe, in NIC firmware, with
+  **no PCC process running at all** — no NP app needed for RP-side Swift.
+- **ConnectX-6** (MT4123 `[15b3:101b]`, fw 20.31.1014, `alveo-v80-01`): stamps **only
+  when idle** — 14/15 `populated=3` on a broken/idle flow (`np_turn` ≈ 370 ns, fabric
+  ≈ 3.8 µs), but **under real load it answers every probe unstamped**: at 34 Gb/s,
+  464,092/464,092 probes dropped (`populated=0`, probe RTT p50 ≈ 33 µs), `ai=md=0`,
+  bandwidth frozen at the 2-NACK ratchet plateau (≈34.1 Gb/s) — Swift designed-inert,
+  exactly as against CX-5. **Not viable as a Swift responder**: the signal disappears
+  precisely when congestion exists. (Untested lever: newer CX-6 firmware.)
+- **ConnectX-5 Ex** (`alveo-u55c-03`): never stamps (above).
 
 **Serialization** is *not* subtracted: per the design decision (and matching TIMELY,
 which subtracts none and folds everything into its empirically-retuned thresholds) it is
