@@ -48,6 +48,18 @@
 #endif
 
 /*
+ * arg1 packing for EVERY SMaRTT trace call (format 6, and 20-24): high 32 bits = event
+ * timestamp in ns (wraps at 2^32 ns =~ 4.295 s), low 32 bits = flow_tag. Printed by the
+ * host (pcc_core.c) as tsflow=0x%lx. Defined here (rather than duplicated next to
+ * SMARTT_REPS_TRACE in smartt_reps.c) because both rp_smartt_reps_dev_main.c (format 6)
+ * and smartt_reps.c (formats 20-24) need it and both already include this header --
+ * same sharing pattern as SMARTT_REPS_TRACE_ENABLED just above. ts/flow must come from
+ * doca_pcc_dev_get_timestamp(event) / doca_pcc_dev_get_flowtag(event) (the exact getters
+ * already used for these quantities in this repo -- never re-derive them another way).
+ */
+#define SMARTT_REPS_TRACE_TSFLOW(ts, flow) ((((uint64_t)(uint32_t)(ts)) << 32) | (uint64_t)(uint32_t)(flow))
+
+/*
  * Trace format IDs (emitted when SMARTT_REPS_TRACE_ENABLED(param) is true).
  *
  * Per-event summaries reuse the shared generic format 6 (see rp_smartt_reps_dev_main.c),
@@ -55,13 +67,15 @@
  * in the merged trace_message_formats[] table; SMaRTT claims 20-24.
  *
  * doca_pcc_dev_trace_5 carries five 64-bit args; the argument orders below MUST match
- * the host pcc_core.c format strings exactly (README trace table).
+ * the host pcc_core.c format strings exactly (README trace table). arg1 is always
+ * SMARTT_REPS_TRACE_TSFLOW(...) (see above); where a rate field is present it is always
+ * the last argument.
  */
-#define SMARTT_REPS_TRACE_FMT_ACK     (20) /* per ACK decision: branch, rtt_ns, cwnd_fxp16(after), rate_fxp20, size_pkts */
-#define SMARTT_REPS_TRACE_FMT_QA      (21) /* QuickAdapt fire: acked_epoch, new_cwnd, ignore_target, rate, src(1=ack,2=nack) */
-#define SMARTT_REPS_TRACE_FMT_FASTINC (22) /* FastIncrease active: count_pkts, cwnd, rate, rtt_ns, ncoal */
-#define SMARTT_REPS_TRACE_FMT_SIG     (23) /* raw ACK signal: first_sn, event_sn, delta_pkts, ncoal, avg_wtd_fxp16 */
-#define SMARTT_REPS_TRACE_FMT_LOSS    (24) /* NACK/loss: nack_first_sn, cwnd(after), rate, ignored_pkts, trigger_qa_state */
+#define SMARTT_REPS_TRACE_FMT_ACK     (20) /* per ACK decision: tsflow, branch, rtt_ns, cwnd_fxp16(after), rate_fxp20 */
+#define SMARTT_REPS_TRACE_FMT_QA      (21) /* QuickAdapt fire: tsflow, src(1=ack,2=nack), ignore_target, new_cwnd, rate */
+#define SMARTT_REPS_TRACE_FMT_FASTINC (22) /* FastIncrease active: tsflow, cnt_ncoal(fast_inc_count<<16|ncoal), rtt_ns, cwnd, rate */
+#define SMARTT_REPS_TRACE_FMT_SIG     (23) /* raw ACK signal: tsflow, first_sn, delta_ncoal(delta_pkts<<16|ncoal), avg_wtd_fxp16, 0 */
+#define SMARTT_REPS_TRACE_FMT_LOSS    (24) /* NACK/loss: tsflow, nack_first_sn, ign_qa(ignored_pkts<<1|trigger_qa), cwnd(after), rate */
 
 /*
  * Branch identifiers used in the format-20 trace (README trace table).
