@@ -381,8 +381,9 @@ static inline void swift_handle_new_flow(doca_pcc_dev_event_t *event,
 	results->rate = rate;
 	results->rtt_req = 1; /* request first RTT probe */
 
-	SWIFT_TRACE(param, SWIFT_TRACE_FMT_NEW_FLOW, init_cwnd, rate, timestamp,
-		    param[SWIFT_P_LINE_RATE_MBPS], swift_compute_bdp_fxp16(param));
+	SWIFT_TRACE(param, SWIFT_TRACE_FMT_NEW_FLOW,
+		    SWIFT_TRACE_TSFLOW(timestamp, doca_pcc_dev_get_flowtag(event)), init_cwnd,
+		    param[SWIFT_P_LINE_RATE_MBPS], swift_compute_bdp_fxp16(param), rate);
 	SWIFT_TRACE_FLUSH(param);
 }
 
@@ -475,10 +476,17 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 	uint32_t total_rtt = swift_diff_with_wrap32(arrival, req_send);
 	uint32_t np_turnaround = 0;
 
+	/* Packed tsflow (ts half = arrival/t6) for every trace line this handler emits for
+	 * this event (formats 19, 16, 17 below) -- see SWIFT_TRACE_TSFLOW. Computed here,
+	 * ahead of the drop-path check, so the format-19 line below carries it even for a
+	 * dropped sample. */
+	uint64_t tsflow = SWIFT_TRACE_TSFLOW(arrival, doca_pcc_dev_get_flowtag(event));
+
 	/* Raw probe timestamps (format 19): "did the responder stamp t2/t4?". Emitted for
 	 * dropped samples too -- it is the diagnostic that explains the drops. populated:
-	 * bit0 = t2 nonzero, bit1 = t4 nonzero; 3 = usable sample. */
-	SWIFT_TRACE(param, SWIFT_TRACE_FMT_RTT_TS, req_send, req_recv, resp_send, arrival,
+	 * bit0 = t2 nonzero, bit1 = t4 nonzero; 3 = usable sample. t6/arrival is folded into
+	 * tsflow instead of passed as its own field. */
+	SWIFT_TRACE(param, SWIFT_TRACE_FMT_RTT_TS, tsflow, req_send, req_recv, resp_send,
 		    (uint64_t)(req_recv != 0) | ((uint64_t)(resp_send != 0) << 1));
 
 	if (resp_send != 0 && req_recv != 0)
@@ -618,15 +626,15 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 	results->rtt_req = 1; /* request next RTT probe */
 	ccctx->rtt_req_to_rtt_sent = 1;
 
-	/* Two-line decision trace (joined by order, after the format-19 line emitted
-	 * above): delay side then window side. */
-	/* delay_minus_target is signed (negative when the queue is draining). Pass it as a
-	 * 64-bit signed value so the (uint64_t) trace cast sign-extends and the host's %ld
-	 * renders it correctly (brief §9), rather than a uint32 that would zero-extend. */
-	SWIFT_TRACE(param, SWIFT_TRACE_FMT_RTT_DELAY, fabric_rtt, np_turnaround,
-		    (int64_t)delay - (int64_t)target, target, branch);
-	SWIFT_TRACE(param, SWIFT_TRACE_FMT_RTT_WINDOW, cwnd_prev, cwnd, rate,
-		    target - param[SWIFT_P_BASE_TARGET_NS], can_decrease);
+	/* Two-line decision trace (joined by shared tsflow, and by order, after the
+	 * format-19 line emitted above): delay side then window side. delay_minus_target
+	 * (signed, negative when the queue is draining) and cwnd_prev are no longer passed
+	 * -- both are host-derivable (fabric_rtt - target; the prior line's cwnd for this
+	 * flow) -- freeing the arg slot tsflow now occupies. */
+	SWIFT_TRACE(param, SWIFT_TRACE_FMT_RTT_DELAY, tsflow, fabric_rtt, np_turnaround,
+		    target, branch);
+	SWIFT_TRACE(param, SWIFT_TRACE_FMT_RTT_WINDOW, tsflow, cwnd,
+		    target - param[SWIFT_P_BASE_TARGET_NS], can_decrease, rate);
 	SWIFT_TRACE_FLUSH(param);
 }
 
@@ -692,9 +700,13 @@ static inline void swift_handle_nack(doca_pcc_dev_event_t *event,
 	/* Always emitted (not gated by trace_on): NACKs are rare (~2 per run at ramp on
 	 * this fabric), a loss event is always worth a line, and ev_subtype is being
 	 * surveyed to learn whether firmware distinguishes NACK causes (see FIXME above --
-	 * it decides whether the fast-recovery/RTO split is implementable). */
-	doca_pcc_dev_trace_5(SWIFT_TRACE_FMT_LOSS, doca_pcc_dev_get_ev_attr(event).ev_subtype,
-			     retx_cnt, cwnd, rate, reset);
+	 * it decides whether the fast-recovery/RTO split is implementable). retx_reset packs
+	 * retx_cnt into bits[31:1] and the reset flag into bit0 (see SWIFT_TRACE_TSFLOW /
+	 * README) to fit tsflow into the same five doca_pcc_dev_trace_5 arg slots. */
+	doca_pcc_dev_trace_5(SWIFT_TRACE_FMT_LOSS,
+			     SWIFT_TRACE_TSFLOW(now, doca_pcc_dev_get_flowtag(event)),
+			     doca_pcc_dev_get_ev_attr(event).ev_subtype,
+			     ((uint64_t)(retx_cnt) << 1) | (reset & 1), cwnd, rate);
 	doca_pcc_dev_trace_flush();
 }
 

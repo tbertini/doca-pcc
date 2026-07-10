@@ -48,6 +48,19 @@
 #endif
 
 /*
+ * Packed tsflow trace argument (trace-format normalization, 2026-07-10).
+ *
+ * Every Swift trace line (formats 6, 15-19) carries this as its FIRST doca_pcc_dev_trace_5
+ * arg -- printed host-side as tsflow=0x%lx -- instead of a separate timestamp and/or
+ * flow_tag field at whatever position each format used to put them. Packing:
+ *   bits 63:32 = ts_ns   (the uint32_t doca_pcc_dev_get_timestamp() value; wraps ~4.295s)
+ *   bits 31:0  = flow_tag (the uint32_t doca_pcc_dev_get_flowtag() value)
+ * Same event -> same tsflow: lines emitted for one RTT event (formats 19, 16, 17) carry
+ * an identical tsflow, so a reader can join them by value instead of relying on log order.
+ */
+#define SWIFT_TRACE_TSFLOW(ts, flow) ((((uint64_t)(uint32_t)(ts)) << 32) | (uint64_t)(uint32_t)(flow))
+
+/*
  * Trace format IDs (emitted when SWIFT_TRACE_ENABLED(param) is true).
  *
  * Per-event summaries reuse the shared generic format 6 (see rp_swift_dev_main.c), as
@@ -57,15 +70,20 @@
  * The two RTT-decision lines are split because doca_pcc_dev_trace_5 carries only five
  * 64-bit args and the per-event decision has more than five fields worth checking by
  * hand: format 16 carries the delay/target side, format 17 the cwnd/rate side. They
- * share the event so a reader joins them by timestamp/order. Format 19 fires for
- * every probe response, including samples dropped for missing/inconsistent responder
- * stamps; 16/17 fire only for usable samples, so a 19 line may stand alone.
+ * share the event so a reader joins them by timestamp/order (and, since the tsflow
+ * normalization, by identical tsflow value too). Format 19 fires for every probe
+ * response, including samples dropped for missing/inconsistent responder stamps; 16/17
+ * fire only for usable samples, so a 19 line may stand alone.
+ *
+ * Field lists below are in wire/print order (arg1 tsflow always first; rate last where
+ * a format has one). A few fields dropped as host-derivable to make room -- see the
+ * per-call comments in swift.c and the trace-format table in README.md.
  */
-#define SWIFT_TRACE_FMT_NEW_FLOW   (15)  /* init_cwnd, rate, ts, line_rate_mbps, bdp_fxp16 */
-#define SWIFT_TRACE_FMT_RTT_DELAY  (16)  /* fabric_rtt, np_turnaround, delay(signed), target, branch */
-#define SWIFT_TRACE_FMT_RTT_WINDOW (17)  /* cwnd_prev, cwnd, rate, fs_term, flags */
-#define SWIFT_TRACE_FMT_LOSS       (18)  /* ev_subtype, retx_cnt, cwnd, rate, reset_flag; always emitted (ungated) */
-#define SWIFT_TRACE_FMT_RTT_TS     (19)  /* raw probe ts: t1, t2, t4, t6, populated bitmap */
+#define SWIFT_TRACE_FMT_NEW_FLOW   (15)  /* tsflow, init_cwnd, line_mbps, bdp_fxp16, rate */
+#define SWIFT_TRACE_FMT_RTT_DELAY  (16)  /* tsflow, fabric_rtt, np_turnaround, target, branch */
+#define SWIFT_TRACE_FMT_RTT_WINDOW (17)  /* tsflow, cwnd, fs_term, can_decrease, rate */
+#define SWIFT_TRACE_FMT_LOSS       (18)  /* tsflow, ev_subtype, retx_reset, cwnd, rate; always emitted (ungated) */
+#define SWIFT_TRACE_FMT_RTT_TS     (19)  /* tsflow (ts half = t6/arrival), req_send, req_recv, resp_send, populated */
 
 /*
  * Branch identifiers used in the format-16 trace.

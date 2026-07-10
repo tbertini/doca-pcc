@@ -209,22 +209,54 @@ one array. Revisit if a build ever drives multiple physical ports.
 
 ## Trace format reference
 
+**Trace-format normalization (2026-07-10):** every Swift trace line (formats 6, 15–19)
+now carries a packed `tsflow` as arg1 instead of separate timestamp/flow_tag fields —
+printed `tsflow=0x%lx`. Packing (`SWIFT_TRACE_TSFLOW` in `algo/swift.h`):
+
+```
+bits 63:32 = ts_ns    (the uint32_t doca_pcc_dev_get_timestamp() value; wraps ~4.295s)
+bits 31:0  = flow_tag (the uint32_t doca_pcc_dev_get_flowtag() value)
+```
+
+Printed fields are otherwise contiguous in emission order, with `rate` last wherever a
+format has one. Freeing that arg slot required dropping two fields that are derivable
+host-side rather than carried on the wire — see the before/after map below. Lines
+emitted for the *same* RTT event (formats 19, 16, 17) now carry an identical `tsflow`,
+so — in addition to log order — a reader can group them by that value.
+
 | ID | Source | Field meanings |
 |---|---|---|
 | 0–1 | DOCA infra | `user init` / `user algo` (every algo) |
 | 2–5 | NP-side | only fire under a `--np-*` app — ignore on RP/Swift |
-| 6 | per-event summary (`rp_swift_dev_main.c`) | `ev_type` (table below); `flow_tag`; `port`; `algo_slot`; `rate` (FXP20 after algo) |
+| 6 | per-event summary (`rp_swift_dev_main.c`) | `tsflow`; `ev_type` (table below); `port`; `algo_slot`; `rate` (FXP20 after algo) |
 | 7–14 | reserved for DCQCN (7–10) / TIMELY (11/12/14, 13 retired) | placeholders for the eventual merged build — never emitted on the swift branch |
-| 15 | Swift `new_flow` | `init_cwnd` (FXP16 pkts); `rate` (FXP20); `ts`; `line_mbps`; `bdp_fxp16` |
-| 16 | Swift `rtt` (delay side) | `fabric_rtt` (ns); `np_turn` (ns); `delay_minus_target` (**signed** ns); `target` (ns); `branch` (table below) |
-| 17 | Swift `rtt` (window side) | `cwnd_prev`, `cwnd` (FXP16 pkts); `rate` (FXP20); `fs_term` (ns, = target − base); `can_decr` |
-| 18 | Swift `loss` (NACK) — **always emitted**, not gated by `trace_on` (NACKs are rare) | `ev_subtype` (1=RNR, 2=OOS, 3=DUP_READ; measured: ramp NACKs are OOS=2); `retx_cnt`; `cwnd` (FXP16); `rate` (FXP20); `reset` (1 = collapsed to min_cwnd) |
-| 19 | Swift `rtt` raw timestamps | `t1_req_send`, `t2_req_recv`, `t4_resp_send`, `t6_arrival` (raw ns, wrapping u32); `populated` (bit0 = t2≠0, bit1 = t4≠0; **3 = receiver stamped both**, else the sample is **dropped** and only `rtt_dropped_unstamped` moves) |
+| 15 | Swift `new_flow` | `tsflow`; `init_cwnd` (FXP16 pkts); `line_mbps`; `bdp_fxp16`; `rate` (FXP20) |
+| 16 | Swift `rtt` (delay side) | `tsflow`; `fabric_rtt` (ns); `np_turn` (ns); `target` (ns); `branch` (table below) |
+| 17 | Swift `rtt` (window side) | `tsflow`; `cwnd` (FXP16 pkts); `fs_term` (ns, = target − base); `can_decr`; `rate` (FXP20) |
+| 18 | Swift `loss` (NACK) — **always emitted**, not gated by `trace_on` (NACKs are rare) | `tsflow`; `ev_subtype` (1=RNR, 2=OOS, 3=DUP_READ; measured: ramp NACKs are OOS=2); `retx_reset` (bits 31:1 = `retx_cnt`, bit0 = `reset`, 1 = collapsed to min_cwnd); `cwnd` (FXP16); `rate` (FXP20) |
+| 19 | Swift `rtt` raw timestamps | `tsflow` (ts half = `t6`/arrival); `t1_req_send`, `t2_req_recv`, `t4_resp_send` (raw ns, wrapping u32); `populated` (bit0 = t2≠0, bit1 = t4≠0; **3 = receiver stamped both**, else the sample is **dropped** and only `rtt_dropped_unstamped` moves) |
+
+### Before → after field map
+
+| Fmt | Before (arg1…arg5) | After (arg1…arg5) | Notes |
+|---|---|---|---|
+| 6 | `ev_type, flow_tag, port, algo_slot, rate` | `tsflow, ev_type, port, algo_slot, rate` | `flow_tag` absorbed into `tsflow` |
+| 15 | `init_cwnd, rate, ts, line_mbps, bdp_fxp16` | `tsflow, init_cwnd, line_mbps, bdp_fxp16, rate` | `ts` absorbed into `tsflow`; `rate` moved last |
+| 16 | `fabric_rtt, np_turn, delay_minus_target, target, branch` | `tsflow, fabric_rtt, np_turn, target, branch` | `delay_minus_target` **dropped** — derivable as `fabric_rtt − target` |
+| 17 | `cwnd_prev, cwnd, rate, fs_term, can_decr` | `tsflow, cwnd, fs_term, can_decr, rate` | `cwnd_prev` **dropped** — derivable from the previous format-17 line for the same flow; `rate` moved last |
+| 18 | `ev_subtype, retx_cnt, cwnd, rate, reset` | `tsflow, ev_subtype, retx_reset, cwnd, rate` | `retx_cnt`/`reset` packed into one `retx_reset` word (bits 31:1 / bit0) |
+| 19 | `t1, t2, t4, t6, populated` | `tsflow(t6), t1, t2, t4, populated` | `t6`/arrival folded into `tsflow`'s `ts_ns` half instead of its own field |
+
+`tsflow` gives every line "which flow, when" at a fixed position instead of scattered or
+absent fields; algorithm logic, branch semantics, and all still-present fields are
+byte-for-byte the same values as before — only trace-call arguments and format strings
+changed. Format 18 remains **always emitted**, ungated by `trace_on`, exactly as before.
 
 Formats 16 and 17 are two halves of one RTT decision (split because `trace_5` carries
-only five args); join them by order. Format 19 precedes them for the same RTT event.
-**A dropped sample emits format 19 alone** — no 16/17 pair follows it. When pairing
-16/17 by order, a 19-line with no pair after it marks a drop, not a missing trace.
+only five args); join them by order or by identical `tsflow`. Format 19 precedes them
+for the same RTT event. **A dropped sample emits format 19 alone** — no 16/17 pair
+follows it, though it still carries that event's `tsflow`. When pairing 16/17 by order,
+a 19-line with no pair after it marks a drop, not a missing trace.
 
 ### `ev_type`
 
