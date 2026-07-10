@@ -7,7 +7,7 @@ build.
 
 | Tool | What it does |
 |---|---|
-| `timely-prettify.sh` | Translates `doca_pcc --rp-timely` trace numbers (`ev_type`, `branch`, …) into readable names with optional ANSI color. Pipe a live `doca_pcc` run or a saved log through it. |
+| `timely-prettify.sh` | Translates `doca_pcc --rp-timely` trace numbers (`tsflow`, `ev_type`, `branch`, …) into readable names with optional ANSI color. Pipe a live `doca_pcc` run or a saved log through it. Understands the normalized `tsflow=0x<hex>` packing (formats 6/11/12/14) — unpacks it to `ts=<ns> flow=<tag>` and filters on the embedded flow tag via `--filter-flow`; older pre-normalization logs still parse. |
 | `mlxreg-pretty.py` | Pretty-prints raw `mlxreg --reg_name PPCC` output: hex→decimal, plus a per-field hint. TIMELY-aware: labels `text[i]` cells with the param/counter name based on `cmd_type`. |
 
 ## Usage
