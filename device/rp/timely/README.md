@@ -54,12 +54,12 @@ labelled fields, see [`tools/mlxreg-pretty.py`](../../../tools/mlxreg-pretty.py)
 
 Useful flags:
 
-- `--filter-flow 1414831099` — keep only format-6 lines for one flow tag. **Currently
-  broken** by the tsflow packing below: the script still greps a bare `flow_tag=`
-  field out of format-6 lines, which no longer exists (it's packed into `tsflow`
-  now) — see [Trace format normalization](#trace-format-normalization) — so every
-  format-6 line is silently dropped when this flag is passed. Needs a follow-up
-  patch to extract flow_tag from `tsflow & 0xffffffff` instead.
+- `--filter-flow 1414831099` — keep only lines for one flow tag, now across
+  every format that carries one (6, 11, 12, 14 — the last three couldn't be
+  filtered before the tsflow packing below existed). Fixed to extract the flow
+  tag from `tsflow & 0xffffffff` — see [Trace format normalization](#trace-format-normalization).
+  Old-style format-6 logs without `tsflow` still filter correctly via their
+  standalone `flow_tag=` field.
 - `--drop-acks` — drop ACK noise (most common format-6 line)
 - `--drop-reserved` — drop the `format 7-10 reserved` placeholder lines
 - `--no-color` — disable ANSI colors
@@ -71,12 +71,13 @@ format 6 - pcc event: tsflow=0x1888e2a05439fabb ev_type=4 port=0 algo_slot=15 ra
 format 12 - timely rtt: tsflow=0x1888e2a05439fabb new_rtt=600000 norm_grad=0 branch=0x82 new_rate=64
 ```
 
-`tools/timely-prettify.sh` still substitutes `ev_type=4` → `ev_type=ACK` and
-`branch=0x82` → `branch=GRAD_LE+CLAMP` unchanged (those fields kept their names
-and position). Its `rtt_diff`/`norm_grad` unsign-workarounds are now dead code —
-harmless no-ops — since format 12 no longer carries `rtt_diff` and the device
-now sign-extends `norm_grad` correctly before printing (see below); only
-`--filter-flow` is actually broken.
+`tools/timely-prettify.sh` substitutes `ev_type=4` → `ev_type=ACK` and
+`branch=0x82` → `branch=GRAD_LE+CLAMP` unchanged (those fields kept their names,
+just moved next to `tsflow`), and rewrites `tsflow=0x...` itself to
+`ts=<ns> flow=<tag>`. Its old `rtt_diff`/`norm_grad` unsign-workarounds were
+removed as dead code — format 12 no longer carries `rtt_diff`, and the device
+now sign-extends `norm_grad` correctly before printing (see below), so no
+host-side fixup is needed.
 
 ## Tuning parameters for your fabric
 
@@ -244,9 +245,10 @@ Notes:
   sign-extends through `int64_t` before reinterpreting the bits as `uint64_t`,
   so `%ld` on the host recovers the correct sign directly — no host-side
   workaround needed.
-- **`tools/timely-prettify.sh` was not updated by this change** (out of scope
-  here — see [Useful flags](#reading-the-trace-output) above for the resulting
-  `--filter-flow` breakage and which parts became harmless dead code instead).
+- **`tools/timely-prettify.sh` has since been updated for this normalization**
+  (was out of scope for this change, fixed in a follow-up) — see
+  [Useful flags](#reading-the-trace-output) above for the current `--filter-flow`
+  behavior and which parts became dead code and were removed.
 
 ### `ev_type` (from [`include/doca_pcc_dev.h:46-52`](../../../../../include/doca_pcc_dev.h))
 
