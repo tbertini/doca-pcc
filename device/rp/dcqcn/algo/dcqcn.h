@@ -26,6 +26,37 @@
 #ifndef DCQCN_H
 #define DCQCN_H
 
+#include "dcqcn_params.h"	/* DCQCN_PARAM_TRACE_ON */
+
+/*
+ * Runtime trace gate.
+ *
+ * DCQCN's format 7-10 device traces (plus the shared format 6 per-event summary
+ * emitted from rp_dcqcn_dev_main.c) are compiled in unconditionally and gated here,
+ * so they can be toggled at runtime via the trace_on PPCC param
+ * (param[DCQCN_PARAM_TRACE_ON]) WITHOUT rebuilding the DPA binary. Default is off.
+ *
+ * Building with -DDCQCN_DEBUG forces them on from boot (e.g. to capture the earliest
+ * events, before a param write can land), ignoring the param.
+ *
+ * Cost when off: one well-predicted branch per event. The trace-record write and the
+ * buffer flush -- the expensive part -- are skipped.
+ */
+#ifdef DCQCN_DEBUG
+#define DCQCN_TRACE_ENABLED(param) (1)
+#else
+#define DCQCN_TRACE_ENABLED(param) ((param)[DCQCN_PARAM_TRACE_ON] != 0)
+#endif
+
+/*
+ * arg1 convention for every DCQCN per-flow trace format (6-10): pack the triggering
+ * event's timestamp (ns) and flow_tag into one 64-bit value, printed host-side as
+ * tsflow=0x%lx. Bits [63:32] = timestamp (wraps ~4.295 s at 1 ns granularity);
+ * bits [31:0] = flow_tag. Defined here (rather than in dcqcn.c) so both dcqcn.c and
+ * rp_dcqcn_dev_main.c's format-6 call site can use the same macro.
+ */
+#define DCQCN_TRACE_TSFLOW(ts, flow) ((((uint64_t)(uint32_t)(ts)) << 32) | (uint64_t)(uint32_t)(flow))
+
 /*
  * Entry point to DCQCN user algorithm
  * This function starts the algorithm code of a single event for the DCQCN algorithm.

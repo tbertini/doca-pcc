@@ -44,18 +44,25 @@
 
 #pragma clang diagnostic ignored "-Wunused-parameter"
 
-/* Define DCQCN_DEBUG at compile time to enable detailed tracing.
- * WARNING: significant performance overhead on hot path (every TX event). */
-#ifdef DCQCN_DEBUG
-#define DCQCN_TRACE(fmt_id, a1, a2, a3, a4, a5) \
-	doca_pcc_dev_trace_5(fmt_id, (uint64_t)(a1), (uint64_t)(a2), (uint64_t)(a3), (uint64_t)(a4), (uint64_t)(a5))
-#define DCQCN_TRACE_FLUSH() doca_pcc_dev_trace_flush()
-#else
-#define DCQCN_TRACE(fmt_id, a1, a2, a3, a4, a5) do {} while (0)
-#define DCQCN_TRACE_FLUSH() do {} while (0)
-#endif
+/* Per-event trace emission, gated by DCQCN_TRACE_ENABLED(param) (see dcqcn.h):
+ * compiled in unconditionally, emitted only when the trace_on PPCC param is set at
+ * runtime (or always under -DDCQCN_DEBUG). The flush is gated too.
+ * WARNING: even gated off, this is hot-path plumbing (every TX event) -- see dcqcn.h
+ * for the cost when disabled. */
+#define DCQCN_TRACE(param, fmt_id, a1, a2, a3, a4, a5) \
+	do { \
+		if (DCQCN_TRACE_ENABLED(param)) \
+			doca_pcc_dev_trace_5(fmt_id, (uint64_t)(a1), (uint64_t)(a2), \
+					     (uint64_t)(a3), (uint64_t)(a4), (uint64_t)(a5)); \
+	} while (0)
+#define DCQCN_TRACE_FLUSH(param) \
+	do { \
+		if (DCQCN_TRACE_ENABLED(param)) \
+			doca_pcc_dev_trace_flush(); \
+	} while (0)
 
-/* Debug trace format IDs (only active when DCQCN_DEBUG is defined) */
+/* Trace format IDs (emitted when DCQCN_TRACE_ENABLED(param) is true; see dcqcn.h).
+ * Format 6 (shared per-event summary) is emitted from rp_dcqcn_dev_main.c. */
 #define DCQCN_TRACE_FMT_NEW_FLOW  (7)
 #define DCQCN_TRACE_FMT_CNP       (8)
 #define DCQCN_TRACE_FMT_TX        (9)
@@ -93,6 +100,7 @@ static const volatile char dcqcn_param_r_ai_desc[] = "R_AI, additive increase st
 static const volatile char dcqcn_param_r_hai_desc[] = "R_HAI, hyper additive increase step (FXP20)";
 static const volatile char dcqcn_param_new_flow_rate_desc[] = "NEW_FLOW_RATE, initial rate for new flows (FXP20)";
 static const volatile char dcqcn_param_min_rate_desc[] = "MIN_RATE, minimum rate floor (FXP20)";
+static const volatile char dcqcn_param_trace_on_desc[] = "TRACE_ON, runtime trace toggle (0/1); always on if built -DDCQCN_DEBUG";
 static const volatile char dcqcn_counter_tx_desc[] = "COUNTER_TX_EVENT, number of TX events handled";
 static const volatile char dcqcn_counter_cnp_desc[] = "COUNTER_CNP_EVENT, number of CNP events handled";
 static const volatile char dcqcn_counter_nack_desc[] = "COUNTER_NACK_EVENT, number of NACK events handled";
@@ -111,8 +119,9 @@ void dcqcn_init(uint32_t algo_idx)
 
 	/* Register every parameter from the contract table. min/max/def come from
 	 * dcqcn_params[]; permissions=1 (updatable). Passing the table's min (not a
-	 * hardcoded 1) keeps this value-identical with the pre-contract calls, all of
-	 * which happened to pass MIN=1 -- see dcqcn_params.h for the transcription. */
+	 * hardcoded 1) keeps params 0-7 value-identical with the pre-contract calls, all
+	 * of which happened to pass MIN=1 (see dcqcn_params.h for the transcription), and
+	 * lets the appended trace_on (index 8) accept a write of 0. */
 #define DCQCN_REG_PARAM(idx, desc) \
 	doca_pcc_dev_algo_init_param(algo_idx, (idx), dcqcn_params[(idx)].def, dcqcn_params[(idx)].max, \
 				     dcqcn_params[(idx)].min, 1, sizeof(desc), (uint64_t)(desc))
@@ -125,6 +134,7 @@ void dcqcn_init(uint32_t algo_idx)
 	DCQCN_REG_PARAM(DCQCN_PARAM_R_HAI,           dcqcn_param_r_hai_desc);
 	DCQCN_REG_PARAM(DCQCN_PARAM_NEW_FLOW_RATE,   dcqcn_param_new_flow_rate_desc);
 	DCQCN_REG_PARAM(DCQCN_PARAM_MIN_RATE,        dcqcn_param_min_rate_desc);
+	DCQCN_REG_PARAM(DCQCN_PARAM_TRACE_ON,        dcqcn_param_trace_on_desc);
 #undef DCQCN_REG_PARAM
 
 #define DCQCN_REG_COUNTER(idx, desc) \
@@ -147,18 +157,20 @@ void dcqcn_init(uint32_t algo_idx)
  * @ccctx [in/out]: Per-flow context
  * @cur_rate [in]: Current rate RC (FXP20)
  * @param [in]: Algorithm parameters
+ * @tsflow [in]: DCQCN_TRACE_TSFLOW(ts, flow_tag) of the TX event driving this
+ * increase, forwarded from dcqcn_handle_tx (this helper has no doca_pcc_dev_event_t
+ * of its own) -- used only by the format-10 trace below, never by the rate math.
  * @return: Updated rate RC (FXP20)
  */
 static inline uint32_t dcqcn_rate_increase(cc_ctxt_dcqcn_t *ccctx,
 					   uint32_t cur_rate,
-					   uint32_t *param)
+					   uint32_t *param,
+					   uint64_t tsflow)
 {
 	uint16_t t_count = ccctx->t_count;
 	uint16_t bc_count = ccctx->bc_count;
 	uint32_t target_rate = ccctx->target_rate;
-#ifdef DCQCN_DEBUG
-	uint32_t old_rate = cur_rate;
-#endif
+	uint32_t old_rate = cur_rate; /* pre-update snapshot, used only by the format-10 trace below */
 	uint32_t F = param[DCQCN_PARAM_F_THRESHOLD];
 	uint32_t R_AI = param[DCQCN_PARAM_R_AI];
 	uint32_t R_HAI = param[DCQCN_PARAM_R_HAI];
@@ -169,21 +181,23 @@ static inline uint32_t dcqcn_rate_increase(cc_ctxt_dcqcn_t *ccctx,
 	if (max_count < F) {
 		/* Fast Recovery (paper Equation 3): RC = (RT + RC) / 2 */
 		cur_rate = (target_rate + cur_rate) >> 1;
-		DCQCN_TRACE(DCQCN_TRACE_FMT_RATE_INC, old_rate, cur_rate, target_rate, 0 /* FR */, ((uint32_t)t_count << 16) | bc_count);
+		/* t_bc dropped from this format (available at fmt-9/TX cadence instead) --
+		 * see README trace table. */
+		DCQCN_TRACE(param, DCQCN_TRACE_FMT_RATE_INC, tsflow, old_rate, target_rate, 0 /* FR */, cur_rate);
 	} else if (min_count > F) {
 		/* Additive Increase (paper Equation 4): RT += R_AI; RC = (RT + RC) / 2 */
 		target_rate += R_AI;
 		if (target_rate > DOCA_PCC_DEV_MAX_RATE)
 			target_rate = DOCA_PCC_DEV_MAX_RATE;
 		cur_rate = (target_rate + cur_rate) >> 1;
-		DCQCN_TRACE(DCQCN_TRACE_FMT_RATE_INC, old_rate, cur_rate, target_rate, 2 /* AI */, ((uint32_t)t_count << 16) | bc_count);
+		DCQCN_TRACE(param, DCQCN_TRACE_FMT_RATE_INC, tsflow, old_rate, target_rate, 2 /* AI */, cur_rate);
 	} else {
 		/* Hyper Increase (paper Section 3.1, QCN [17]): RT += R_HAI; RC = (RT + RC) / 2 */
 		target_rate += R_HAI;
 		if (target_rate > DOCA_PCC_DEV_MAX_RATE)
 			target_rate = DOCA_PCC_DEV_MAX_RATE;
 		cur_rate = (target_rate + cur_rate) >> 1;
-		DCQCN_TRACE(DCQCN_TRACE_FMT_RATE_INC, old_rate, cur_rate, target_rate, 1 /* HI */, ((uint32_t)t_count << 16) | bc_count);
+		DCQCN_TRACE(param, DCQCN_TRACE_FMT_RATE_INC, tsflow, old_rate, target_rate, 1 /* HI */, cur_rate);
 	}
 
 	ccctx->target_rate = target_rate;
@@ -227,6 +241,7 @@ static inline void dcqcn_handle_new_flow(doca_pcc_dev_event_t *event,
 {
 	uint32_t timestamp = doca_pcc_dev_get_timestamp(event);
 	uint32_t new_flow_rate = param[DCQCN_PARAM_NEW_FLOW_RATE];
+	uint64_t tsflow = DCQCN_TRACE_TSFLOW(timestamp, doca_pcc_dev_get_flowtag(event));
 
 	ccctx->cur_rate = new_flow_rate;
 	ccctx->target_rate = new_flow_rate;
@@ -241,8 +256,8 @@ static inline void dcqcn_handle_new_flow(doca_pcc_dev_event_t *event,
 	results->rate = new_flow_rate;
 	results->rtt_req = 0;
 
-	DCQCN_TRACE(DCQCN_TRACE_FMT_NEW_FLOW, new_flow_rate, DCQCN_INITIAL_ALPHA, timestamp, 0, 0);
-	DCQCN_TRACE_FLUSH();
+	DCQCN_TRACE(param, DCQCN_TRACE_FMT_NEW_FLOW, tsflow, DCQCN_INITIAL_ALPHA, new_flow_rate, 0, 0);
+	DCQCN_TRACE_FLUSH(param);
 }
 
 /*
@@ -264,9 +279,8 @@ static inline void dcqcn_handle_cnp(doca_pcc_dev_event_t *event,
 {
 	uint32_t timestamp = doca_pcc_dev_get_timestamp(event);
 	uint32_t cur_rate = ccctx->cur_rate;
-#ifdef DCQCN_DEBUG
-	uint32_t old_rate = cur_rate;
-#endif
+	uint32_t old_rate = cur_rate; /* pre-update snapshot, used only by the format-8 trace below */
+	uint64_t tsflow = DCQCN_TRACE_TSFLOW(timestamp, doca_pcc_dev_get_flowtag(event));
 	uint32_t alpha = ccctx->alpha;
 	uint32_t g_shift = param[DCQCN_PARAM_G_SHIFT];
 	uint32_t timer_period = param[DCQCN_PARAM_TIMER_PERIOD];
@@ -315,8 +329,8 @@ static inline void dcqcn_handle_cnp(doca_pcc_dev_event_t *event,
 	results->rate = cur_rate;
 	results->rtt_req = 0;
 
-	DCQCN_TRACE(DCQCN_TRACE_FMT_CNP, old_rate, cur_rate, alpha, dec_factor, timestamp);
-	DCQCN_TRACE_FLUSH();
+	DCQCN_TRACE(param, DCQCN_TRACE_FMT_CNP, tsflow, old_rate, alpha, dec_factor, cur_rate);
+	DCQCN_TRACE_FLUSH(param);
 }
 
 /*
@@ -342,6 +356,9 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 	uint32_t g_shift = param[DCQCN_PARAM_G_SHIFT];
 	uint32_t timer_period = param[DCQCN_PARAM_TIMER_PERIOD];
 	uint32_t byte_threshold = param[DCQCN_PARAM_BYTE_COUNTER_TH];
+	/* Shared by this event's format-9 trace and every format-10 trace fired by
+	 * dcqcn_rate_increase() below (same event -> same ts/flow_tag). */
+	uint64_t tsflow = DCQCN_TRACE_TSFLOW(timestamp, doca_pcc_dev_get_flowtag(event));
 
 	/* --- Alpha Timer (Equation 2): α = (1 - g) * α --- */
 	uint32_t alpha_elapsed = dcqcn_diff_with_wrap32(timestamp, ccctx->last_alpha_ts);
@@ -372,7 +389,7 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 
 		for (uint32_t i = 0; i < n_timer; i++) {
 			ccctx->t_count++;
-			cur_rate = dcqcn_rate_increase(ccctx, cur_rate, param);
+			cur_rate = dcqcn_rate_increase(ccctx, cur_rate, param, tsflow);
 		}
 		ccctx->last_timer_ts = timestamp;
 	}
@@ -390,7 +407,7 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 	if (byte_threshold > 0 && ccctx->bytes_accumulated >= byte_threshold) {
 		ccctx->bc_count++;
 		ccctx->bytes_accumulated -= byte_threshold;
-		cur_rate = dcqcn_rate_increase(ccctx, cur_rate, param);
+		cur_rate = dcqcn_rate_increase(ccctx, cur_rate, param, tsflow);
 	}
 
 	if (cur_rate > DOCA_PCC_DEV_MAX_RATE)
@@ -402,7 +419,10 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 	results->rate = cur_rate;
 	results->rtt_req = 0;
 
-	DCQCN_TRACE(DCQCN_TRACE_FMT_TX, cur_rate, alpha, ccctx->t_count, ccctx->bc_count, ccctx->bytes_accumulated);
+	/* t_bc: bits[31:16] = t_count, bits[15:0] = bc_count (see README trace table). */
+	DCQCN_TRACE(param, DCQCN_TRACE_FMT_TX, tsflow, alpha,
+		    ((uint64_t)((uint32_t)ccctx->t_count << 16 | (ccctx->bc_count & 0xFFFF))),
+		    ccctx->bytes_accumulated, cur_rate);
 }
 
 /*

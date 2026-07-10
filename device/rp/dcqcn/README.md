@@ -10,7 +10,7 @@ rate-based and driven by **ECN / CNPs** (Congestion Notification Packets); unlik
 
 | File | Purpose |
 |---|---|
-| `algo/dcqcn.h` | Public API: `dcqcn_init`, `dcqcn_algo`, `dcqcn_set_algo_params` |
+| `algo/dcqcn.h` | Public API (`dcqcn_init`, `dcqcn_algo`, `dcqcn_set_algo_params`) + the runtime trace gate (`DCQCN_TRACE_ENABLED`) and `DCQCN_TRACE_TSFLOW` packing macro shared with `rp_dcqcn_dev_main.c` |
 | `algo/dcqcn_ctxt.h` | Per-flow state (48 B): RC/RT rates, α, the three software timers/counters |
 | `algo/dcqcn_algo_params.h` | Compiled-in default `#define`s (timer period, byte threshold, g, F, R_AI, R_HAI, rates) |
 | `algo/dcqcn_params.h` | **PPCC contract** (single source of truth): param/counter indices + `{name, unit, def, min, max}` table, included by both `dcqcn.c` and the host dumper |
@@ -38,8 +38,11 @@ On this branch the default application is DCQCN (`host/pcc.c` sets
 `cfg.app = pcc_rp_dcqcn_app`), so a bare `doca_pcc -d mlx5_0` runs it; the
 `--rp-dcqcn` / `-rp-dc` flag selects it explicitly.
 
-Device traces are **off by default** (per-event tracing is hot-path cost on every
-TX). Build with `DCQCN_DEBUG=1` to compile in the format 6/7/8/9/10 device traces:
+Per-event traces (formats 6-10) are **compiled in but quiet by default** (per-event
+tracing would otherwise be hot-path cost on every TX). Turn them on at runtime — no
+rebuild — by setting the `trace_on` PPCC param (index 8) to 1, back to 0 to silence.
+To force them on from boot (e.g. to catch the earliest events, before a param write
+can land), build with `DCQCN_DEBUG=1` instead, which ignores the param:
 
 ```bash
 DCQCN_DEBUG=1 meson setup --wipe /tmp/build -Denable_all_applications=false -Denable_pcc=true
@@ -52,18 +55,21 @@ The `doca_pcc` host process decodes device traces through the registered
 so the stream is already human-readable, e.g.:
 
 ```
-format 6 - pcc event: ev_type=5 flow_tag=188005017 port=1 algo_slot=15 rate=524288
-format 8 - dcqcn cnp: old_rate=1048576 new_rate=524288 alpha=65536 dec_factor=32768 ts=...
+format 6 - pcc event: tsflow=0xa2f3c1000b322559 ev_type=5 port=1 algo_slot=15 rate=524288
+format 8 - dcqcn cnp: tsflow=0xa2f3c1000b322559 old_rate=1048576 alpha=65536 dec_factor=32768 new_rate=524288
 ```
 
-All five DCQCN trace formats only emit when built `DCQCN_DEBUG=1`.
+`tsflow` packs the triggering event's timestamp and flow_tag into one 64-bit value —
+see [Trace format reference](#trace-format-reference) for the bit layout. All DCQCN
+trace formats are gated by the runtime `trace_on` param (or always on if built
+`DCQCN_DEBUG=1`); see [Runtime tuning via PPCC](#runtime-tuning-via-ppcc-incast-bench-integration).
 
 ## Tuning parameters for your fabric
 
-`algo/dcqcn_params.h` is the single source of truth for the 8 runtime-tunable
-parameters, their defaults, and the min/max enforced by the framework at
-registration (`dcqcn_init`) — it replaces the enum + inline
-`doca_pcc_dev_algo_init_param` argument lists that used to live directly in
+`algo/dcqcn_params.h` is the single source of truth for the 9 PPCC-exposed
+parameters (8 tuning + 1 diagnostic `trace_on`), their defaults, and the min/max
+enforced by the framework at registration (`dcqcn_init`) — it replaces the enum +
+inline `doca_pcc_dev_algo_init_param` argument lists that used to live directly in
 `dcqcn.c`. The table below is generated from that contract:
 
 | idx | name | unit | default | min | max | meaning |
@@ -76,9 +82,13 @@ registration (`dcqcn_init`) — it replaces the enum + inline
 | 5 | `r_hai` | FXP20 | 2095 | 1 | 1048576 | hyper-increase step R_HAI (= 5·R_AI) |
 | 6 | `new_flow_rate` | FXP20 | 1048576 | 1 | 1048576 | initial rate for new flows (100% line) |
 | 7 | `min_rate` | FXP20 | 64 | 1 | 1048576 | minimum rate floor |
+| 8 | `trace_on` | bool | 0 | **0** | 1 | runtime device-trace toggle — diagnostics only, not a tuning knob (see [Runtime tuning via PPCC](#runtime-tuning-via-ppcc-incast-bench-integration)) |
 
 Rate parameters are **FXP20** fractions of line rate (`1<<20` = 100%), so their
 absolute meaning scales with the NIC line rate — re-tune if the NIC speed changes.
+`trace_on` is the odd one out in this table: unlike 0-7 (all registered with a
+framework MIN of 1, transcribed verbatim from the pre-contract code), its min is 0
+on purpose, so it can be switched back off at runtime — see `dcqcn_params.h`.
 
 > **`g_shift` is capped at 16 on purpose.** `dcqcn_alpha_update_cnp` computes
 > `1 << (16 - g_shift)`; a value above 16 would shift by a negative count
@@ -99,8 +109,8 @@ sudo mlxreg -d $MST -y --reg_name PPCC \
     --set "cmd_type=0x8,value=0xA"
 ```
 
-Read all 8 back with a bulk get (`cmd_type=0xA`); the values land in `text[0]`
-(`timer_period`) … `text[7]` (`min_rate`), in the index order above:
+Read all 9 back with a bulk get (`cmd_type=0xA`); the values land in `text[0]`
+(`timer_period`) … `text[8]` (`trace_on`), in the index order above:
 
 ```bash
 sudo mlxreg -d $MST -y --reg_name PPCC \
@@ -127,7 +137,7 @@ ninja -C /tmp/build dcqcn_params_dump
 ```
 
 It prints `algo_id` (`0xBFFE` = 49150), one `{idx, name, unit, default, min, max}`
-entry per parameter (the 8 rows in the table above, keyed by the same `name`s), and
+entry per parameter (the 9 rows in the table above, keyed by the same `name`s), and
 one `{idx, name}` entry per counter — no DOCA dependency, so it also builds and runs
 on a plain Mac/Linux host for offline inspection.
 
@@ -146,11 +156,15 @@ device side pins its own lookup to **port 0** regardless of where RoCE traffic
 actually arrives — see [Slot 0 / port 0 dispatch](#slot-0--port-0-dispatch) below
 for why.
 
-**No runtime `trace_on` param in this contract version.** Unlike Swift's contract,
-DCQCN's 5 device traces (format IDs 6–10) are gated purely at **compile time** by
-`DCQCN_DEBUG` (see [Build & run](#build--run)); there is intentionally no param
-index in `dcqcn_params[]` to flip them on a running binary. Toggling traces still
-requires a `meson setup --wipe` with `DCQCN_DEBUG=1` and a redeploy.
+**Runtime `trace_on` toggle (like Swift's contract).** `trace_on` (index 8, kept
+last) is diagnostics-only, not a tuning knob, but it rides the same PPCC channel as
+the 8 tuning params above: push `algo_param_index=8,value=1` (bulk vector or a
+single `cmd_type=0x8` write) to turn formats 6-10 on on a running binary, `value=0`
+to silence — no rebuild, no `meson setup --wipe`. Sweep scripts should leave it at
+its default (0) unless actively capturing a trace, since an enabled trace is extra
+per-event work on the hot TX path. Building with `DCQCN_DEBUG=1` instead forces
+every format on from boot regardless of this param (see [Build & run](#build--run)) —
+useful for catching the very first events, before any param write can land.
 
 ## Slot 0 / port 0 dispatch
 
@@ -182,16 +196,74 @@ ports.
 
 ## Trace format reference
 
-Registered in `host/pcc_core.c`; all DCQCN formats emit only when built
-`DCQCN_DEBUG=1`.
+Registered in `host/pcc_core.c`; formats 6-10 are gated by the runtime `trace_on`
+PPCC param (index 8, default 0), or always on if built `DCQCN_DEBUG=1` — see
+[Build & run](#build--run) and
+[Runtime tuning via PPCC](#runtime-tuning-via-ppcc-incast-bench-integration).
 
-| ID | Source | Fields |
-|---|---|---|
-| 6 | per-event summary (`rp_dcqcn_dev_main.c`) | `ev_type`; `flow_tag`; `port`; `algo_slot` (15 = ECE fallback, 0 = registered slot); `rate` (FXP20) |
-| 7 | `dcqcn_handle_new_flow` | `rate` (FXP20 initial); `alpha` (FXP16, initial = 65536 = 1.0); `ts` (ns) |
-| 8 | `dcqcn_handle_cnp` | `old_rate`; `new_rate`; `alpha`; `dec_factor` (FXP16 `1 − α/2`); `ts` |
-| 9 | `dcqcn_handle_tx` | `cur_rate`; `alpha`; `t_count`; `bc_count`; `bytes_accum` |
-| 10 | `dcqcn_rate_increase` | `old_rate`; `new_rate`; `target` (RT); `phase` (0 = FR, 1 = HI, 2 = AI); `t_bc` (`t_count<<16 \| bc_count`) |
+**`tsflow` (arg1 of every format below).** As of the 2026-07 trace-format
+normalization, all five formats pack the triggering event's timestamp and flow_tag
+into a single 64-bit `arg1`, printed as `tsflow=0x%lx`, via
+`DCQCN_TRACE_TSFLOW(ts, flow)` (`dcqcn.h`):
+
+```
+bits [63:32]  timestamp, ns (doca_pcc_dev_get_timestamp) -- wraps every ~4.295 s
+bits [31:0]   flow_tag      (doca_pcc_dev_get_flowtag)
+```
+
+This replaced five separate, inconsistent argument layouts with one convention:
+`tsflow` first, then the format's own fields in a fixed order, `rate`/`new_rate`
+(if present) always last. BEFORE → AFTER map (both columns are the 5 args of a
+`doca_pcc_dev_trace_5` call, in order):
+
+| ID | Source | BEFORE | AFTER |
+|---|---|---|---|
+| 6 | per-event summary (`rp_dcqcn_dev_main.c`) | `ev_type`; `flow_tag`; `port`; `algo_slot`; `rate` | `tsflow`; `ev_type`; `port`; `algo_slot`; `rate` |
+| 7 | `dcqcn_handle_new_flow` | `rate`; `alpha`; `ts`; *0 (pad)*; *0 (pad)* | `tsflow`; `alpha`; `rate` |
+| 8 | `dcqcn_handle_cnp` | `old_rate`; `new_rate`; `alpha`; `dec_factor`; `ts` | `tsflow`; `old_rate`; `alpha`; `dec_factor`; `new_rate` |
+| 9 | `dcqcn_handle_tx` | `cur_rate`; `alpha`; `t_count`; `bc_count`; `bytes_accum` | `tsflow`; `alpha`; `t_bc`; `bytes_accum`; `cur_rate` |
+| 10 | `dcqcn_rate_increase` | `old_rate`; `new_rate`; `target`; `phase`; `t_bc` | `tsflow`; `old_rate`; `target`; `phase`; `new_rate` |
+
+Field notes (AFTER column), all fields printed `%lu` unless noted:
+
+- **`rate` / `new_rate` / `cur_rate`** (FXP20) is always the last field when
+  present (formats 7, 8, 9, 10) — this is the new, post-update rate in every case.
+- **`alpha`** (FXP16, `1<<16` = 1.0): format 7's initial value (always `65536` for
+  a new flow); format 8/9's current EWMA value at the time of the event.
+- **`dec_factor`** (format 8, FXP16): the CNP multiplicative-decrease factor
+  `1 − α/2` applied to `old_rate` to produce `new_rate`.
+- **`target`** (format 10): RT, the recovery target rate (FXP20).
+- **`phase`** (format 10): `0` = Fast Recovery, `1` = Hyper Increase, `2` =
+  Additive Increase (paper Fig. 7) — encoding unchanged by this normalization.
+- **`t_bc`** (format 9, `%lx`): `bits[31:16] = t_count`, `bits[15:0] = bc_count`
+  (`(uint32_t)t_count << 16 | (bc_count & 0xFFFF)`).
+- **format 10 dropped `t_bc`.** `dcqcn_rate_increase` fires up to
+  `DCQCN_MAX_TIMER_CATCHUP` (8) times from the rate-increase timer's catch-up loop,
+  plus up to once more from the byte counter, all within a single TX event — so the
+  same `(t_count, bc_count)` pair used to repeat on every format-10 line for that
+  event. It's still visible once per TX event on the enclosing format-9 line, which
+  shares the same `tsflow` (both fire from the same event), so a format-10 burst
+  can be correlated back to its `t_count`/`bc_count` via that shared `tsflow`.
+- Format 7's two trailing BEFORE args were always `0` (dead padding on a 5-slot
+  `doca_pcc_dev_trace_5` call with only 3 real fields); the AFTER host format
+  string just has 3 conversions instead of 5, not 3 real fields + 2 zeros.
+
+### Runtime trace toggle (`trace_on`, param index 8)
+
+Formats 6-10 are compiled in unconditionally and gated by
+`DCQCN_TRACE_ENABLED(param)` (`dcqcn.h`), the same model as Swift's `trace_on`:
+
+- **`-DDCQCN_DEBUG`** (compile time): `DCQCN_TRACE_ENABLED` is hardwired to `1` —
+  every format fires from the very first event, and the `trace_on` param's value
+  has no effect (it's still PPCC-readable/writable, just ignored by the gate).
+- **default build** (no `-DDCQCN_DEBUG`): `DCQCN_TRACE_ENABLED(param)` reads
+  `param[DCQCN_PARAM_TRACE_ON]` — traces are silent until something pushes
+  `trace_on=1` over PPCC (`algo_param_index=8`), and silenced again by pushing
+  `trace_on=0`. Either direction is a live param write — no rebuild, no
+  `meson setup --wipe`.
+
+Cost when disabled: one well-predicted branch per event; the trace-record write
+and `doca_pcc_dev_trace_flush()` (the expensive part) are skipped entirely.
 
 ### Events DCQCN acts on
 

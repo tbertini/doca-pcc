@@ -43,11 +43,11 @@ static char *trace_message_formats[] = {
 	"format 3 - pcc_np dev: thread_idx = %#lx, cnt_recv_packet = %#lx, cnt_sent_packet = %#lx, cnt_user_func_err = %#lx. end %u\n",
 	"format 4 - pcc_np dev: thread_idx = %#lx, rq = %#lx, rq_pi = %#lx, rqcq = %#lx, rqcq_ci = %#lx\n",
 	"format 5 - pcc_np dev: thread_idx = %#lx, sq = %#lx, sq_pi = %#lx, sqcq = %#lx. end %u\n",
-	"format 6 - pcc event: ev_type=%lu flow_tag=%lu port=%lu algo_slot=%lu rate=%lu\n",
-	"format 7 - dcqcn new_flow: rate=%lu alpha=%lu ts=%lu arg4=%lu arg5=%lu\n",
-	"format 8 - dcqcn cnp: old_rate=%lu new_rate=%lu alpha=%lu dec_factor=%lu ts=%lu\n",
-	"format 9 - dcqcn tx: cur_rate=%lu alpha=%lu t_count=%lu bc_count=%lu bytes_accum=%lu\n",
-	"format 10 - dcqcn rate_inc: old_rate=%lu new_rate=%lu target=%lu phase=%lu t_bc=%lu\n",
+	"format 6 - pcc event: tsflow=0x%lx ev_type=%lu port=%lu algo_slot=%lu rate=%lu\n",
+	"format 7 - dcqcn new_flow: tsflow=0x%lx alpha=%lu rate=%lu\n",
+	"format 8 - dcqcn cnp: tsflow=0x%lx old_rate=%lu alpha=%lu dec_factor=%lu new_rate=%lu\n",
+	"format 9 - dcqcn tx: tsflow=0x%lx alpha=%lu t_bc=0x%lx bytes_accum=%lu cur_rate=%lu\n",
+	"format 10 - dcqcn rate_inc: tsflow=0x%lx old_rate=%lu target=%lu phase=%lu new_rate=%lu\n",
 	NULL};
 
 /* Default PCC RP threads */

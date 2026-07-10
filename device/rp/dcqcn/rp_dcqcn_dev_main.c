@@ -26,11 +26,6 @@ void doca_pcc_dev_user_algo(doca_pcc_dev_algo_ctxt_t *algo_ctxt,
 			    const doca_pcc_dev_attr_t *attr,
 			    doca_pcc_dev_results_t *results) {
 
-	/* attr feeds only the DCQCN_DEBUG-gated format-6 trace below; a default build
-	 * would otherwise fail -Werror=-Wunused-parameter (historical dcqcn builds were
-	 * all DCQCN_DEBUG=1, so this never surfaced before the first default build). */
-	(void)attr;
-
 	/* Always slot 0 (DCQCN is the only algo, so ECE slot negotiation is moot) and
 	 * always port 0. The orchestrator pushes params / scrapes counters over mlxreg
 	 * PPCC local_port=1, which maps to DPA port 0, but mlx5_0 traffic reaches the algo
@@ -41,18 +36,21 @@ void doca_pcc_dev_user_algo(doca_pcc_dev_algo_ctxt_t *algo_ctxt,
 
 	dcqcn_algo(event, param, counter, algo_ctxt, results);
 
-	/* Per-event trace is hot-path (every TX); gate on DCQCN_DEBUG like the dcqcn.c
-	 * traces so a default build pays nothing. */
-#ifdef DCQCN_DEBUG
-	doca_pcc_dev_trace_5(PCC_TRACE_FMT_EVENT,
-			     (uint64_t)doca_pcc_dev_get_ev_attr(event).ev_type,
-			     (uint64_t)doca_pcc_dev_get_flowtag(event),
-			     (uint64_t)doca_pcc_dev_get_ev_attr(event).port_num,
-			     (uint64_t)attr->algo_slot,
-			     (uint64_t)results->rate);
+	/* Generic per-event (format 6) trace: compiled in, emitted only when the trace_on
+	 * PPCC param is set at runtime (or always if built -DDCQCN_DEBUG). See dcqcn.h.
+	 * ev_attr is decoded here, under the gate: with params pinned to port 0, the
+	 * event's port_num/ev_type are needed only for this trace. */
+	if (DCQCN_TRACE_ENABLED(param)) {
+		doca_pcc_dev_event_general_attr_t ev_attr = doca_pcc_dev_get_ev_attr(event);
 
-	doca_pcc_dev_trace_flush();
-#endif
+		doca_pcc_dev_trace_5(PCC_TRACE_FMT_EVENT,
+				     DCQCN_TRACE_TSFLOW(doca_pcc_dev_get_timestamp(event), doca_pcc_dev_get_flowtag(event)),
+				     (uint64_t)ev_attr.ev_type,
+				     (uint64_t)ev_attr.port_num,
+				     (uint64_t)attr->algo_slot,
+				     (uint64_t)results->rate);
+		doca_pcc_dev_trace_flush();
+	}
 }
 
 /*
