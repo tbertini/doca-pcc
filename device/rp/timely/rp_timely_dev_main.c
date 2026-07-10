@@ -52,8 +52,9 @@ void doca_pcc_dev_user_algo(doca_pcc_dev_algo_ctxt_t *algo_ctxt,
 	if (TIMELY_TRACE_ENABLED(param)) {
 		doca_pcc_dev_event_general_attr_t ev_attr = doca_pcc_dev_get_ev_attr(event);
 		doca_pcc_dev_trace_5(PCC_TRACE_FMT_EVENT,
+				     (uint64_t)TIMELY_TRACE_TSFLOW(doca_pcc_dev_get_timestamp(event),
+								   doca_pcc_dev_get_flowtag(event)),
 				     (uint64_t)ev_attr.ev_type,
-				     (uint64_t)doca_pcc_dev_get_flowtag(event),
 				     (uint64_t)ev_attr.port_num,
 				     (uint64_t)attr->algo_slot,
 				     (uint64_t)results->rate);

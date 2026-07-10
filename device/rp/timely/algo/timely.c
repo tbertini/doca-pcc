@@ -294,7 +294,9 @@ static inline void timely_handle_new_flow(doca_pcc_dev_event_t *event,
 	results->rate = new_flow_rate;
 	results->rtt_req = 1;
 
-	TIMELY_TRACE(param, TIMELY_TRACE_FMT_NEW_FLOW, new_flow_rate, timestamp, 0, 0, 0);
+	TIMELY_TRACE(param, TIMELY_TRACE_FMT_NEW_FLOW,
+		     TIMELY_TRACE_TSFLOW(timestamp, doca_pcc_dev_get_flowtag(event)),
+		     new_flow_rate, 0, 0, 0);
 	TIMELY_TRACE_FLUSH(param);
 }
 
@@ -457,7 +459,9 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 		}
 
 		if (n_factor != 1)
-			TIMELY_TRACE(param, TIMELY_TRACE_FMT_HAI, neg_count, n_factor, cur_rate, delta, 0);
+			TIMELY_TRACE(param, TIMELY_TRACE_FMT_HAI,
+				     TIMELY_TRACE_TSFLOW(end_rtt, doca_pcc_dev_get_flowtag(event)),
+				     neg_count, n_factor, delta, cur_rate);
 		goto done;
 	}
 
@@ -496,7 +500,9 @@ done:;
 	results->rtt_req = 1;
 	ccctx->rtt_req_to_rtt_sent = 1;
 
-	TIMELY_TRACE(param, TIMELY_TRACE_FMT_RTT, new_rtt, (uint32_t)rtt_diff, (uint32_t)normalized_gradient,
+	TIMELY_TRACE(param, TIMELY_TRACE_FMT_RTT,
+		     TIMELY_TRACE_TSFLOW(end_rtt, doca_pcc_dev_get_flowtag(event)),
+		     new_rtt, (uint64_t)(int64_t)(int32_t)(normalized_gradient),
 		     branch_taken, cur_rate);
 	TIMELY_TRACE_FLUSH(param);
 }

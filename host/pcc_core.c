@@ -43,17 +43,17 @@ static char *trace_message_formats[] = {
 	"format 3 - pcc_np dev: thread_idx = %#lx, cnt_recv_packet = %#lx, cnt_sent_packet = %#lx, cnt_user_func_err = %#lx. end %u\n",
 	"format 4 - pcc_np dev: thread_idx = %#lx, rq = %#lx, rq_pi = %#lx, rqcq = %#lx, rqcq_ci = %#lx\n",
 	"format 5 - pcc_np dev: thread_idx = %#lx, sq = %#lx, sq_pi = %#lx, sqcq = %#lx. end %u\n",
-	"format 6 - pcc event: ev_type=%lu flow_tag=%lu port=%lu algo_slot=%lu rate=%lu\n",
+	"format 6 - pcc event: tsflow=0x%lx ev_type=%lu port=%lu algo_slot=%lu rate=%lu\n",
 	/* Format IDs 7-10 reserved for DCQCN traces (when DCQCN branch is merged in). */
 	"format 7 - reserved for DCQCN\n",
 	"format 8 - reserved for DCQCN\n",
 	"format 9 - reserved for DCQCN\n",
 	"format 10 - reserved for DCQCN\n",
-	"format 11 - timely new_flow: rate=%lu ts=%lu arg3=%lu arg4=%lu arg5=%lu\n",
+	"format 11 - timely new_flow: tsflow=0x%lx rate=%lu\n",
 	/* branch low nibble = T_LOW(0)/T_HIGH(1)/GRAD_LE(2)/GRAD_GT(3); bit 0x80 = clamped */
-	"format 12 - timely rtt: new_rtt=%lu rtt_diff=%ld norm_grad=%ld branch=0x%lx new_rate=%lu\n",
+	"format 12 - timely rtt: tsflow=0x%lx new_rtt=%lu norm_grad=%ld branch=0x%lx new_rate=%lu\n",
 	"format 13 - retired (clamp folded into format 12 branch bit 0x80)\n",
-	"format 14 - timely hai: neg_count=%lu N=%lu new_rate=%lu delta=%lu arg5=%lu\n",
+	"format 14 - timely hai: tsflow=0x%lx neg_count=%lu N=%lu delta=%lu new_rate=%lu\n",
 	NULL};
 
 
