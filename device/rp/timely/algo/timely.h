@@ -49,6 +49,15 @@
 #endif
 
 /*
+ * Pack an event's device timestamp (ns, 32-bit) and flow_tag (32-bit) into the
+ * single uint64_t that is arg1 of every TIMELY trace line (formats 6/11/12/14),
+ * printed as tsflow=0x%lx: bits 63:32 = ts, bits 31:0 = flow_tag. The ts half is
+ * doca_pcc_dev_get_timestamp(event) and wraps every ~4.295 s (2^32 ns); a parser
+ * correlating events across a wrap boundary must unwrap it itself.
+ */
+#define TIMELY_TRACE_TSFLOW(ts, flow) ((((uint64_t)(uint32_t)(ts)) << 32) | (uint64_t)(uint32_t)(flow))
+
+/*
  * Entry point to TIMELY user algorithm
  * This function starts the algorithm code of a single event for the TIMELY algorithm.
  * It calculates the new rate parameters based on flow context data and event info.

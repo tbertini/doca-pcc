@@ -54,22 +54,29 @@ labelled fields, see [`tools/mlxreg-pretty.py`](../../../tools/mlxreg-pretty.py)
 
 Useful flags:
 
-- `--filter-flow 1414831099` — keep only format-6 lines for one flow tag
+- `--filter-flow 1414831099` — keep only format-6 lines for one flow tag. **Currently
+  broken** by the tsflow packing below: the script still greps a bare `flow_tag=`
+  field out of format-6 lines, which no longer exists (it's packed into `tsflow`
+  now) — see [Trace format normalization](#trace-format-normalization) — so every
+  format-6 line is silently dropped when this flag is passed. Needs a follow-up
+  patch to extract flow_tag from `tsflow & 0xffffffff` instead.
 - `--drop-acks` — drop ACK noise (most common format-6 line)
 - `--drop-reserved` — drop the `format 7-10 reserved` placeholder lines
 - `--no-color` — disable ANSI colors
 
-Before / after example:
+Raw example (current wire format, post trace-format-normalization):
 
 ```
-# raw
-format 6 - pcc event: ev_type=4 flow_tag=1414831099 port=0 algo_slot=15 rate=64
-format 12 - timely rtt: new_rtt=600000 rtt_diff=2484 norm_grad=0 branch=0x82 new_rate=64
-
-# prettified
-format 6 - pcc event: ev_type=ACK flow_tag=1414831099 port=0 algo_slot=15 rate=64
-format 12 - timely rtt: new_rtt=600000 rtt_diff=2484 norm_grad=0 branch=GRAD_LE+CLAMP new_rate=64
+format 6 - pcc event: tsflow=0x1888e2a05439fabb ev_type=4 port=0 algo_slot=15 rate=64
+format 12 - timely rtt: tsflow=0x1888e2a05439fabb new_rtt=600000 norm_grad=0 branch=0x82 new_rate=64
 ```
+
+`tools/timely-prettify.sh` still substitutes `ev_type=4` → `ev_type=ACK` and
+`branch=0x82` → `branch=GRAD_LE+CLAMP` unchanged (those fields kept their names
+and position). Its `rtt_diff`/`norm_grad` unsign-workarounds are now dead code —
+harmless no-ops — since format 12 no longer carries `rtt_diff` and the device
+now sign-extends `norm_grad` correctly before printing (see below); only
+`--filter-flow` is actually broken.
 
 ## Tuning parameters for your fabric
 
@@ -131,8 +138,8 @@ To read the value back, bulk-get all params (`cmd_type=0xA`) and inspect `text[9
 You will see two `algo_slot` values in the traces: **0** and **15**.
 
 - **Slot 0** is where `doca_pcc_dev_user_init` registers TIMELY (`algo_idx=0`).
-  Its periodic `rate=64 flow_tag=0` lines are framework heartbeat, not real
-  traffic.
+  Its periodic `rate=64` heartbeat lines (flow_tag 0, packed into `tsflow`'s
+  low 32 bits) are framework heartbeat, not real traffic.
 - **Slot 15** is the NIC's default fallback slot for QPs that did not negotiate
   a specific algorithm via ECE. Your `ib_write_bw` flows land here, so the real
   `format 12 - timely rtt` events carry `algo_slot=15`.
@@ -174,12 +181,72 @@ array. Revisit if a build ever drives multiple physical ports.
 | 0 | `user init` (every algo's init) | `port_num`; `algo_index` (0 for TIMELY); `algo_slot` (0..15); `algo_enable`; `disable_event_bitmask` (0x0 — TIMELY masks nothing) |
 | 1 | DOCA infra `user algo` | `algo_slot`; `result_rate` (FXP20); `result_rtt_req`; `port_num`; `timestamp` |
 | 2–5 | NP-side `pcc_np dev` | Only fire when running a `--np-*` app — ignore on RP/TIMELY |
-| 6 | per-event summary (`rp_timely_dev_main.c`) | `ev_type` (see table below); `flow_tag`; `port`; `algo_slot` (15 = ECE fallback / no negotiation, 0 = registered TIMELY slot); `rate` (FXP20 after our algo ran) |
+| 6 | per-event summary (`rp_timely_dev_main.c`) | `tsflow` (packed timestamp+flow_tag, see below); `ev_type` (see table below); `port`; `algo_slot` (15 = ECE fallback / no negotiation, 0 = registered TIMELY slot); `rate` (FXP20 after our algo ran) |
 | 7–10 | reserved for DCQCN | placeholder strings — never emitted on the timely branch |
-| 11 | TIMELY `new_flow` | `rate` (FXP20 initial = 1048576 = full line rate); `ts` (ns) |
-| 12 | TIMELY `rtt` (Algorithm 1 ran) | `new_rtt` (ns); `rtt_diff` (signed EWMA, ns); `norm_grad` (signed `rtt_diff/min_rtt`); `branch` (see table below); `new_rate` (FXP20) |
+| 11 | TIMELY `new_flow` | `tsflow`; `rate` (FXP20 initial = 1048576 = full line rate) |
+| 12 | TIMELY `rtt` (Algorithm 1 ran) | `tsflow`; `new_rtt` (ns); `norm_grad` (signed `rtt_diff/min_rtt`); `branch` (see table below); `new_rate` (FXP20) |
 | 13 | retired | clamp info folded into format-12 `branch` bit `0x80` |
-| 14 | TIMELY `hai` | `neg_count` (consecutive ≤0 gradients); `N` (HAI multiplier — 1 normally, 5 in HAI mode); `new_rate`; `delta` (additive step δ) |
+| 14 | TIMELY `hai` | `tsflow`; `neg_count` (consecutive ≤0 gradients); `N` (HAI multiplier — 1 normally, 5 in HAI mode); `delta` (additive step δ); `new_rate` |
+
+### `tsflow` (arg1 of formats 6/11/12/14)
+
+Formats 6/11/12/14 each pack their event's device timestamp and flow tag into a
+single `tsflow` argument instead of carrying them as two separate fields.
+Defined once, next to `TIMELY_TRACE_ENABLED`, in `algo/timely.h`:
+
+```c
+#define TIMELY_TRACE_TSFLOW(ts, flow) ((((uint64_t)(uint32_t)(ts)) << 32) | (uint64_t)(uint32_t)(flow))
+```
+
+- bits 63:32 — device event timestamp, ns (`doca_pcc_dev_get_timestamp(event)`)
+- bits 31:0 — flow_tag (`doca_pcc_dev_get_flowtag(event)`)
+
+Printed as `tsflow=0x%lx`; a parser recovers the halves with
+`(tsflow >> 32) & 0xffffffff` (ts) and `tsflow & 0xffffffff` (flow_tag). The ts
+half is a free-running 32-bit ns counter and **wraps every ~4.295 s** (2^32 ns) —
+correlating events across a wrap boundary requires the parser to unwrap it
+itself (e.g. track a per-flow last-seen ts and add 2^32 whenever it decreases);
+within a single wrap, subtracting two same-flow `tsflow` upper halves gives
+elapsed ns directly.
+
+### Trace format normalization
+
+Formats 6/11/12/14 were normalized to a common shape: arg1 is always `tsflow`
+(above); the remaining printed fields are contiguous, with no `0`-padded
+trailing `argN=%lu` placeholders for unused slots; and where a format carries
+a rate field, it is always printed last.
+
+| Format | Args before | Args after |
+|---|---|---|
+| 6 | `ev_type, flow_tag, port, algo_slot, rate` | `tsflow, ev_type, port, algo_slot, rate` |
+| 11 | `rate, ts, 0, 0, 0` | `tsflow, rate` |
+| 12 | `new_rtt, rtt_diff, norm_grad, branch, new_rate` | `tsflow, new_rtt, norm_grad, branch, new_rate` |
+| 14 | `neg_count, N, new_rate, delta, 0` | `tsflow, neg_count, N, delta, new_rate` |
+
+Notes:
+
+- **`flow_tag` and `ts` are gone as standalone fields** on every format above —
+  both now live packed inside `tsflow` (see above).
+- **Format 12 drops `rtt_diff`.** It is still computed and kept in
+  `cc_ctxt_timely_t.rtt_diff` for the algorithm's own EWMA (`normalized_gradient
+  = rtt_diff / min_rtt_ns`) — only the trace argument was dropped, to keep
+  `tsflow` within the format's fixed 5-argument budget. It remains derivable
+  off-device: group format-12 lines by the flow_tag half of `tsflow`, and two
+  consecutive `new_rtt` samples for the same flow give
+  `new_rtt_diff = new_rtt[n] - new_rtt[n-1]`, from which the EWMA can be
+  re-derived if ever needed.
+- **Format 12's `norm_grad` also picks up a sign-extension fix.** The old
+  trace call cast the signed `normalized_gradient` to `uint32_t` before the
+  `TIMELY_TRACE` macro's own `(uint64_t)` cast, which zero-extends rather than
+  sign-extends a negative value — a negative gradient printed via `%ld` on the
+  host therefore came out as a large positive number instead of negative. The
+  new call passes `(uint64_t)(int64_t)(int32_t)(normalized_gradient)`, which
+  sign-extends through `int64_t` before reinterpreting the bits as `uint64_t`,
+  so `%ld` on the host recovers the correct sign directly — no host-side
+  workaround needed.
+- **`tools/timely-prettify.sh` was not updated by this change** (out of scope
+  here — see [Useful flags](#reading-the-trace-output) above for the resulting
+  `--filter-flow` breakage and which parts became harmless dead code instead).
 
 ### `ev_type` (from [`include/doca_pcc_dev.h:46-52`](../../../../../include/doca_pcc_dev.h))
 
