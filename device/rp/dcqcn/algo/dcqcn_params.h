@@ -55,9 +55,11 @@
  * overrides these at runtime over the PPCC channel (cmd_type=0xB) when sweeping the
  * parameter space.
  *
- * This is a v1 (register-only) contract: no runtime trace_on param is exposed here.
- * DCQCN's device traces (format IDs 7-10) remain gated purely at compile time by
- * DCQCN_DEBUG -- see dcqcn.c and the README's "Runtime tuning via PPCC" section.
+ * TRACE_ON (index 8, appended -- see dcqcn.h) is a diagnostics-only toggle, NOT a
+ * tuning knob: it gates runtime emission of the format 6-10 device traces (shared
+ * per-event summary + DCQCN's own new_flow/cnp/tx/rate_inc traces). It rides in the
+ * param array so it can be flipped at runtime over the existing PPCC channel without
+ * rebuilding -- see dcqcn.c/dcqcn.h and the README's "Runtime tuning via PPCC" section.
  */
 
 /* DCQCN algorithm ID. Project convention: TIMELY=0xBFFD, DCQCN=0xBFFE, SWIFT=0xBFFC,
@@ -68,9 +70,10 @@
  * Parameter indices.
  *
  * APPEND-ONLY: external orchestrators (incast-bench) address parameters by index in
- * bulk-set, so never reorder or insert -- only append. Names, order, and values below
- * are transcribed verbatim from the pre-contract dcqcn.c enum/init calls; this header
- * is a pure refactor, not a renumbering.
+ * bulk-set, so never reorder or insert -- only append before TRACE_ON is reassigned.
+ * TRACE_ON is kept LAST so indices 0..N-2 stay stable across versions. Names, order,
+ * and values 0-7 below are transcribed verbatim from the pre-contract dcqcn.c
+ * enum/init calls; this header is a pure refactor, not a renumbering.
  */
 typedef enum {
 	DCQCN_PARAM_TIMER_PERIOD = 0,	  /* Timer period T in nanoseconds */
@@ -81,6 +84,7 @@ typedef enum {
 	DCQCN_PARAM_R_HAI = 5,		  /* Hyper additive increase step R_HAI (FXP20) */
 	DCQCN_PARAM_NEW_FLOW_RATE = 6,	  /* New flow initial rate (FXP20) */
 	DCQCN_PARAM_MIN_RATE = 7,	  /* Minimum rate floor (FXP20) */
+	DCQCN_PARAM_TRACE_ON = 8,	  /* Runtime trace toggle (0/1); not a tuning param (KEEP LAST) */
 	DCQCN_PARAM_NUM		  /* Total number of configurable parameters */
 } dcqcn_params_t;
 
@@ -119,6 +123,12 @@ static const struct dcqcn_param_desc dcqcn_params[DCQCN_PARAM_NUM] = {
 	[DCQCN_PARAM_R_HAI]           = {"r_hai",           "FXP20",  2095,        1,    1048576},
 	[DCQCN_PARAM_NEW_FLOW_RATE]   = {"new_flow_rate",   "FXP20",  1048576,     1,    1048576},
 	[DCQCN_PARAM_MIN_RATE]        = {"min_rate",        "FXP20",  64,          1,    1048576},
+	/* Diagnostics-only: gates runtime device-trace emission (dcqcn.h). def=0 (quiet),
+	 * range [0,1]. min MUST be 0 so traces can be turned back off at runtime -- unlike
+	 * params 0-7 above (all transcribed with MIN=1 from the pre-contract code), this
+	 * is a new row and DCQCN_REG_PARAM already reads .min from this table, so 0 is
+	 * safe (see dcqcn.c's dcqcn_init). */
+	[DCQCN_PARAM_TRACE_ON]        = {"trace_on",        "bool",   0,           0,          1},
 };
 
 static const char *const dcqcn_counter_names[DCQCN_COUNTER_NUM] = {
