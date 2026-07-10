@@ -254,23 +254,80 @@ Counters:
 | 14 | `rate_clamped_max` | actuated rate hit MAX_RATE |
 | 15 | `psn_anomaly` | ΔPSN sanity-cap fallbacks to num_coalesced |
 
-## Trace formats 20–24 (gated by `trace_on`, swift-style `*_TRACE_ENABLED`)
+## Trace formats 20–24 and 6 (gated by `trace_on`, swift-style `*_TRACE_ENABLED`)
 
-Host `pcc_core.c` format strings must match these argument orders exactly:
+Host `pcc_core.c` format strings must match these argument orders exactly.
 
-| fmt | emitted | args (5 × uint64) |
+**Trace normalization (2026-07-10):** every SMaRTT trace call (format 6 and 20-24) now
+carries `tsflow` as `arg1`, and every format that has a rate field puts it last. This
+brought the branch in line with the same normalization pass on timely/dcqcn/swift: a
+fixed arg1 makes cross-format correlation trivial (join on flow_tag, or eyeball the
+timestamp half), and rate-last is now a repo-wide convention, not just a SMaRTT one.
+**Only trace-call arguments/strings/docs changed — no algorithm/control-law logic moved.**
+
+### `tsflow` (arg1, everywhere)
+
+```c
+#define SMARTT_REPS_TRACE_TSFLOW(ts, flow) \
+	((((uint64_t)(uint32_t)(ts)) << 32) | (uint64_t)(uint32_t)(flow))
+```
+
+| bits | field | source |
 |---|---|---|
-| 20 | per ACK decision | `branch`(coded below), `rtt_ns`, `cwnd_fxp16`(after), `rate_fxp20`, `size_pkts` |
-| 21 | QuickAdapt fire | `acked_epoch_pkts`, `new_cwnd_fxp16`, `ignore_target_pkts`, `rate_fxp20`, `src`(1=ack,2=nack) |
-| 22 | FastIncrease active | `count_pkts`, `cwnd_fxp16`, `rate_fxp20`, `rtt_ns`, `ncoal` |
-| 23 | raw ACK signal | `first_sn`, `event_sn`, `delta_pkts`, `ncoal`, `avg_wtd_fxp16` |
-| 24 | NACK/loss | `nack_first_sn`, `cwnd_fxp16`(after), `rate_fxp20`, `ignored_pkts`, `trigger_qa_state` |
+| `63:32` | `ts_ns` | event timestamp, `doca_pcc_dev_get_timestamp(event)`; wraps every 2^32 ns ≈ 4.295 s |
+| `31:0` | `flow_tag` | `doca_pcc_dev_get_flowtag(event)` |
+
+Printed as a single hex field, `tsflow=0x%lx` (split the two 32-bit halves host-side if
+needed). Defined once in `smartt_reps.h` (next to `SMARTT_REPS_TRACE_ENABLED`, since both
+`rp_smartt_reps_dev_main.c` — format 6 — and `smartt_reps.c` — formats 20-24 — need it
+and both already include that header). `ts`/`flow` are always exactly these two getters,
+called on the current event — never re-derived, cached, or approximated.
+
+### BEFORE → AFTER map
+
+| fmt | BEFORE args (old string) | AFTER args (new string) | dropped field / rationale |
+|---|---|---|---|
+| 6 | `ev_type, flow_tag, port, algo_slot, rate` | `tsflow, ev_type, port, algo_slot, rate` | `flow_tag` folded into tsflow's low 32 bits |
+| 20 ack | `branch, rtt, cwnd, rate, acked_pkts` | `tsflow, branch, rtt, cwnd, rate` | `acked_pkts` dropped — the coalesced-ACK size is already visible on fmt 22 (`cnt_ncoal` low half) and fmt 23 (`delta_ncoal` high half); a third copy on every ack/blackout/new-flow emission was redundant |
+| 21 qa | `acked_epoch, new_cwnd, ignore_pkts, rate, src` | `tsflow, src, ignore_pkts, new_cwnd, rate` | `acked_epoch` dropped — it is exactly the running sum of fmt-23's `delta_ncoal` high half over the trtt epoch, so it is reconstructible off-device from data already traced |
+| 22 fastinc | `count, cwnd, rate, rtt, ncoal` | `tsflow, cnt_ncoal, rtt, cwnd, rate` | no field dropped — `count` (`fast_inc_count`) and `ncoal` packed together into `cnt_ncoal` to make room for tsflow at a fixed 5-arg budget |
+| 23 sig | `first_sn, sn, delta_pkts, ncoal, avg_wtd` | `tsflow, first_sn, delta_ncoal, avg_wtd, 0` | `sn` (`doca_pcc_dev_get_sn(event)`) dropped — for one coalesced event `sn ≈ first_sn + delta_pkts`, so it carries no information beyond `first_sn` + `delta_ncoal`'s high half, which are both still traced; `delta_pkts` and `ncoal` packed into `delta_ncoal`. This format has no rate field, so the 5th slot is an unused `0` placeholder (rate-last doesn't apply — nothing to put last) |
+| 24 loss | `first_sn(psn), cwnd, rate, ignored_pkts, trigger_qa` | `tsflow, first_sn, ign_qa, cwnd, rate` | no field dropped — `ignored_pkts` and `trigger_qa` packed together into `ign_qa` to make room for tsflow |
+
+Every AFTER string above is byte-identical to what `rp_smartt_reps_dev_main.c` /
+`smartt_reps.c` emit post-normalization. Format 6's AFTER string is additionally
+byte-identical across the timely/dcqcn/swift/smartt-reps branches (it is one shared slot
+in the merged `trace_message_formats[]` table host-side).
+
+### Packed sub-fields (bit ranges, all printed `0x%lx`)
+
+| fmt | field | bits | contents |
+|---|---|---|---|
+| 22 | `cnt_ncoal` | `[31:16]` | `fast_inc_count` — uint16 saturating FastIncrease byte/packet counter |
+| 22 | `cnt_ncoal` | `[15:0]` | `ncoal` — `num_coalesced` (16-bit HW field) |
+| 23 | `delta_ncoal` | `[31:16]` | `delta_pkts` — the ΔPSN-derived acked-packet count for this event (the old `size` local) |
+| 23 | `delta_ncoal` | `[15:0]` | `ncoal` — `num_coalesced` |
+| 24 | `ign_qa` | `[31:1]` | `ignored_pkts` — bytes-ignored-in-packets since the last QuickAdapt fire |
+| 24 | `ign_qa` | `[0]` | `trigger_qa` — 0/1, NACK-armed "fire QuickAdapt at next epoch boundary" flag |
+
+Cast-before-shift, not shift-before-cast: `fast_inc_count` and `delta_pkts`(`size`) feed
+the `<<16` half of `cnt_ncoal`/`delta_ncoal`. `fast_inc_count` is `uint16_t`, narrower
+than `int`, so it integer-promotes to *signed* `int` before any `&`/`<<`; masking then
+shifting a promoted `int` left by 16 overflows into the sign bit for counts above 32767 —
+undefined behavior in C. The device code widens to `uint64_t` **before** the shift
+(`(uint64_t)(ctx->fast_inc_count & 0xFFFF) << 16`), producing the identical bit pattern
+with no UB — the same idiom `smartt_reps_fast_increase` already used for `count_fxp16`
+one line above it. `delta_pkts`/`size` is already `uint32_t` at its call site (no
+promotion happens either way), but is written the same way for consistency. `ign_qa`'s
+`ignored_pkts` (also `uint16_t`) is cast to `uint64_t` before its `<<1` for the same
+reason.
 
 `branch` (fmt 20): low nibble 0=FD 1=MD 2=FI 3=MI 4=wtd_blocked 5=blackout 6=fastinc
 7=qa_adapted; OR-ed high bits: 0x80 rate clamped, 0x40 ecn asserted, 0x20 can_decrease.
+Unchanged by the normalization pass.
 
 Format 6 (shared per-event summary) is also emitted from dev_main under the same gate,
-like swift/timely.
+like swift/timely; it now carries `tsflow` as arg1 (see BEFORE → AFTER map above).
 
 ## Deviations from the paper (complete list)
 
@@ -338,7 +395,9 @@ Hardware truths established (per-vector PPCC counters, 10 s runs, per sender):
   the EWMA below thresh: lower `wtd_alpha`'s denominator effect (raise α), lower
   `wtd_thresh`, or lengthen `ecn_cnp_hold_ns`.
 - `qa_fired` every epoch ⇒ NACK storm; window cap or target too high.
-- `psn_anomaly` growing ⇒ ΔSN model wrong — check fmt 23 (first_sn vs sn semantics).
+- `psn_anomaly` growing ⇒ ΔSN model wrong — check fmt 23 (`first_sn` deltas across
+  consecutive events against `delta_ncoal`'s bits[31:16]; the raw event `sn` is no longer
+  traced as of the trace-format normalization, see Trace formats section).
 - All-MI, no decreases, RTT flat at ~brtt ⇒ target too high to ever bind (retune from
   no-load trace, like timely's base_target lesson).
 

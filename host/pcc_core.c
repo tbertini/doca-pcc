@@ -43,7 +43,7 @@ static char *trace_message_formats[] = {
 	"format 3 - pcc_np dev: thread_idx = %#lx, cnt_recv_packet = %#lx, cnt_sent_packet = %#lx, cnt_user_func_err = %#lx. end %u\n",
 	"format 4 - pcc_np dev: thread_idx = %#lx, rq = %#lx, rq_pi = %#lx, rqcq = %#lx, rqcq_ci = %#lx\n",
 	"format 5 - pcc_np dev: thread_idx = %#lx, sq = %#lx, sq_pi = %#lx, sqcq = %#lx. end %u\n",
-	"format 6 - pcc event: ev_type=%lu flow_tag=%lu port=%lu algo_slot=%lu rate=%lu\n",
+	"format 6 - pcc event: tsflow=0x%lx ev_type=%lu port=%lu algo_slot=%lu rate=%lu\n",
 	/* Format IDs 7-10 reserved for DCQCN traces (when DCQCN branch is merged in). */
 	"format 7 - reserved for DCQCN\n",
 	"format 8 - reserved for DCQCN\n",
@@ -65,13 +65,16 @@ static char *trace_message_formats[] = {
 	 * 3 = receiver stamps both -> np_turn genuine, else fabric_rtt == total_rtt. */
 	"format 19 - swift rtt_ts: t1_req_send=%lu t2_req_recv=%lu t4_resp_send=%lu t6_arrival=%lu populated=%lu\n",
 	/* Format IDs 20-24 owned by SMaRTT-REPS (sender RP); per-event summaries reuse format 6.
-	 * format 20 branch: low nibble 0=FD 1=MD 2=FI 3=MI 4=wtd_blocked 5=blackout 6=fastinc
-	 * 7=qa_adapted; OR-ed high bits: 0x80 clamped, 0x40 ecn, 0x20 can_decrease. */
-	"format 20 - smartt ack: branch=0x%lx rtt=%lu cwnd=%lu rate=%lu acked_pkts=%lu\n",
-	"format 21 - smartt qa: acked_epoch=%lu new_cwnd=%lu ignore_pkts=%lu rate=%lu src=%lu\n",
-	"format 22 - smartt fastinc: count=%lu cwnd=%lu rate=%lu rtt=%lu ncoal=%lu\n",
-	"format 23 - smartt sig: first_sn=%lu sn=%lu delta_pkts=%lu ncoal=%lu avg_wtd=%lu\n",
-	"format 24 - smartt loss: first_sn=%lu cwnd=%lu rate=%lu ignored_pkts=%lu trigger_qa=%lu\n",
+	 * All five carry tsflow (arg1, 0x%lx) = (event timestamp_ns << 32) | flow_tag -- see
+	 * SMARTT_REPS_TRACE_TSFLOW in device/rp/smartt_reps/algo/smartt_reps.h -- and put any
+	 * rate field last. format 20 branch: low nibble 0=FD 1=MD 2=FI 3=MI 4=wtd_blocked
+	 * 5=blackout 6=fastinc 7=qa_adapted; OR-ed high bits: 0x80 clamped, 0x40 ecn,
+	 * 0x20 can_decrease. */
+	"format 20 - smartt ack: tsflow=0x%lx branch=0x%lx rtt=%lu cwnd=%lu rate=%lu\n",
+	"format 21 - smartt qa: tsflow=0x%lx src=%lu ignore_pkts=%lu new_cwnd=%lu rate=%lu\n",
+	"format 22 - smartt fastinc: tsflow=0x%lx cnt_ncoal=0x%lx rtt=%lu cwnd=%lu rate=%lu\n",
+	"format 23 - smartt sig: tsflow=0x%lx first_sn=%lu delta_ncoal=0x%lx avg_wtd=%lu\n",
+	"format 24 - smartt loss: tsflow=0x%lx first_sn=%lu ign_qa=0x%lx cwnd=%lu rate=%lu\n",
 	NULL};
 
 
