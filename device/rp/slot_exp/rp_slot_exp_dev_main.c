@@ -155,7 +155,7 @@ void doca_pcc_dev_user_init(uint32_t *disable_event_bitmask)
 
 	for (int port_num = 0; port_num < DOCA_PCC_DEV_MAX_NUM_PORTS; ++port_num) {
 		/* Slot 0 uses algo_idx 0 (TIMELY), default enabled. */
-		doca_pcc_dev_init_algo_slot(port_num, TIMELY_ALGO_SLOT, TIMELY_ALGO_IDX, algo_en);
+		doca_pcc_dev_init_algo_slot(port_num, TIMELY_ALGO_SLOT, TIMELY_ALGO_IDX, 0 /* EXPERIMENT STEP 2: slot0 disabled at boot */);
 		doca_pcc_dev_trace_5(0, port_num, TIMELY_ALGO_IDX, TIMELY_ALGO_SLOT, algo_en, 0);
 
 		/* Slot 1 uses algo_idx 1 (FIXRATE), default enabled. */
