@@ -159,21 +159,29 @@ int main(int argc, char **argv)
 	PRINT_INFO("Info: Starting DOCA PCC\n");
 
 	/* Start DOCA PCC */
+	PRINT_DEBUG("[pcc.c:main] calling doca_pcc_start - this loads device code onto DPA\n");
 	result = doca_pcc_start(resources.doca_pcc);
 	if (result != DOCA_SUCCESS) {
 		PRINT_ERROR("Error: Failed to start PCC\n");
 		goto destroy_pcc;
 	}
+	PRINT_DEBUG("[pcc.c:main] doca_pcc_start returned OK - device code running on DPA\n");
 
 	/* Send request to device */
+	PRINT_DEBUG("[pcc.c:main] sending mailbox request to device\n");
 	result = pcc_mailbox_send(&cfg, &resources);
 	if (result != DOCA_SUCCESS) {
 		PRINT_ERROR("Error: Failed to send mailbox request\n");
 		goto destroy_pcc;
 	}
+	PRINT_DEBUG("[pcc.c:main] mailbox sent OK\n");
 
 	host_stop = false;
 	PRINT_INFO("Info: Press ctrl + C to exit\n");
+	PRINT_DEBUG("[pcc.c:main] entering main wait loop - device code is now handling CC events\n");
+	PRINT_DEBUG("[pcc.c:main] NOTE: if no 'format 6' or '[doca_pcc_dev_user_algo]' prints appear,\n");
+	PRINT_DEBUG("[pcc.c:main]   it means the NIC hardware is NOT generating CC events for the traffic.\n");
+	PRINT_DEBUG("[pcc.c:main]   Check: ECN enabled? mlnx_qos config? pcc_counters.sh showing non-zero?\n");
 	while (!host_stop) {
 		if (got_debug_sig) {
 			if (enable_debug == false) {
