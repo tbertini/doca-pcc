@@ -99,3 +99,17 @@ while slot 0's track TIMELY's RTT-driven behavior, the slot machinery works.
   alongside any other `--rp-*`/`--np-*` app on the same card.
 
 THROWAWAY — do not merge to pre-master.
+
+## RESULTS (2026-07-14, u50d-01 → u50d-02, non-ECE ib_write_bw)
+1. Both slots enabled: 97.40G, fmt-6 = 4551×slot0 (timely ran) — non-ECE traffic tags slot 0.
+2. Runtime PPCC 0x2 disable slot0 (readback 0x3 confirmed 1→0): traffic STILL slot0,
+   timely still ran (95.01G). Enable/disable does NOT retarget non-ECE flows.
+3. Slot0 disabled at BOOT (this commit): fixrate (slot1) NEVER ran; traffic split
+   2726×slot0 (disabled timely at rate floor 64) + 619×slot15 with rate>2^20 =
+   firmware INTERNAL DEFAULT took the flow. 81.24G. Boot enables don't select either.
+4. PPCC 0xB param write addressed to algo_slot=1 was ACCEPTED — slots work as
+   param-table namespaces even though traffic can't route to them.
+CONCLUSION: on BF3 + non-ECE RoCE, user-slot selection (runtime or boot) is not
+available; slot 0 is the de-facto default, disabled slot 0 → internal default (slot 15).
+Multi-algo design therefore: slots 0-3 = native per-algo param/counter namespaces,
+slot 4 = control table (active_algo), dispatch in user_algo on the control param.
