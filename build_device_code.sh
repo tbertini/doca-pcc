@@ -113,6 +113,21 @@ then
         if [ ${AMALGAMATION_BUILD_MODE} = "true" ]; then
                 APP_INC_LIST="${APP_INC_LIST} -I${DOCA_PCC_DIR}/device/include/rp -I${DOCA_PCC_DIR}/device/adb_gen/"
         fi
+elif [ ${PCC_APP_NAME} = "pcc_rp_swift_app" ]
+then
+        DOCA_PCC_DEV_LIB_NAME="doca_pcc_dev"
+        PCC_DEV_RP_SWIFT_DIR=${PCC_APP_DEVICE_SRC_DIR}/rp/swift
+        PCC_APP_DEVICE_SRCS=`ls ${PCC_DEV_RP_SWIFT_DIR}/*.c`
+        PCC_APP_DEVICE_ALGO_SRCS=`ls ${PCC_DEV_RP_SWIFT_DIR}/algo/*.c`
+        PCC_DEVICE_SRC_FILES="${PCC_APP_DEVICE_SRCS} ${PCC_APP_DEVICE_ALGO_SRCS}"
+        APP_INC_LIST="${DOCA_INC_LIST} -I${PCC_DEV_RP_SWIFT_DIR}/algo"
+        # Debug tracing: default-off. Build with SWIFT_DEBUG=1 to force format 15/16/17/18 on.
+        if [ "${SWIFT_DEBUG:-0}" = "1" ]; then
+                SWIFT_DEBUG_FLAG="-DSWIFT_DEBUG"
+        fi
+        if [ ${AMALGAMATION_BUILD_MODE} = "true" ]; then
+                APP_INC_LIST="${APP_INC_LIST} -I${DOCA_PCC_DIR}/device/include/rp -I${DOCA_PCC_DIR}/device/adb_gen/"
+        fi
 elif [ ${PCC_APP_NAME} = "pcc_np_nic_telemetry_app" ]
 then
         DOCA_PCC_DEV_LIB_NAME="doca_pcc_np_dev"
@@ -156,7 +171,7 @@ then
 	DOCA_PCC_NP_RX_RATE="-DDOCA_PCC_NP_RX_RATE"
 fi
 
-APP_FLAGS="${DOCA_PCC_SAMPLE_TX_BYTES}, ${DOCA_PCC_NP_RX_RATE}, ${TIMELY_DEBUG_FLAG}, ${DCQCN_DEBUG_FLAG}"
+APP_FLAGS="${DOCA_PCC_SAMPLE_TX_BYTES}, ${DOCA_PCC_NP_RX_RATE}, ${TIMELY_DEBUG_FLAG}, ${DCQCN_DEBUG_FLAG}, ${SWIFT_DEBUG_FLAG}"
 
 function generate_prog_from_stubs()
 {
