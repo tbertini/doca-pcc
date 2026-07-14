@@ -105,6 +105,13 @@ extern struct doca_pcc_app *pcc_rp_switch_telemetry_app;
 extern struct doca_pcc_app *pcc_rp_timely_app;
 
 /*
+ * DOCA PCC Reaction Point Slot Experiment DPA program name (THROWAWAY --
+ * two-algo slot-dispatch hardware experiment, see device/rp/slot_exp/NOTES.md;
+ * do not merge to pre-master)
+ */
+extern struct doca_pcc_app *pcc_rp_slot_exp_app;
+
+/*
  * DOCA PCC Notification Point NIC Telemetry DPA program name
  */
 extern struct doca_pcc_app *pcc_np_nic_telemetry_app;

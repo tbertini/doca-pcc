@@ -101,6 +101,26 @@ then
         if [ ${AMALGAMATION_BUILD_MODE} = "true" ]; then
                 APP_INC_LIST="${APP_INC_LIST} -I${DOCA_PCC_DIR}/device/include/rp -I${DOCA_PCC_DIR}/device/adb_gen/"
         fi
+elif [ ${PCC_APP_NAME} = "pcc_rp_slot_exp_app" ]
+then
+        # THROWAWAY two-algo slot-dispatch hardware experiment (do not merge to
+        # pre-master; see device/rp/slot_exp/NOTES.md). Reuses TIMELY's
+        # algo/timely.c UNMODIFIED (called directly by rp_slot_exp_dev_main.c for
+        # algo_idx 0 / algo slot 0) alongside a small fixed-rate stub (algo_idx 1 /
+        # algo slot 1) to validate multi-algo slot registration + dispatch on real
+        # BF3 hardware. Only rp/timely/algo/*.c is pulled in here -- NOT
+        # rp/timely/*.c -- so rp_timely_dev_main.c's doca_pcc_dev_user_algo/
+        # user_init/user_set_algo_params entry points are not linked in twice.
+        DOCA_PCC_DEV_LIB_NAME="doca_pcc_dev"
+        PCC_DEV_RP_SLOT_EXP_DIR=${PCC_APP_DEVICE_SRC_DIR}/rp/slot_exp
+        PCC_DEV_RP_TIMELY_DIR=${PCC_APP_DEVICE_SRC_DIR}/rp/timely
+        PCC_APP_DEVICE_SRCS=`ls ${PCC_DEV_RP_SLOT_EXP_DIR}/*.c`
+        PCC_APP_DEVICE_ALGO_SRCS=`ls ${PCC_DEV_RP_SLOT_EXP_DIR}/algo/*.c ${PCC_DEV_RP_TIMELY_DIR}/algo/*.c`
+        PCC_DEVICE_SRC_FILES="${PCC_APP_DEVICE_SRCS} ${PCC_APP_DEVICE_ALGO_SRCS}"
+        APP_INC_LIST="${DOCA_INC_LIST} -I${PCC_DEV_RP_SLOT_EXP_DIR}/algo -I${PCC_DEV_RP_TIMELY_DIR}/algo"
+        if [ ${AMALGAMATION_BUILD_MODE} = "true" ]; then
+                APP_INC_LIST="${APP_INC_LIST} -I${DOCA_PCC_DIR}/device/include/rp -I${DOCA_PCC_DIR}/device/adb_gen/"
+        fi
 elif [ ${PCC_APP_NAME} = "pcc_np_nic_telemetry_app" ]
 then
         DOCA_PCC_DEV_LIB_NAME="doca_pcc_np_dev"

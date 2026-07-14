@@ -509,6 +509,34 @@ static doca_error_t rp_timely_callback(void *param, void *config)
 }
 
 /*
+ * ARGP Callback - Handle PCC RP Slot Experiment parameter (THROWAWAY --
+ * two-algo slot-dispatch hardware experiment, see device/rp/slot_exp/NOTES.md;
+ * do not merge to pre-master)
+ *
+ * @param [in]: Input parameter
+ * @config [in/out]: Program configuration context
+ * @return: DOCA_SUCCESS on success and DOCA_ERROR otherwise
+ */
+static doca_error_t rp_slot_exp_callback(void *param, void *config)
+{
+	struct pcc_config *pcc_cfg = (struct pcc_config *)config;
+	bool rp_slot_exp = *((bool *)param);
+
+	if (user_set_app) {
+		PRINT_ERROR("Error: Can not set multiple runtime application.\n");
+		return DOCA_ERROR_INITIALIZATION;
+	}
+
+	if (rp_slot_exp) {
+		pcc_cfg->app = pcc_rp_slot_exp_app;
+	}
+	user_set_app = true;
+	PRINT_INFO("Info: Set DOCA PCC RP Slot Experiment application (THROWAWAY: two-algo slot-dispatch test)\n");
+
+	return DOCA_SUCCESS;
+}
+
+/*
  * ARGP Callback - Handle PCC NP Switch Telemetry parameter
  *
  * @param [in]: Input parameter
@@ -732,6 +760,7 @@ doca_error_t register_pcc_params(void)
 	struct doca_argp_param *np_nic_telemetry_param;
 	struct doca_argp_param *rp_switch_telemetry_param;
 	struct doca_argp_param *rp_timely_param;
+	struct doca_argp_param *rp_slot_exp_param;
 	struct doca_argp_param *np_switch_telemetry_param;
 	struct doca_argp_param *threads_list_param;
 	struct doca_argp_param *wait_time_param;
@@ -816,6 +845,26 @@ doca_error_t register_pcc_params(void)
 	doca_argp_param_set_callback(rp_timely_param, rp_timely_callback);
 	doca_argp_param_set_type(rp_timely_param, DOCA_ARGP_TYPE_BOOLEAN);
 	result = doca_argp_register_param(rp_timely_param);
+	if (result != DOCA_SUCCESS) {
+		PRINT_ERROR("Error: Failed to register program param: %s\n", doca_error_get_descr(result));
+		return result;
+	}
+
+	/* Create and register PCC RP Slot Experiment parameter (THROWAWAY) */
+	result = doca_argp_param_create(&rp_slot_exp_param);
+	if (result != DOCA_SUCCESS) {
+		PRINT_ERROR("Error: Failed to create ARGP param: %s\n", doca_error_get_descr(result));
+		return result;
+	}
+	doca_argp_param_set_short_name(rp_slot_exp_param, "rp-se");
+	doca_argp_param_set_long_name(rp_slot_exp_param, "rp-slot-exp");
+	doca_argp_param_set_arguments(rp_slot_exp_param, "<PCC Reaction Point Slot Experiment>");
+	doca_argp_param_set_description(
+		rp_slot_exp_param,
+		"Flag to indicate running as a Reaction Point Slot Experiment (optional). THROWAWAY hardware test: registers TIMELY in algo slot 0 and a fixed-rate stub in algo slot 1 to validate multi-algo slot dispatch (see device/rp/slot_exp/NOTES.md). By default the flag is set to false.");
+	doca_argp_param_set_callback(rp_slot_exp_param, rp_slot_exp_callback);
+	doca_argp_param_set_type(rp_slot_exp_param, DOCA_ARGP_TYPE_BOOLEAN);
+	result = doca_argp_register_param(rp_slot_exp_param);
 	if (result != DOCA_SUCCESS) {
 		PRINT_ERROR("Error: Failed to register program param: %s\n", doca_error_get_descr(result));
 		return result;
