@@ -43,6 +43,8 @@ static char *trace_message_formats[] = {
 	"format 3 - pcc_np dev: thread_idx = %#lx, cnt_recv_packet = %#lx, cnt_sent_packet = %#lx, cnt_user_func_err = %#lx. end %u\n",
 	"format 4 - pcc_np dev: thread_idx = %#lx, rq = %#lx, rq_pi = %#lx, rqcq = %#lx, rqcq_ci = %#lx\n",
 	"format 5 - pcc_np dev: thread_idx = %#lx, sq = %#lx, sq_pi = %#lx, sqcq = %#lx. end %u\n",
+	/* tsflow (all normalized per-event formats): packed arg1 = ts_ns (bits 63:32,
+	 * wraps ~4.295s) | flow_tag (bits 31:0); see the per-algo TRACE_TSFLOW macros. */
 	"format 6 - pcc event: tsflow=0x%lx ev_type=%lu port=%lu algo_slot=%lu rate=%lu\n",
 	"format 7 - dcqcn new_flow: tsflow=0x%lx alpha=%lu rate=%lu\n",
 	"format 8 - dcqcn cnp: tsflow=0x%lx old_rate=%lu alpha=%lu dec_factor=%lu new_rate=%lu\n",
@@ -53,6 +55,25 @@ static char *trace_message_formats[] = {
 	"format 12 - timely rtt: tsflow=0x%lx new_rtt=%lu norm_grad=%ld branch=0x%lx new_rate=%lu\n",
 	"format 13 - retired (clamp folded into format 12 branch bit 0x80)\n",
 	"format 14 - timely hai: tsflow=0x%lx neg_count=%lu N=%lu delta=%lu new_rate=%lu\n",
+	/* Format IDs 15-19 owned by Swift (sender RP); per-event summaries reuse format 6.
+	 * Trace-format normalization (2026-07-10): every line's arg1 is tsflow (see the
+	 * comment above); dropped fields (delay_minus_target, cwnd_prev) are
+	 * host-derivable, and rate (where present) moved last -- see README.md's trace
+	 * table for the full before/after field map. */
+	"format 15 - swift new_flow: tsflow=0x%lx init_cwnd=%lu line_mbps=%lu bdp_fxp16=%lu rate=%lu\n",
+	/* format 16 branch: low nibble AI(0)/MD(1)/MD_BLOCKED(2); 0x80=clamped 0x40=cwnd<1 0x20=fs_sat.
+	 * delay_minus_target dropped (= fabric_rtt - target, derive host-side). */
+	"format 16 - swift rtt: tsflow=0x%lx fabric_rtt=%lu np_turn=%lu target=%lu branch=0x%lx\n",
+	"format 17 - swift win: tsflow=0x%lx cwnd=%lu fs_term=%lu can_decr=%lu rate=%lu\n",
+	/* retx_reset packs what were separate retx_cnt/reset fields: bits[31:1] = retx_cnt,
+	 * bit0 = reset (1 = NACK threshold collapsed cwnd to min_cwnd). */
+	"format 18 - swift loss: tsflow=0x%lx ev_subtype=%lu retx_reset=0x%lx cwnd=%lu rate=%lu\n",
+	/* format 19 populated: bit0 = t2 (req_recv) nonzero, bit1 = t4 (resp_send) nonzero;
+	 * 3 = receiver stamps both -> usable sample; anything else means the sample was
+	 * DROPPED (rtt_dropped_unstamped counter moves, no cwnd/rate change, and no
+	 * format 16/17 pair follows this line). t6/arrival is folded into tsflow's ts_ns
+	 * half instead of passed as its own field. */
+	"format 19 - swift rtt_ts: tsflow=0x%lx t1_req_send=%lu t2_req_recv=%lu t4_resp_send=%lu populated=%lu\n",
 	NULL};
 
 /* Default PCC RP threads */
@@ -550,6 +571,32 @@ static doca_error_t rp_dcqcn_callback(void *param, void *config)
 }
 
 /*
+ * ARGP Callback - Handle PCC RP Swift parameter
+ *
+ * @param [in]: Input parameter
+ * @config [in/out]: Program configuration context
+ * @return: DOCA_SUCCESS on success and DOCA_ERROR otherwise
+ */
+static doca_error_t rp_swift_callback(void *param, void *config)
+{
+	struct pcc_config *pcc_cfg = (struct pcc_config *)config;
+	bool rp_swift = *((bool *)param);
+
+	if (user_set_app) {
+		PRINT_ERROR("Error: Can not set multiple runtime application.\n");
+		return DOCA_ERROR_INITIALIZATION;
+	}
+
+	if (rp_swift) {
+		pcc_cfg->app = pcc_rp_swift_app;
+	}
+	user_set_app = true;
+	PRINT_INFO("Info: Set DOCA PCC RP Swift application\n");
+
+	return DOCA_SUCCESS;
+}
+
+/*
  * ARGP Callback - Handle PCC NP Switch Telemetry parameter
  *
  * @param [in]: Input parameter
@@ -774,6 +821,7 @@ doca_error_t register_pcc_params(void)
 	struct doca_argp_param *rp_switch_telemetry_param;
 	struct doca_argp_param *rp_timely_param;
 	struct doca_argp_param *rp_dcqcn_param;
+	struct doca_argp_param *rp_swift_param;
 	struct doca_argp_param *np_switch_telemetry_param;
 	struct doca_argp_param *threads_list_param;
 	struct doca_argp_param *wait_time_param;
@@ -878,6 +926,30 @@ doca_error_t register_pcc_params(void)
 	doca_argp_param_set_callback(rp_dcqcn_param, rp_dcqcn_callback);
 	doca_argp_param_set_type(rp_dcqcn_param, DOCA_ARGP_TYPE_BOOLEAN);
 	result = doca_argp_register_param(rp_dcqcn_param);
+	if (result != DOCA_SUCCESS) {
+		PRINT_ERROR("Error: Failed to register program param: %s\n", doca_error_get_descr(result));
+		return result;
+	}
+
+	/* Create and register PCC RP Swift parameter */
+	result = doca_argp_param_create(&rp_swift_param);
+	if (result != DOCA_SUCCESS) {
+		PRINT_ERROR("Error: Failed to create ARGP param: %s\n", doca_error_get_descr(result));
+		return result;
+	}
+	doca_argp_param_set_short_name(rp_swift_param, "rp-sw");
+	doca_argp_param_set_long_name(rp_swift_param, "rp-swift");
+	doca_argp_param_set_arguments(rp_swift_param, "<PCC Reaction Point Swift>");
+	doca_argp_param_set_description(
+		rp_swift_param,
+		"Flag to indicate running as a Reaction Point with Swift algorithm (optional). Swift is a delay-based window AIMD congestion control protocol (Kumar et al. SIGCOMM 2020). By default the flag is set to false.");
+	doca_argp_param_set_callback(rp_swift_param, rp_swift_callback);
+	doca_argp_param_set_type(rp_swift_param, DOCA_ARGP_TYPE_BOOLEAN);
+	result = doca_argp_register_param(rp_swift_param);
+	if (result != DOCA_SUCCESS) {
+		PRINT_ERROR("Error: Failed to create ARGP param: %s\n", doca_error_get_descr(result));
+		return result;
+	}
 	if (result != DOCA_SUCCESS) {
 		PRINT_ERROR("Error: Failed to register program param: %s\n", doca_error_get_descr(result));
 		return result;
