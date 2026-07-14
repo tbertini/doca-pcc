@@ -147,7 +147,7 @@ void doca_pcc_dev_user_init(uint32_t *disable_event_bitmask)
 	const uint32_t algo_en = 1;
 
 	/* Initialize TIMELY algorithm with algo_idx=0 -- exactly as
-	 * rp_timely_dev_main.c does; device/rp/timely/** is not modified. */
+	 * rp_timely_dev_main.c does; device/rp/timely files are not modified. */
 	timely_init(TIMELY_ALGO_IDX);
 
 	/* Initialize FIXRATE stub algorithm with algo_idx=1. */
