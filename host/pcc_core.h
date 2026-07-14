@@ -115,6 +115,11 @@ extern struct doca_pcc_app *pcc_rp_dcqcn_app;
 extern struct doca_pcc_app *pcc_rp_swift_app;
 
 /*
+ * DOCA PCC Reaction Point SMaRTT-REPS DPA program name
+ */
+extern struct doca_pcc_app *pcc_rp_smartt_reps_app;
+
+/*
  * DOCA PCC Notification Point NIC Telemetry DPA program name
  */
 extern struct doca_pcc_app *pcc_np_nic_telemetry_app;

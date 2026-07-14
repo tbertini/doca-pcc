@@ -85,6 +85,12 @@ pcc_dev_stubs_keep_dir_path = app_device_build_dir + '/' + pcc_app_name
 run_command(app_builds, pcc_app_dev_src_dir, app_device_build_dir, doca_lib_dir, pcc_app_name,
 	pcc_dev_stubs_keep_dir_path, enable_tx_counter_sampling, enable_np_rx_rate, dpacc_mcpu_flag, check: true)
 pcc_rp_swift_app = meson.get_compiler('c').find_library(pcc_app_name, dirs : pcc_dev_stubs_keep_dir_path, static: true)
+# Compile DOCA PCC Reaction Point SMaRTT-REPS DPA program
+pcc_app_name = 'pcc_rp_smartt_reps_app'
+pcc_dev_stubs_keep_dir_path = app_device_build_dir + '/' + pcc_app_name
+run_command(app_builds, pcc_app_dev_src_dir, app_device_build_dir, doca_lib_dir, pcc_app_name,
+	pcc_dev_stubs_keep_dir_path, enable_tx_counter_sampling, enable_np_rx_rate, dpacc_mcpu_flag, check: true)
+pcc_rp_smartt_reps_app = meson.get_compiler('c').find_library(pcc_app_name, dirs : pcc_dev_stubs_keep_dir_path, static: true)
 
 # Compile DOCA PCC Notification Point NIC Telemetry DPA program
 pcc_app_name = 'pcc_np_nic_telemetry_app'
@@ -106,7 +112,7 @@ doca_pcc_test = executable(DOCA_PREFIX + APP_NAME,
 	c_args : base_c_args,
 	include_directories: [app_inc_dirs, './host'],
 	install_dir : app_install_dir,
-	dependencies : [app_dependencies, pcc_rp_rtt_template_app, pcc_rp_switch_telemetry_app, pcc_rp_timely_app, pcc_rp_dcqcn_app, pcc_rp_swift_app, pcc_np_nic_telemetry_app, pcc_np_switch_telemetry_app],
+	dependencies : [app_dependencies, pcc_rp_rtt_template_app, pcc_rp_switch_telemetry_app, pcc_rp_timely_app, pcc_rp_dcqcn_app, pcc_rp_swift_app, pcc_rp_smartt_reps_app, pcc_np_nic_telemetry_app, pcc_np_switch_telemetry_app],
 	install: install_apps
 )
 
@@ -145,6 +151,19 @@ swift_params_dump = executable('swift_params_dump',
 	files(['host/swift_params_dump.c']),
 	c_args : base_c_args,
 	include_directories: [include_directories('device/rp/swift/algo')],
+	install_dir : app_install_dir,
+	install: install_apps
+)
+
+# Standalone host-side tool: emits the SMaRTT-REPS PPCC parameter/counter contract as
+# JSON on stdout. incast-bench invokes this on the sender host at session startup to
+# learn the wire-format contract (algo ID, parameter indices, units, defaults, counter
+# indices), avoiding contract drift between the DPA's compiled-in values and the
+# orchestrator's encoder. No DOCA dependencies.
+smartt_reps_params_dump = executable('smartt_reps_params_dump',
+	files(['host/smartt_reps_params_dump.c']),
+	c_args : base_c_args,
+	include_directories: [include_directories('device/rp/smartt_reps/algo')],
 	install_dir : app_install_dir,
 	install: install_apps
 )
