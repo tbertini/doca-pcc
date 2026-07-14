@@ -83,6 +83,18 @@ then
         PCC_APP_DEVICE_ALGO_SRCS=`ls ${PCC_DEV_RP_SWITCH_TELEM_DIR}/algo/*.c`
         PCC_DEVICE_SRC_FILES="${PCC_APP_DEVICE_SRCS} ${PCC_APP_DEVICE_ALGO_SRCS}"
         APP_INC_LIST="${DOCA_INC_LIST} -I${PCC_DEV_RP_SWITCH_TELEM_DIR}/algo"
+elif [ ${PCC_APP_NAME} = "pcc_rp_dcqcn_app" ]
+then
+        DOCA_PCC_DEV_LIB_NAME="doca_pcc_dev"
+        PCC_DEV_RP_DCQCN_DIR=${PCC_APP_DEVICE_SRC_DIR}/rp/dcqcn
+        PCC_APP_DEVICE_SRCS=`ls ${PCC_DEV_RP_DCQCN_DIR}/*.c`
+        PCC_APP_DEVICE_ALGO_SRCS=`ls ${PCC_DEV_RP_DCQCN_DIR}/algo/*.c`
+        PCC_DEVICE_SRC_FILES="${PCC_APP_DEVICE_SRCS} ${PCC_APP_DEVICE_ALGO_SRCS}"
+        APP_INC_LIST="${DOCA_INC_LIST} -I${PCC_DEV_RP_DCQCN_DIR}/algo"
+        # Device tracing: default-off (was hardwired). DCQCN_DEBUG=1 enables format 6-10.
+        if [ "${DCQCN_DEBUG:-0}" = "1" ]; then
+                DCQCN_DEBUG_FLAG="-DDCQCN_DEBUG"
+        fi
         if [ ${AMALGAMATION_BUILD_MODE} = "true" ]; then
                 APP_INC_LIST="${APP_INC_LIST} -I${DOCA_PCC_DIR}/device/include/rp -I${DOCA_PCC_DIR}/device/adb_gen/"
         fi
@@ -144,7 +156,7 @@ then
 	DOCA_PCC_NP_RX_RATE="-DDOCA_PCC_NP_RX_RATE"
 fi
 
-APP_FLAGS="${DOCA_PCC_SAMPLE_TX_BYTES}, ${DOCA_PCC_NP_RX_RATE}, ${TIMELY_DEBUG_FLAG}"
+APP_FLAGS="${DOCA_PCC_SAMPLE_TX_BYTES}, ${DOCA_PCC_NP_RX_RATE}, ${TIMELY_DEBUG_FLAG}, ${DCQCN_DEBUG_FLAG}"
 
 function generate_prog_from_stubs()
 {

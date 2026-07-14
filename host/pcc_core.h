@@ -105,6 +105,11 @@ extern struct doca_pcc_app *pcc_rp_switch_telemetry_app;
 extern struct doca_pcc_app *pcc_rp_timely_app;
 
 /*
+ * DOCA PCC Reaction Point DCQCN DPA program name
+ */
+extern struct doca_pcc_app *pcc_rp_dcqcn_app;
+
+/*
  * DOCA PCC Notification Point NIC Telemetry DPA program name
  */
 extern struct doca_pcc_app *pcc_np_nic_telemetry_app;
