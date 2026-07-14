@@ -74,6 +74,15 @@ static char *trace_message_formats[] = {
 	 * format 16/17 pair follows this line). t6/arrival is folded into tsflow's ts_ns
 	 * half instead of passed as its own field. */
 	"format 19 - swift rtt_ts: tsflow=0x%lx t1_req_send=%lu t2_req_recv=%lu t4_resp_send=%lu populated=%lu\n",
+	/* Format IDs 20-24 owned by SMaRTT-REPS (sender RP); per-event summaries reuse format 6.
+	 * format 20 branch: low nibble 0=FD 1=MD 2=FI 3=MI 4=wtd_blocked 5=blackout 6=fastinc.
+	 * Packed pairs: cnt_ncoal = fast_inc_count<<16 | ncoal; delta_ncoal = delta_pkts<<16
+	 * | ncoal; ign_qa = ignored_pkts<<1 | trigger_qa. */
+	"format 20 - smartt ack: tsflow=0x%lx branch=0x%lx rtt=%lu cwnd=%lu rate=%lu\n",
+	"format 21 - smartt qa: tsflow=0x%lx src=%lu ignore_pkts=%lu new_cwnd=%lu rate=%lu\n",
+	"format 22 - smartt fastinc: tsflow=0x%lx cnt_ncoal=0x%lx rtt=%lu cwnd=%lu rate=%lu\n",
+	"format 23 - smartt sig: tsflow=0x%lx first_sn=%lu delta_ncoal=0x%lx avg_wtd=%lu\n",
+	"format 24 - smartt loss: tsflow=0x%lx first_sn=%lu ign_qa=0x%lx cwnd=%lu rate=%lu\n",
 	NULL};
 
 /* Default PCC RP threads */
@@ -597,6 +606,32 @@ static doca_error_t rp_swift_callback(void *param, void *config)
 }
 
 /*
+ * ARGP Callback - Handle PCC RP SMaRTT-REPS parameter
+ *
+ * @param [in]: Input parameter
+ * @config [in/out]: Program configuration context
+ * @return: DOCA_SUCCESS on success and DOCA_ERROR otherwise
+ */
+static doca_error_t rp_smartt_reps_callback(void *param, void *config)
+{
+	struct pcc_config *pcc_cfg = (struct pcc_config *)config;
+	bool rp_smartt_reps = *((bool *)param);
+
+	if (user_set_app) {
+		PRINT_ERROR("Error: Can not set multiple runtime application.\n");
+		return DOCA_ERROR_INITIALIZATION;
+	}
+
+	if (rp_smartt_reps) {
+		pcc_cfg->app = pcc_rp_smartt_reps_app;
+	}
+	user_set_app = true;
+	PRINT_INFO("Info: Set DOCA PCC RP SMaRTT-REPS application\n");
+
+	return DOCA_SUCCESS;
+}
+
+/*
  * ARGP Callback - Handle PCC NP Switch Telemetry parameter
  *
  * @param [in]: Input parameter
@@ -822,6 +857,7 @@ doca_error_t register_pcc_params(void)
 	struct doca_argp_param *rp_timely_param;
 	struct doca_argp_param *rp_dcqcn_param;
 	struct doca_argp_param *rp_swift_param;
+	struct doca_argp_param *rp_smartt_reps_param;
 	struct doca_argp_param *np_switch_telemetry_param;
 	struct doca_argp_param *threads_list_param;
 	struct doca_argp_param *wait_time_param;
@@ -947,9 +983,25 @@ doca_error_t register_pcc_params(void)
 	doca_argp_param_set_type(rp_swift_param, DOCA_ARGP_TYPE_BOOLEAN);
 	result = doca_argp_register_param(rp_swift_param);
 	if (result != DOCA_SUCCESS) {
+		PRINT_ERROR("Error: Failed to register program param: %s\n", doca_error_get_descr(result));
+		return result;
+	}
+
+	/* Create and register PCC RP SMaRTT-REPS parameter */
+	result = doca_argp_param_create(&rp_smartt_reps_param);
+	if (result != DOCA_SUCCESS) {
 		PRINT_ERROR("Error: Failed to create ARGP param: %s\n", doca_error_get_descr(result));
 		return result;
 	}
+	doca_argp_param_set_short_name(rp_smartt_reps_param, "rp-sr");
+	doca_argp_param_set_long_name(rp_smartt_reps_param, "rp-smartt-reps");
+	doca_argp_param_set_arguments(rp_smartt_reps_param, "<PCC Reaction Point SMaRTT-REPS>");
+	doca_argp_param_set_description(
+		rp_smartt_reps_param,
+		"Flag to indicate running as a Reaction Point with the SMaRTT algorithm (optional). SMaRTT is a sender-based windowed congestion control combining per-ACK ECN and delay signals with QuickAdapt (Bonato et al., arXiv:2404.01630). By default the flag is set to false.");
+	doca_argp_param_set_callback(rp_smartt_reps_param, rp_smartt_reps_callback);
+	doca_argp_param_set_type(rp_smartt_reps_param, DOCA_ARGP_TYPE_BOOLEAN);
+	result = doca_argp_register_param(rp_smartt_reps_param);
 	if (result != DOCA_SUCCESS) {
 		PRINT_ERROR("Error: Failed to register program param: %s\n", doca_error_get_descr(result));
 		return result;
