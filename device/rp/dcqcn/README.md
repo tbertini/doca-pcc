@@ -290,8 +290,8 @@ On CNP (CutRate):                         RT ← RC
 On α-timer (every timer_period):          α  ← (1−g)·α                   (Eq. 2)
 On rate-increase (Timer T or ByteCtr BC):
     Fast Recovery    max(T,BC) < F   :    RC ← (RT + RC)/2               (Eq. 3)
-    Additive Incr.   min(T,BC) > F   :    RT ← RT + R_AI ; RC ← (RT+RC)/2 (Eq. 4)
-    Hyper Increase   otherwise       :    RT ← RT + R_HAI; RC ← (RT+RC)/2
+    Hyper Increase   min(T,BC) > F   :    RT ← RT + R_HAI; RC ← (RT+RC)/2
+    Additive Incr.   otherwise       :    RT ← RT + R_AI ; RC ← (RT+RC)/2 (Eq. 4)
 ```
 
 α is FXP16, rates are FXP20; `dcqcn_diff_with_wrap32` handles 32-bit timestamp
