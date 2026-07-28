@@ -149,10 +149,10 @@ void dcqcn_init(uint32_t algo_idx)
 /*
  * Rate increase logic implementing the three phases from Figure 7 of the paper.
  *
- * Phase determination (paper Section 3.1):
+ * Phase determination (paper Section 3.1, Fig. 7):
  *   - Fast Recovery:     max(T, BC) < F  =>  RC = (RT + RC) / 2
- *   - Additive Increase: min(T, BC) > F  =>  RT += R_AI;  RC = (RT + RC) / 2
- *   - Hyper Increase:    otherwise        =>  RT += R_HAI; RC = (RT + RC) / 2
+ *   - Hyper Increase:    min(T, BC) > F  =>  RT += R_HAI; RC = (RT + RC) / 2
+ *   - Additive Increase: otherwise       =>  RT += R_AI;  RC = (RT + RC) / 2
  *
  * @ccctx [in/out]: Per-flow context
  * @cur_rate [in]: Current rate RC (FXP20)
@@ -185,19 +185,20 @@ static inline uint32_t dcqcn_rate_increase(cc_ctxt_dcqcn_t *ccctx,
 		 * see README trace table. */
 		DCQCN_TRACE(param, DCQCN_TRACE_FMT_RATE_INC, tsflow, old_rate, target_rate, 0 /* FR */, cur_rate);
 	} else if (min_count > F) {
+		/* Hyper Increase (paper Section 3.1, QCN [17]): both T and BC past F.
+		 * RT += R_HAI; RC = (RT + RC) / 2 */
+		target_rate += R_HAI;
+		if (target_rate > DOCA_PCC_DEV_MAX_RATE)
+			target_rate = DOCA_PCC_DEV_MAX_RATE;
+		cur_rate = (target_rate + cur_rate) >> 1;
+		DCQCN_TRACE(param, DCQCN_TRACE_FMT_RATE_INC, tsflow, old_rate, target_rate, 1 /* HI */, cur_rate);
+	} else {
 		/* Additive Increase (paper Equation 4): RT += R_AI; RC = (RT + RC) / 2 */
 		target_rate += R_AI;
 		if (target_rate > DOCA_PCC_DEV_MAX_RATE)
 			target_rate = DOCA_PCC_DEV_MAX_RATE;
 		cur_rate = (target_rate + cur_rate) >> 1;
 		DCQCN_TRACE(param, DCQCN_TRACE_FMT_RATE_INC, tsflow, old_rate, target_rate, 2 /* AI */, cur_rate);
-	} else {
-		/* Hyper Increase (paper Section 3.1, QCN [17]): RT += R_HAI; RC = (RT + RC) / 2 */
-		target_rate += R_HAI;
-		if (target_rate > DOCA_PCC_DEV_MAX_RATE)
-			target_rate = DOCA_PCC_DEV_MAX_RATE;
-		cur_rate = (target_rate + cur_rate) >> 1;
-		DCQCN_TRACE(param, DCQCN_TRACE_FMT_RATE_INC, tsflow, old_rate, target_rate, 1 /* HI */, cur_rate);
 	}
 
 	ccctx->target_rate = target_rate;
