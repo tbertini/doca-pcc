@@ -137,47 +137,56 @@ void timely_init(uint32_t algo_idx)
 	doca_pcc_dev_algo_init_metadata(algo_idx, &algo_def,
 					TIMELY_NUM_PARAMS, TIMELY_NUM_COUNTERS);
 
-	/* Per-param description string + size, indexed by TIMELY_P_*. The strings stay
-	 * individual volatile globals above (the volatile anchors them against LTO DCE);
-	 * the loop reads their addr/size so registration is data-driven. */
-	const struct { uint64_t addr; uint32_t size; } param_desc[TIMELY_NUM_PARAMS] = {
-		[TIMELY_P_T_LOW_NS]        = {(uint64_t)timely_param_t_low_desc,         sizeof(timely_param_t_low_desc)},
-		[TIMELY_P_T_HIGH_NS]       = {(uint64_t)timely_param_t_high_desc,        sizeof(timely_param_t_high_desc)},
-		[TIMELY_P_DELTA_FXP20]     = {(uint64_t)timely_param_delta_desc,         sizeof(timely_param_delta_desc)},
-		[TIMELY_P_BETA_FXP16]      = {(uint64_t)timely_param_beta_desc,          sizeof(timely_param_beta_desc)},
-		[TIMELY_P_ALPHA_FXP16]     = {(uint64_t)timely_param_alpha_desc,         sizeof(timely_param_alpha_desc)},
-		[TIMELY_P_MIN_RTT_NS]      = {(uint64_t)timely_param_min_rtt_desc,       sizeof(timely_param_min_rtt_desc)},
-		[TIMELY_P_HAI_THRESHOLD]   = {(uint64_t)timely_param_hai_threshold_desc, sizeof(timely_param_hai_threshold_desc)},
-		[TIMELY_P_MIN_RATE_FXP20]  = {(uint64_t)timely_param_min_rate_desc,      sizeof(timely_param_min_rate_desc)},
-		[TIMELY_P_INIT_RATE_FXP20] = {(uint64_t)timely_param_init_rate_desc,     sizeof(timely_param_init_rate_desc)},
-		[TIMELY_P_TRACE_ON]        = {(uint64_t)timely_param_trace_on_desc,      sizeof(timely_param_trace_on_desc)},
-	};
-	for (uint32_t i = 0; i < TIMELY_NUM_PARAMS; i++) {
-		/* Framework min stays loose (1) so the orchestrator owns range validation via
-		 * the contract min/max; trace_on alone registers min=0 so it can be toggled
-		 * back off at runtime. (Using timely_params[i].min for all would reject in-range
-		 * pushes the orchestrator currently allows, e.g. a sub-contract-min beta.) */
-		uint32_t reg_min = (i == TIMELY_P_TRACE_ON) ? timely_params[i].min : 1;
-		doca_pcc_dev_algo_init_param(algo_idx, i, timely_params[i].def,
-					     timely_params[i].max, reg_min, 1,
-					     param_desc[i].size, param_desc[i].addr);
-	}
+	/* Register every parameter from the contract table (same macro shape as the
+	 * dcqcn/swift/smartt_reps siblings). def/max come from timely_params[];
+	 * permissions=1 (updatable). The description strings stay individual volatile
+	 * globals above -- the volatile anchors them against LTO DCE.
+	 *
+	 * Unlike the siblings, the framework min is hardcoded to 1 rather than read from
+	 * the table: TIMELY's table minima are tuning guidance (t_low >= 1000 ns,
+	 * beta >= 13107, ...), not framework-legal bounds. Registering them would make the
+	 * firmware reject sub-contract-min pushes the orchestrator deliberately allows
+	 * (incast-bench warns but proceeds on out-of-contract values), and since params are
+	 * pushed as one bulk PPCC vector a single rejected value reverts the whole vector to
+	 * defaults. trace_on is the sole exception: it registers the table's min (0) so
+	 * traces can be switched back off at runtime. */
+#define TIMELY_REG_PARAM(idx, desc) \
+	doca_pcc_dev_algo_init_param(algo_idx, (idx), timely_params[(idx)].def, timely_params[(idx)].max, \
+				     1, 1, sizeof(desc), (uint64_t)(desc))
+
+	TIMELY_REG_PARAM(TIMELY_P_T_LOW_NS,        timely_param_t_low_desc);
+	TIMELY_REG_PARAM(TIMELY_P_T_HIGH_NS,       timely_param_t_high_desc);
+	TIMELY_REG_PARAM(TIMELY_P_DELTA_FXP20,     timely_param_delta_desc);
+	TIMELY_REG_PARAM(TIMELY_P_BETA_FXP16,      timely_param_beta_desc);
+	TIMELY_REG_PARAM(TIMELY_P_ALPHA_FXP16,     timely_param_alpha_desc);
+	TIMELY_REG_PARAM(TIMELY_P_MIN_RTT_NS,      timely_param_min_rtt_desc);
+	TIMELY_REG_PARAM(TIMELY_P_HAI_THRESHOLD,   timely_param_hai_threshold_desc);
+	TIMELY_REG_PARAM(TIMELY_P_MIN_RATE_FXP20,  timely_param_min_rate_desc);
+	TIMELY_REG_PARAM(TIMELY_P_INIT_RATE_FXP20, timely_param_init_rate_desc);
+#undef TIMELY_REG_PARAM
+
+	/* trace_on: table min (0), not the hardcoded 1 above -- see comment. */
+	doca_pcc_dev_algo_init_param(algo_idx, TIMELY_P_TRACE_ON,
+				     timely_params[TIMELY_P_TRACE_ON].def,
+				     timely_params[TIMELY_P_TRACE_ON].max,
+				     timely_params[TIMELY_P_TRACE_ON].min, 1,
+				     sizeof(timely_param_trace_on_desc),
+				     (uint64_t)timely_param_trace_on_desc);
 
 	/* Counters all register identically (max=UINT32_MAX, permissions=2, matching the
 	 * NVIDIA reference rtt_template); only index + desc vary. */
-	const struct { uint64_t addr; uint32_t size; } counter_desc[TIMELY_NUM_COUNTERS] = {
-		[TIMELY_C_EVENTS]           = {(uint64_t)timely_counter_events_desc,           sizeof(timely_counter_events_desc)},
-		[TIMELY_C_MD_GRADIENT]      = {(uint64_t)timely_counter_md_gradient_desc,      sizeof(timely_counter_md_gradient_desc)},
-		[TIMELY_C_MD_THIGH]         = {(uint64_t)timely_counter_md_thigh_desc,         sizeof(timely_counter_md_thigh_desc)},
-		[TIMELY_C_AI]               = {(uint64_t)timely_counter_ai_desc,               sizeof(timely_counter_ai_desc)},
-		[TIMELY_C_HAI]              = {(uint64_t)timely_counter_hai_desc,              sizeof(timely_counter_hai_desc)},
-		[TIMELY_C_RTT_LT_TLOW]      = {(uint64_t)timely_counter_rtt_lt_tlow_desc,      sizeof(timely_counter_rtt_lt_tlow_desc)},
-		[TIMELY_C_RTT_GT_THIGH]     = {(uint64_t)timely_counter_rtt_gt_thigh_desc,     sizeof(timely_counter_rtt_gt_thigh_desc)},
-		[TIMELY_C_RATE_CLAMPED_MIN] = {(uint64_t)timely_counter_rate_clamped_min_desc, sizeof(timely_counter_rate_clamped_min_desc)},
-	};
-	for (uint32_t i = 0; i < TIMELY_NUM_COUNTERS; i++)
-		doca_pcc_dev_algo_init_counter(algo_idx, i, UINT32_MAX, 2,
-					       counter_desc[i].size, counter_desc[i].addr);
+#define TIMELY_REG_COUNTER(idx, desc) \
+	doca_pcc_dev_algo_init_counter(algo_idx, (idx), UINT32_MAX, 2, sizeof(desc), (uint64_t)(desc))
+
+	TIMELY_REG_COUNTER(TIMELY_C_EVENTS,           timely_counter_events_desc);
+	TIMELY_REG_COUNTER(TIMELY_C_MD_GRADIENT,      timely_counter_md_gradient_desc);
+	TIMELY_REG_COUNTER(TIMELY_C_MD_THIGH,         timely_counter_md_thigh_desc);
+	TIMELY_REG_COUNTER(TIMELY_C_AI,               timely_counter_ai_desc);
+	TIMELY_REG_COUNTER(TIMELY_C_HAI,              timely_counter_hai_desc);
+	TIMELY_REG_COUNTER(TIMELY_C_RTT_LT_TLOW,      timely_counter_rtt_lt_tlow_desc);
+	TIMELY_REG_COUNTER(TIMELY_C_RTT_GT_THIGH,     timely_counter_rtt_gt_thigh_desc);
+	TIMELY_REG_COUNTER(TIMELY_C_RATE_CLAMPED_MIN, timely_counter_rate_clamped_min_desc);
+#undef TIMELY_REG_COUNTER
 }
 
 /*
