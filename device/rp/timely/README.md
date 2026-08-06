@@ -187,7 +187,7 @@ array. Revisit if a build ever drives multiple physical ports.
 | 11 | TIMELY `new_flow` | `tsflow`; `rate` (FXP20 initial = 1048576 = full line rate) |
 | 12 | TIMELY `rtt` (Algorithm 1 ran) | `tsflow`; `new_rtt` (ns); `norm_grad` (signed `rtt_diff/min_rtt`); `branch` (see table below); `new_rate` (FXP20) |
 | 13 | retired | clamp info folded into format-12 `branch` bit `0x80` |
-| 14 | TIMELY `hai` | `tsflow`; `neg_count` (consecutive ≤0 gradients); `N` (HAI multiplier — 1 normally, 5 in HAI mode); `delta` (additive step δ); `new_rate` |
+| 14 | TIMELY `hai` | `tsflow`; `neg_count` (consecutive <0 gradients; a zero gradient resets the streak); `N` (HAI multiplier — 1 normally, 5 in HAI mode); `delta` (additive step δ); `new_rate` |
 
 ### `tsflow` (arg1 of formats 6/11/12/14)
 
