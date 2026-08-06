@@ -450,11 +450,18 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 		goto done;
 	}
 
-	/* gradient ≤ 0 (queue draining or stable): additive, or HAI after a neg streak */
+	/* gradient ≤ 0 (queue draining or stable): additive, or HAI after a neg streak.
+	 * Only strictly negative gradients extend the streak (paper Algorithm 1:
+	 * "N = 5 if gradient<0 for five completion events"); a zero gradient still
+	 * takes this branch with N = 1 but breaks the streak's consecutiveness. */
 	if (normalized_gradient <= 0) {
 		uint16_t neg_count = ccctx->neg_gradient_count;
-		if (neg_count < (uint16_t)hai_threshold)
-			neg_count++;
+		if (normalized_gradient < 0) {
+			if (neg_count < (uint16_t)hai_threshold)
+				neg_count++;
+		} else {
+			neg_count = 0;
+		}
 		ccctx->neg_gradient_count = neg_count;
 
 		uint32_t n_factor = (neg_count >= (uint16_t)hai_threshold) ? TIMELY_HAI_FACTOR : 1;
