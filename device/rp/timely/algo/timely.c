@@ -526,22 +526,22 @@ done:;
 /*
  * Handle NACK event.
  *
- * FIXME: paper does not define NACK handling for TIMELY (paper §5: "we use
- * OS-bypass messaging over a fabric with PFC", i.e., a PFC-protected fabric
- * where packet loss should be rare). Apply a conservative 50% rate cut and
- * reset the negative-gradient counter to drop out of any pending HAI mode.
+ * Ignored: Algorithm 1 has no NACK input. The paper runs over a PFC-protected
+ * fabric (§5: "we use OS-bypass messaging over a fabric with PFC") where
+ * congestion never drops packets, and this cluster provides that precondition
+ * (PFC on priority 3 at every endpoint and on the switch; incast-bench applies
+ * the ConnectX side per run — A/B-validated 2026-08-07, zero NACKs with the
+ * baseline in place). Reliability is the transport's go-back-N either way, so
+ * a NACK arriving here means the fabric baseline is broken, not that the
+ * algorithm should deviate from the paper. The former conservative 50% cut
+ * lives in git history if a lossy-fabric variant is ever needed.
  */
 static inline void timely_handle_nack(doca_pcc_dev_event_t *event,
 				      uint32_t *param,
 				      cc_ctxt_timely_t *ccctx,
 				      doca_pcc_dev_results_t *results)
 {
-	uint32_t cur_rate = ccctx->cur_rate >> 1;
-
-	cur_rate = timely_clamp_rate(cur_rate, param[TIMELY_P_MIN_RATE_FXP20], NULL, NULL);
-	ccctx->cur_rate = cur_rate;
-	ccctx->neg_gradient_count = 0;
-	results->rate = cur_rate;
+	results->rate = ccctx->cur_rate;
 	results->rtt_req = 0;
 }
 
