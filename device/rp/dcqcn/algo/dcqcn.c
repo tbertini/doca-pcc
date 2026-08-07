@@ -429,31 +429,23 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 /*
  * Handle NACK event.
  *
- * The paper does not define NACK handling (it assumes a PFC fabric where loss is
- * rare). We apply a conservative 50% rate cut and reset the recovery state.
+ * Ignored: the paper's algorithm (§3.1, Fig. 7) has no NACK input — it runs
+ * over a PFC fabric where congestion never drops packets, and this cluster
+ * provides that precondition (PFC on priority 3 at every endpoint and on the
+ * switch; incast-bench applies the ConnectX side per run — A/B-validated
+ * 2026-08-07, zero NACKs with the baseline in place). Reliability is the
+ * transport's go-back-N either way. The dispatcher still counts NACK events
+ * (DCQCN_COUNTER_NACK_EVENT), so a nonzero counter is the per-run proof that
+ * the fabric baseline is broken — fix the fabric, not the algorithm. The
+ * former conservative 50% cut lives in git history if a lossy-fabric variant
+ * is ever needed.
  */
 static inline void dcqcn_handle_nack(doca_pcc_dev_event_t *event,
 				      uint32_t *param,
 				      cc_ctxt_dcqcn_t *ccctx,
 				      doca_pcc_dev_results_t *results)
 {
-	uint32_t timestamp = doca_pcc_dev_get_timestamp(event);
-	uint32_t cur_rate = ccctx->cur_rate;
-
-	cur_rate = cur_rate >> 1;
-
-	if (cur_rate < param[DCQCN_PARAM_MIN_RATE])
-		cur_rate = param[DCQCN_PARAM_MIN_RATE];
-
-	/* Reset recovery state so the flow re-enters fast recovery */
-	ccctx->target_rate = cur_rate;
-	ccctx->t_count = 0;
-	ccctx->bc_count = 0;
-	ccctx->last_timer_ts = timestamp;
-	ccctx->bytes_accumulated = 0;
-
-	ccctx->cur_rate = cur_rate;
-	results->rate = cur_rate;
+	results->rate = ccctx->cur_rate;
 	results->rtt_req = 0;
 }
 
