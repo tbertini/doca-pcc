@@ -34,7 +34,7 @@
  * TIMELY is a rate-based, RTT-driven congestion controller. It runs on each
  * completion event (RTT measurement) and adjusts the per-flow rate based on
  * the smoothed delay gradient (rate of change of RTT). Unlike DCQCN, it does
- * NOT use ECN/CNPs — RTT is the only congestion signal.
+ * NOT use ECN — RTT is the only congestion signal.
  */
 
 #include <doca_pcc_dev.h>
@@ -538,23 +538,6 @@ static inline void timely_handle_nack(doca_pcc_dev_event_t *event,
 	results->rtt_req = 0;
 }
 
-/*
- * Handle CNP event.
- *
- * FIXME: paper §1 explicitly states TIMELY does NOT use ECN/CNP. If a CNP
- * arrives anyway (e.g., the fabric still generates CNPs for legacy reasons),
- * we ignore it and pass through the current rate. The rate will adjust on
- * the next RTT event based on the actual delay.
- */
-static inline void timely_handle_cnp(doca_pcc_dev_event_t *event,
-				     uint32_t *param,
-				     cc_ctxt_timely_t *ccctx,
-				     doca_pcc_dev_results_t *results)
-{
-	results->rate = ccctx->cur_rate;
-	results->rtt_req = 0;
-}
-
 void timely_algo(doca_pcc_dev_event_t *event,
 		 uint32_t *param,
 		 uint32_t *counter,
@@ -577,8 +560,6 @@ void timely_algo(doca_pcc_dev_event_t *event,
 		timely_handle_tx(event, param, timely_ctx, results);
 	} else if (ev_type == DOCA_PCC_DEV_EVNT_ROCE_NACK) {
 		timely_handle_nack(event, param, timely_ctx, results);
-	} else if (ev_type == DOCA_PCC_DEV_EVNT_ROCE_CNP) {
-		timely_handle_cnp(event, param, timely_ctx, results);
 	} else {
 		results->rate = cur_rate;
 		results->rtt_req = 0;
