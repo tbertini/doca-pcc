@@ -86,6 +86,12 @@ static inline uint32_t dcqcn_diff_with_wrap32(uint32_t greater_num, uint32_t sma
 
 #define DCQCN_MAX_TIMER_CATCHUP (8)
 
+/* Same bound for the byte counter's catch-up loop. Needed because a single TX event
+ * can carry up to 65535 * 32 = 2 MiB of delta, so a swept-down byte_counter_th (min 1)
+ * would otherwise spin for millions of iterations on the DPA. At the default B = 10 MiB
+ * the loop always runs exactly once, so the bound is unreachable in practice. */
+#define DCQCN_MAX_BYTE_CATCHUP (8)
+
 /* Param/counter indices and default/min/max values come from dcqcn_params.h (the
  * PPCC contract; single source of truth). Description strings are kept const
  * volatile to prevent dead-code elimination by LTO (they are read out-of-band by the
@@ -384,15 +390,25 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 	if (timer_period > 0 && timer_elapsed >= timer_period) {
 		uint32_t n_timer = timer_elapsed / timer_period;
 
-		/* Cap catch-up so a long idle gap can't compound into a rate jump. */
-		if (n_timer > DCQCN_MAX_TIMER_CATCHUP)
+		/* Advance the deadline by whole periods, so the timer keeps a fixed phase --
+		 * the paper's hardware timer fires every T regardless of when the DPA gets to
+		 * observe it. Assigning `timestamp` here instead would discard the sub-period
+		 * remainder on every fire and make the timer run systematically slow, at a
+		 * rate set by the TX event cadence. Same discipline as the alpha timer above.
+		 * Cap catch-up so a long idle gap can't compound into a rate jump; past the
+		 * cap the backlog is dropped rather than carried, since carrying it would keep
+		 * firing the cap on every subsequent event. */
+		if (n_timer > DCQCN_MAX_TIMER_CATCHUP) {
 			n_timer = DCQCN_MAX_TIMER_CATCHUP;
+			ccctx->last_timer_ts = timestamp;
+		} else {
+			ccctx->last_timer_ts += n_timer * timer_period;
+		}
 
 		for (uint32_t i = 0; i < n_timer; i++) {
 			ccctx->t_count++;
 			cur_rate = dcqcn_rate_increase(ccctx, cur_rate, param, tsflow);
 		}
-		ccctx->last_timer_ts = timestamp;
 	}
 
 	/* --- Byte Counter (Figure 7: ByteCounter expires → BC++; rate increase) ---
@@ -405,10 +421,27 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 	ccctx->last_sent_32bytes = cur_sent_32bytes;
 	ccctx->bytes_accumulated += (uint32_t)delta_32bytes * 32;
 
+	/* One increase step per whole B crossed, not one per event: the paper's byte
+	 * counter wraps every B bytes, so an event carrying several multiples of B owes
+	 * several steps. Structured exactly like the timer above -- whole multiples
+	 * consumed, remainder carried, catch-up bounded (and the backlog dropped once the
+	 * bound is hit). At the default B = 10 MiB a TX event never carries more than one
+	 * multiple, so this is behaviourally identical to the previous single fire; it
+	 * only bites when a sweep pushes B down. */
 	if (byte_threshold > 0 && ccctx->bytes_accumulated >= byte_threshold) {
-		ccctx->bc_count++;
-		ccctx->bytes_accumulated -= byte_threshold;
-		cur_rate = dcqcn_rate_increase(ccctx, cur_rate, param, tsflow);
+		uint32_t n_bc = ccctx->bytes_accumulated / byte_threshold;
+
+		if (n_bc > DCQCN_MAX_BYTE_CATCHUP) {
+			n_bc = DCQCN_MAX_BYTE_CATCHUP;
+			ccctx->bytes_accumulated = 0;
+		} else {
+			ccctx->bytes_accumulated -= n_bc * byte_threshold;
+		}
+
+		for (uint32_t i = 0; i < n_bc; i++) {
+			ccctx->bc_count++;
+			cur_rate = dcqcn_rate_increase(ccctx, cur_rate, param, tsflow);
+		}
 	}
 
 	if (cur_rate > DOCA_PCC_DEV_MAX_RATE)
