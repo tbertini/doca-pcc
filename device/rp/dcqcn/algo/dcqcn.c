@@ -461,32 +461,16 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 
 /*
  * Handle NACK event.
- *
- * The paper does not define NACK handling (it assumes a PFC fabric where loss is
- * rare). We apply a conservative 50% rate cut and reset the recovery state.
+ * Not part of the paper's algorithm, however implemented just in case.
+ * Note: NACKs have never been detected while running this algorithm when PFC
+ * is correctly configured.
  */
 static inline void dcqcn_handle_nack(doca_pcc_dev_event_t *event,
 				      uint32_t *param,
 				      cc_ctxt_dcqcn_t *ccctx,
 				      doca_pcc_dev_results_t *results)
 {
-	uint32_t timestamp = doca_pcc_dev_get_timestamp(event);
-	uint32_t cur_rate = ccctx->cur_rate;
-
-	cur_rate = cur_rate >> 1;
-
-	if (cur_rate < param[DCQCN_PARAM_MIN_RATE])
-		cur_rate = param[DCQCN_PARAM_MIN_RATE];
-
-	/* Reset recovery state so the flow re-enters fast recovery */
-	ccctx->target_rate = cur_rate;
-	ccctx->t_count = 0;
-	ccctx->bc_count = 0;
-	ccctx->last_timer_ts = timestamp;
-	ccctx->bytes_accumulated = 0;
-
-	ccctx->cur_rate = cur_rate;
-	results->rate = cur_rate;
+	results->rate = ccctx->cur_rate;
 	results->rtt_req = 0;
 }
 

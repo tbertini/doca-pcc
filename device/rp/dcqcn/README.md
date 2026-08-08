@@ -275,7 +275,7 @@ DOCA_PCC_DEV_EVNT_ROCE_ACK_MASK`) — DCQCN does not use per-ACK feedback.
 |---|---|---|
 | 2 | `CNP` | cut rate: `RC ← RC·(1 − α/2)`, update α, reset timers/counters (Eq. 1) |
 | 3 | `TX` | advance the α-decay / rate-increase timers and the byte counter; increase rate per Fig. 7 |
-| 5 | `NACK` | conservative 50% cut + reset recovery state (paper-undefined) |
+| 5 | `NACK` | ignored (counted only) — paper has no NACK input; fabric is PFC-protected |
 | 6 | `RTT` | ignored (pass-through) — DCQCN is not RTT-driven |
 
 New flows are detected by `cur_rate == 0` (first event on a zeroed context) and
@@ -313,8 +313,11 @@ the byte counter's loop always runs exactly once.
 
 The paper leaves several points undefined; the decisions made here are:
 
-- **NACK handling**: paper assumes a PFC fabric where NACKs are rare — we apply a
-  conservative 50% cut and reset the recovery state.
+- **NACK handling**: the paper assumes a PFC fabric where congestion never drops
+  packets, so its algorithm has no NACK input — matched exactly: NACK events are
+  ignored (still counted via `DCQCN_COUNTER_NACK_EVENT` as the per-run proof that
+  the PFC precondition held). The fabric baseline is applied per run by
+  incast-bench (u55c ConnectX QoS via mstreg; A/B-validated 2026-08-07).
 - **Hardware timers**: the paper's asynchronous NIC timers are advanced on TX
   events in DOCA's event-driven model (equivalent for active flows, and a flow with
   no TX events never increases its rate), with bounded catch-up after idle gaps.
