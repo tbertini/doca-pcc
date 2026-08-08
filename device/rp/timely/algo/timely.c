@@ -525,23 +525,16 @@ done:;
 
 /*
  * Handle NACK event.
- *
- * FIXME: paper does not define NACK handling for TIMELY (paper §5: "we use
- * OS-bypass messaging over a fabric with PFC", i.e., a PFC-protected fabric
- * where packet loss should be rare). Apply a conservative 50% rate cut and
- * reset the negative-gradient counter to drop out of any pending HAI mode.
+ * Not part of the paper's algorithm, however implemented just in case.
+ * Note: NACKs have never been detected while running this algorithm when PFC
+ * is correctly configured.
  */
 static inline void timely_handle_nack(doca_pcc_dev_event_t *event,
 				      uint32_t *param,
 				      cc_ctxt_timely_t *ccctx,
 				      doca_pcc_dev_results_t *results)
 {
-	uint32_t cur_rate = ccctx->cur_rate >> 1;
-
-	cur_rate = timely_clamp_rate(cur_rate, param[TIMELY_P_MIN_RATE_FXP20], NULL, NULL);
-	ccctx->cur_rate = cur_rate;
-	ccctx->neg_gradient_count = 0;
-	results->rate = cur_rate;
+	results->rate = ccctx->cur_rate;
 	results->rtt_req = 0;
 }
 
