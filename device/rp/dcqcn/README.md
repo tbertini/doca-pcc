@@ -239,7 +239,8 @@ Field notes (AFTER column), all fields printed `%lu` unless noted:
   (`(uint32_t)t_count << 16 | (bc_count & 0xFFFF)`).
 - **format 10 dropped `t_bc`.** `dcqcn_rate_increase` fires up to
   `DCQCN_MAX_TIMER_CATCHUP` (8) times from the rate-increase timer's catch-up loop,
-  plus up to once more from the byte counter, all within a single TX event — so the
+  plus up to `DCQCN_MAX_BYTE_CATCHUP` (8) more from the byte counter, all within a
+  single TX event — so the
   same `(t_count, bc_count)` pair used to repeat on every format-10 line for that
   event. It's still visible once per TX event on the enclosing format-9 line, which
   shares the same `tsflow` (both fire from the same event), so a format-10 burst
@@ -295,8 +296,18 @@ On rate-increase (Timer T or ByteCtr BC):
 ```
 
 α is FXP16, rates are FXP20; `dcqcn_diff_with_wrap32` handles 32-bit timestamp
-wraparound. Idle catch-up on the timers is bounded (`DCQCN_MAX_ALPHA_CATCHUP`,
-`DCQCN_MAX_TIMER_CATCHUP`) to avoid unbounded loops / rate jumps after idle.
+wraparound. Idle catch-up is bounded on all three (`DCQCN_MAX_ALPHA_CATCHUP` = 32,
+`DCQCN_MAX_TIMER_CATCHUP` = 8, `DCQCN_MAX_BYTE_CATCHUP` = 8) to avoid unbounded loops
+and rate jumps after idle.
+
+**Both the rate-increase timer and the byte counter consume whole units and carry the
+remainder.** The timer advances `last_timer_ts += n_timer * timer_period` (not
+`= timestamp`) and the byte counter subtracts `n_bc * byte_threshold` (not a single
+`byte_threshold`), so neither runs slow just because the DPA only gets to observe them
+on TX events. Both drop the backlog instead of carrying it once their catch-up bound is
+hit, since carrying it would pin them at the bound on every subsequent event. At the
+default `byte_counter_th` = 10 MiB a TX event never carries more than one multiple, so
+the byte counter's loop always runs exactly once.
 
 ## Paper-silent design choices
 
@@ -305,12 +316,25 @@ The paper leaves several points undefined; the decisions made here are:
 - **NACK handling**: paper assumes a PFC fabric where NACKs are rare — we apply a
   conservative 50% cut and reset the recovery state.
 - **Hardware timers**: the paper's asynchronous NIC timers are advanced on TX
-  events in DOCA's event-driven model (equivalent for active flows), with bounded
-  catch-up after idle gaps.
-- **Long-idle α**: clamped to 0 past `DCQCN_MAX_ALPHA_CATCHUP` elapsed periods
-  (32 decays at g=1/256 would only reach ≈0.88·α anyway).
+  events in DOCA's event-driven model (equivalent for active flows, and a flow with
+  no TX events never increases its rate), with bounded catch-up after idle gaps.
+- **Long-idle α**: clamped to 0 past `DCQCN_MAX_ALPHA_CATCHUP` elapsed periods. The
+  decay loop's own fixed point is α < `1<<g_shift` (α ≈ 0 in FXP16), reached only
+  after ~1417 iterations at g=1/256 — far too many for the hot path — so 0 is the
+  best available approximation for a genuinely long gap. It is wrong in the band
+  between the bound and that fixed point, where the true α is still ≈0.88·α at 32
+  periods.
 - **Byte-counter units**: paper defines B in bytes; the TX event exposes a
   cumulative 32-byte-unit counter (16-bit wrapping), tracked as a wrapping delta.
+  This assumes the counter does not wrap twice between two TX events of a flow
+  (2 MiB, ≈167 µs at 100 Gbps).
+- **First event of a flow**: consumed by context initialization, so it is not also
+  dispatched to a handler — a flow whose very first event is a CNP does not cut, and
+  its first TX event does not increment `tx_events`. `last_sent_32bytes` starts at 0
+  rather than at the event's counter value, which offsets the first byte-counter
+  interval by at most 2 MiB; the remainder carries, so this is a one-time phase
+  offset and not a drift. The counter cannot be read during initialization because
+  `doca_pcc_dev_get_roce_tx_cntrs` is documented "For TX events only".
 
 ## Hardware / branch context
 
