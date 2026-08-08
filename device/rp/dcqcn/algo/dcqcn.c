@@ -428,17 +428,9 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 
 /*
  * Handle NACK event.
- *
- * Ignored: the paper's algorithm (§3.1, Fig. 7) has no NACK input — it runs
- * over a PFC fabric where congestion never drops packets, and this cluster
- * provides that precondition (PFC on priority 3 at every endpoint and on the
- * switch; incast-bench applies the ConnectX side per run — A/B-validated
- * 2026-08-07, zero NACKs with the baseline in place). Reliability is the
- * transport's go-back-N either way. The dispatcher still counts NACK events
- * (DCQCN_COUNTER_NACK_EVENT), so a nonzero counter is the per-run proof that
- * the fabric baseline is broken — fix the fabric, not the algorithm. The
- * former conservative 50% cut lives in git history if a lossy-fabric variant
- * is ever needed.
+ * Not part of the paper's algorithm, however implemented just in case.
+ * Note: NACKs have never been detected while running this algorithm when PFC
+ * is correctly configured.
  */
 static inline void dcqcn_handle_nack(doca_pcc_dev_event_t *event,
 				      uint32_t *param,
