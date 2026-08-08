@@ -525,16 +525,9 @@ done:;
 
 /*
  * Handle NACK event.
- *
- * Ignored: Algorithm 1 has no NACK input. The paper runs over a PFC-protected
- * fabric (§5: "we use OS-bypass messaging over a fabric with PFC") where
- * congestion never drops packets, and this cluster provides that precondition
- * (PFC on priority 3 at every endpoint and on the switch; incast-bench applies
- * the ConnectX side per run — A/B-validated 2026-08-07, zero NACKs with the
- * baseline in place). Reliability is the transport's go-back-N either way, so
- * a NACK arriving here means the fabric baseline is broken, not that the
- * algorithm should deviate from the paper. The former conservative 50% cut
- * lives in git history if a lossy-fabric variant is ever needed.
+ * Not part of the paper's algorithm, however implemented just in case.
+ * Note: NACKs have never been detected while running this algorithm when PFC
+ * is correctly configured.
  */
 static inline void timely_handle_nack(doca_pcc_dev_event_t *event,
 				      uint32_t *param,
