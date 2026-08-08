@@ -262,7 +262,7 @@ Notes:
 | 5 | `NACK` | RoCE NACK received |
 | 6 | `RTT` | RTT probe response received — TIMELY's main signal |
 
-TIMELY adjusts the rate only on `ev_type=6` (RTT). TX events maintain the RTT-probe abort state machine (re-issue dropped probes). NACK is ignored: Algorithm 1 has no NACK input and the paper assumes a PFC-protected fabric (§5), which this cluster provides (incast-bench applies the ConnectX-side PFC baseline per run; A/B-validated 2026-08-07 — zero NACKs with it in place). CNP is ignored by design (paper §1: TIMELY does not use ECN/CNP).
+TIMELY adjusts the rate only on `ev_type=6` (RTT). TX events maintain the RTT-probe abort state machine (re-issue dropped probes). NACK is ignored: Algorithm 1 has no NACK input and the paper assumes a PFC-protected fabric (§5), which this cluster provides (incast-bench applies the ConnectX-side PFC baseline per run; A/B-validated 2026-08-07 — zero NACKs with it in place).
 
 ### `branch` (format 12, low nibble = Algorithm-1 branch; bit `0x80` = clamped)
 
@@ -313,7 +313,6 @@ Highlights:
 - **minRTT:** paper says "fixed value… known ahead of time" without specifying. Default 3.8 µs (`3800` ns — measured BF3-to-BF3 1:1 `ib_write_bw`).
 - **min_rate:** paper does not define a floor. Default `1<<6` (FXP20), matches DCQCN.
 - **NACK handling:** paper assumes a PFC fabric where NACKs don't happen — matched exactly: NACK events are ignored (the fabric's PFC baseline is the precondition, applied per run by incast-bench; validated 2026-08-07).
-- **CNP:** explicitly ignored per paper §1.
 - **Rate update scaling per minRTT (§5):** paper mentions but doesn't formalize. We do naive per-event update.
 - **δ:** paper specifies as absolute bandwidth (10 Mbps); we encode as an FXP20 line-rate fraction. Default `1049` ≈ 100 Mbps on a 100 Gbps NIC (retuned 2026-05-03; the paper's 10 Mbps would be ~`105`). Re-tune if NIC speed changes.
 
