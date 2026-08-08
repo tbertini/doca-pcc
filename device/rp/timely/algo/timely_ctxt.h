@@ -54,10 +54,10 @@ typedef struct {
 	 * if the response is dropped. Without this, a single lost probe
 	 * stalls the algorithm forever.
 	 */
-	uint32_t start_delay;		/* Timestamp (ns) when RTT_REQ was last sent on a TX event */
-	uint16_t rtt_meas_psn;		/* 1 if a probe has been sent and we're waiting for the response */
+	uint32_t probe_start_ts;		/* Timestamp (ns) when RTT_REQ was last sent on a TX event */
+	uint16_t probe_in_flight;		/* 1 if a probe has been sent and we're waiting for the response */
 	uint16_t abort_cnt;		/* Number of consecutive abort/retry rounds */
-	uint16_t rtt_req_to_rtt_sent;	/* Counts TX events between rtt_req=1 and RTT_REQ_SENT flag */
+	uint16_t tx_since_probe_req;	/* Counts TX events between rtt_req=1 and RTT_REQ_SENT flag */
 	uint16_t reserved1;		/* Padding */
 	uint32_t reserved[3];		/* Reserved for future use, pad to 48 bytes total */
 } cc_ctxt_timely_t;

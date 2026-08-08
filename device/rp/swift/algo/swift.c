@@ -372,11 +372,11 @@ static inline void swift_handle_new_flow(doca_pcc_dev_event_t *event,
 	ccctx->ecwnd = init_cwnd;          /* reserved (phase 2) */
 	ccctx->endpoint_delay_ewma = 0;    /* reserved (phase 2) */
 	ccctx->t_last_decrease = timestamp;
-	ccctx->start_delay = timestamp;
+	ccctx->probe_start_ts = timestamp;
 	ccctx->retx_cnt = 0;
-	ccctx->rtt_meas_psn = 0;
+	ccctx->probe_in_flight = 0;
 	ccctx->abort_cnt = 0;
-	ccctx->rtt_req_to_rtt_sent = 1;
+	ccctx->tx_since_probe_req = 1;
 
 	results->rate = rate;
 	results->rtt_req = 1; /* request first RTT probe */
@@ -402,30 +402,30 @@ static inline void swift_handle_tx(doca_pcc_dev_event_t *event,
 				   doca_pcc_dev_results_t *results)
 {
 	uint8_t rtt_req = 0;
-	uint32_t rtt_meas_psn = ccctx->rtt_meas_psn;
+	uint32_t probe_in_flight = ccctx->probe_in_flight;
 	uint32_t timestamp = doca_pcc_dev_get_timestamp(event);
 	doca_pcc_dev_event_general_attr_t ev_attr = doca_pcc_dev_get_ev_attr(event);
 
-	if (unlikely((ev_attr.flags & DOCA_PCC_DEV_TX_FLAG_RTT_REQ_SENT) && (rtt_meas_psn == 0))) {
-		ccctx->rtt_meas_psn = 1;
-		ccctx->rtt_req_to_rtt_sent = 0;
-		ccctx->start_delay = timestamp;
+	if (unlikely((ev_attr.flags & DOCA_PCC_DEV_TX_FLAG_RTT_REQ_SENT) && (probe_in_flight == 0))) {
+		ccctx->probe_in_flight = 1;
+		ccctx->tx_since_probe_req = 0;
+		ccctx->probe_start_ts = timestamp;
 	} else {
-		uint32_t rtt_till_now = timestamp - ccctx->start_delay;
+		uint32_t probe_out_time_ns = timestamp - ccctx->probe_start_ts;
 
-		if (unlikely(ccctx->start_delay > timestamp))
-			rtt_till_now += UINT32_MAX;
+		if (unlikely(ccctx->probe_start_ts > timestamp))
+			probe_out_time_ns += UINT32_MAX;
 
-		if (rtt_meas_psn == 0) {
-			rtt_till_now = 0;
-			ccctx->rtt_req_to_rtt_sent += 1;
+		if (probe_in_flight == 0) {
+			probe_out_time_ns = 0;
+			ccctx->tx_since_probe_req += 1;
 		}
-		if (unlikely((rtt_till_now > ((uint32_t)SWIFT_ABORT_TIME_NS << ccctx->abort_cnt)) ||
-			     (ccctx->rtt_req_to_rtt_sent > 2))) {
+		if (unlikely((probe_out_time_ns > ((uint32_t)SWIFT_ABORT_TIME_NS << ccctx->abort_cnt)) ||
+			     (ccctx->tx_since_probe_req > 2))) {
 			rtt_req = 1;
-			if (rtt_till_now > ((uint32_t)SWIFT_ABORT_TIME_NS << ccctx->abort_cnt))
+			if (probe_out_time_ns > ((uint32_t)SWIFT_ABORT_TIME_NS << ccctx->abort_cnt))
 				ccctx->abort_cnt += 1;
-			ccctx->rtt_req_to_rtt_sent = 1;
+			ccctx->tx_since_probe_req = 1;
 		}
 	}
 
@@ -455,16 +455,16 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 				    cc_ctxt_swift_t *ccctx,
 				    doca_pcc_dev_results_t *results)
 {
-	uint32_t rtt_meas_psn = ccctx->rtt_meas_psn;
+	uint32_t probe_in_flight = ccctx->probe_in_flight;
 
 	/* Drop spurious RTT events not matching a probe we are waiting on (e.g. from an
 	 * aborted probe). Mirrors rtt_template / TIMELY. */
-	if (unlikely((rtt_meas_psn == 0) && (ccctx->rtt_req_to_rtt_sent == 0))) {
+	if (unlikely((probe_in_flight == 0) && (ccctx->tx_since_probe_req == 0))) {
 		results->rate = ccctx->cur_rate;
 		results->rtt_req = 0;
 		return;
 	}
-	ccctx->rtt_meas_psn = 0;
+	ccctx->probe_in_flight = 0;
 	ccctx->abort_cnt = 0;
 
 	/* --- delay signal --- */
@@ -509,7 +509,7 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 		 * line 5, swift_handle_ack). Just re-arm the next probe. */
 		results->rate = ccctx->cur_rate;
 		results->rtt_req = 1;
-		ccctx->rtt_req_to_rtt_sent = 1;
+		ccctx->tx_since_probe_req = 1;
 		SWIFT_TRACE_FLUSH(param);
 		return;
 	}
@@ -624,7 +624,7 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 	ccctx->cur_rate = rate;
 	results->rate = rate;
 	results->rtt_req = 1; /* request next RTT probe */
-	ccctx->rtt_req_to_rtt_sent = 1;
+	ccctx->tx_since_probe_req = 1;
 
 	/* Two-line decision trace (joined by shared tsflow, and by order, after the
 	 * format-19 line emitted above): delay side then window side. delay_minus_target

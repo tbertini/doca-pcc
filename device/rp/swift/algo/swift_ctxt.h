@@ -53,15 +53,15 @@ typedef struct {
 	uint32_t cur_rate;		/* Actuated Tx rate (FXP20); == 0 => new flow sentinel */
 	uint32_t fcwnd;			/* Fabric congestion window, FXP16 packets (live control variable) */
 	uint32_t t_last_decrease;	/* Timestamp (ns) of last cwnd non-increase; once-per-RTT MD guard */
-	uint32_t start_delay;		/* Timestamp (ns) when RTT_REQ was last sent on a TX event (abort machine) */
+	uint32_t probe_start_ts;		/* Timestamp (ns) when RTT_REQ was last sent on a TX event (abort machine) */
 
 	uint32_t ecwnd;			/* Endpoint congestion window, FXP16 pkts; reserved (paper §3.3, phase 2) */
 	uint32_t endpoint_delay_ewma;	/* Smoothed endpoint delay (ns); reserved (paper §3.3, phase 2) */
 
 	uint16_t retx_cnt;		/* Consecutive NACK/RTO count (Algorithm 1 "On Retransmit Timeout") */
-	uint16_t rtt_meas_psn;		/* 1 if a probe was sent and we await its response */
+	uint16_t probe_in_flight;		/* 1 if a probe was sent and we await its response */
 	uint16_t abort_cnt;		/* Consecutive abort/retry rounds (exponential backoff) */
-	uint16_t rtt_req_to_rtt_sent;	/* TX events between rtt_req=1 and RTT_REQ_SENT flag */
+	uint16_t tx_since_probe_req;	/* TX events between rtt_req=1 and RTT_REQ_SENT flag */
 
 	uint32_t reserved[4];		/* Pad to 48 bytes total (12 dwords). Do not exceed. */
 } cc_ctxt_swift_t;

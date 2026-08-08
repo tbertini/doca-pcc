@@ -53,9 +53,9 @@ typedef struct {
 	uint32_t last_cnp_ts;     /* CNP arrival ts for the ECN-hold predicate    [4]  */
 	uint32_t qa_epoch_start;  /* QuickAdapt trtt-epoch start ("end" anchor)   [4]  */
 	uint32_t last_ack_psn;    /* PSN tracker for ΔSN acked-packets            [4]  */
-	uint32_t probe_start_ts;  /* RTT-probe abort machine (swift start_delay)  [4]  */
+	uint32_t probe_start_ts;  /* RTT-probe abort machine					  [4]  */
 	uint16_t acked_pkts;      /* acked in current trtt epoch (saturating)     [2]  */
-	uint16_t ignore_pkts;     /* bytes_to_ignore, packets                     [2]  */
+	uint16_t packets_to_ignore;     /* bytes_to_ignore, packets                     [2]  */
 	uint16_t ignored_pkts;    /* bytes_ignored, packets (saturating)          [2]  */
 	uint16_t avg_wtd_fxp16;   /* WTD EWMA, capped 65535 (≈1.0)                [2]  */
 	uint16_t fast_inc_count;  /* FastIncrease byte counter, packets (sat)     [2]  */
@@ -63,7 +63,7 @@ typedef struct {
 	                             bit3 qa_epoch_valid  bit4 cnp_seen
 	                             bit5 rtt_probe_outstanding                   [1]  */
 	uint8_t  abort_cnt;       /* probe abort backoff exponent                 [1]  */
-	uint8_t  rtt_req_to_rtt_sent; /* TX events between req and SENT flag      [1]  */
+	uint8_t  tx_since_probe_req; /* TX events between req and SENT flag      [1]  */
 	uint8_t  reserved8;       /*                                              [1]  */
 	uint16_t reserved16;      /*                                              [2]  */
 	uint32_t reserved32;      /* pad to exactly 48                            [4]  */

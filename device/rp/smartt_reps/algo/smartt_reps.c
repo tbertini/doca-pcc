@@ -389,7 +389,7 @@ static inline uint32_t smartt_reps_quick_adapt(uint32_t *param, uint32_t *counte
 				ignore_target += 1;
 			if (ignore_target < 1)
 				ignore_target = 1;
-			ctx->ignore_pkts = (ignore_target > 0xFFFFu) ? 0xFFFFu : (uint16_t)ignore_target;
+			ctx->packets_to_ignore = (ignore_target > 0xFFFFu) ? 0xFFFFu : (uint16_t)ignore_target;
 			ctx->ignored_pkts = 0;
 
 			ctx->flags &= ~SMARTT_REPS_FLAG_TRIGGER_QA;
@@ -398,7 +398,7 @@ static inline uint32_t smartt_reps_quick_adapt(uint32_t *param, uint32_t *counte
 				counter[SMARTT_REPS_C_QA_FIRED]++;
 
 			SMARTT_REPS_TRACE(param, SMARTT_REPS_TRACE_FMT_QA, tsflow, src,
-					  ctx->ignore_pkts, cwnd, ctx->cur_rate);
+					  ctx->packets_to_ignore, cwnd, ctx->cur_rate);
 		}
 		ctx->qa_epoch_start = now;
 		ctx->flags |= SMARTT_REPS_FLAG_QA_EPOCH_VALID;
@@ -595,13 +595,13 @@ static inline void smartt_reps_handle_new_flow(doca_pcc_dev_event_t *event,
 	ctx->last_ack_psn = 0;
 	ctx->probe_start_ts = now;
 	ctx->acked_pkts = 0;
-	ctx->ignore_pkts = 0;
+	ctx->packets_to_ignore = 0;
 	ctx->ignored_pkts = 0;
 	ctx->avg_wtd_fxp16 = 0;
 	ctx->fast_inc_count = 0;
 	ctx->flags = 0; /* trigger_qa / fi_active / psn_valid / qa_epoch_valid / cnp_seen / probe all clear */
 	ctx->abort_cnt = 0;
-	ctx->rtt_req_to_rtt_sent = 1;
+	ctx->tx_since_probe_req = 1;
 	ctx->reserved8 = 0;
 	ctx->reserved16 = 0;
 	ctx->reserved32 = 0;
@@ -666,7 +666,7 @@ static inline void smartt_reps_handle_ack(doca_pcc_dev_event_t *event,
 
 	/* Alg1 lines 8-10: post-QuickAdapt blackout (§3.3). While still ignoring the last
 	 * window's in-flight bytes, swallow the ACK and leave the rate unchanged. */
-	if (ctx->ignored_pkts < ctx->ignore_pkts) {
+	if (ctx->ignored_pkts < ctx->packets_to_ignore) {
 		if (counter != NULL)
 			counter[SMARTT_REPS_C_ACKS_IGNORED]++;
 		SMARTT_REPS_TRACE(param, SMARTT_REPS_TRACE_FMT_ACK, tsflow,
@@ -795,7 +795,7 @@ static inline void smartt_reps_handle_nack(doca_pcc_dev_event_t *event,
 	ctx->flags |= SMARTT_REPS_FLAG_TRIGGER_QA;
 
 	/* lines 32-34: if ignored >= ignore_target, QuickAdapt now (src=2). */
-	if (ctx->ignored_pkts >= ctx->ignore_pkts)
+	if (ctx->ignored_pkts >= ctx->packets_to_ignore)
 		(void)smartt_reps_quick_adapt(param, counter, ctx, now, &cwnd, 2 /* src=nack */, tsflow);
 
 	/* clamp + actuate; rtt_req = 0. */
@@ -854,7 +854,7 @@ static inline void smartt_reps_handle_rtt(doca_pcc_dev_event_t *event,
 	/* Drop spurious RTT events not matching a probe we are waiting on (aborted probe).
 	 * Mirrors rtt_template / TIMELY / Swift. */
 	if (unlikely(!(ctx->flags & SMARTT_REPS_FLAG_RTT_PROBE_OUTSTANDING) &&
-		     (ctx->rtt_req_to_rtt_sent == 0))) {
+		     (ctx->tx_since_probe_req == 0))) {
 		results->rate = ctx->cur_rate;
 		results->rtt_req = 0;
 		return;
@@ -879,13 +879,13 @@ static inline void smartt_reps_handle_rtt(doca_pcc_dev_event_t *event,
 
 	results->rate = ctx->cur_rate;      /* rate unchanged on probe events */
 	results->rtt_req = 1;               /* re-arm next RTT probe */
-	ctx->rtt_req_to_rtt_sent = 1;
+	ctx->tx_since_probe_req = 1;
 }
 
 /*
  * TX event (DOCA_PCC_DEV_EVNT_ROCE_TX = 3): the RTT-probe abort/retry state machine,
  * ported verbatim from Swift/rtt_template/TIMELY, adapted to this ctxt layout
- * (rtt_probe_outstanding flag, probe_start_ts, abort_cnt, rtt_req_to_rtt_sent). No cwnd
+ * (rtt_probe_outstanding flag, probe_start_ts, abort_cnt, tx_since_probe_req). No cwnd
  * change. Without this machine a single dropped RTT response stalls the flow forever.
  */
 static inline void smartt_reps_handle_tx(doca_pcc_dev_event_t *event,
@@ -894,34 +894,34 @@ static inline void smartt_reps_handle_tx(doca_pcc_dev_event_t *event,
 					 doca_pcc_dev_results_t *results)
 {
 	uint8_t rtt_req = 0;
-	uint32_t rtt_meas_psn = (ctx->flags & SMARTT_REPS_FLAG_RTT_PROBE_OUTSTANDING) ? 1 : 0;
+	uint32_t probe_in_flight = (ctx->flags & SMARTT_REPS_FLAG_RTT_PROBE_OUTSTANDING) ? 1 : 0;
 	uint32_t timestamp = doca_pcc_dev_get_timestamp(event);
 	doca_pcc_dev_event_general_attr_t ev_attr = doca_pcc_dev_get_ev_attr(event);
 
-	if (unlikely((ev_attr.flags & DOCA_PCC_DEV_TX_FLAG_RTT_REQ_SENT) && (rtt_meas_psn == 0))) {
+	if (unlikely((ev_attr.flags & DOCA_PCC_DEV_TX_FLAG_RTT_REQ_SENT) && (probe_in_flight == 0))) {
 		ctx->flags |= SMARTT_REPS_FLAG_RTT_PROBE_OUTSTANDING;
-		ctx->rtt_req_to_rtt_sent = 0;
+		ctx->tx_since_probe_req = 0;
 		ctx->probe_start_ts = timestamp;
 	} else {
-		uint32_t rtt_till_now = timestamp - ctx->probe_start_ts;
+		uint32_t probe_out_time_ns = timestamp - ctx->probe_start_ts;
 
 		if (unlikely(ctx->probe_start_ts > timestamp))
-			rtt_till_now += UINT32_MAX;
+			probe_out_time_ns += UINT32_MAX;
 
-		if (rtt_meas_psn == 0) {
-			rtt_till_now = 0;
-			ctx->rtt_req_to_rtt_sent += 1;
+		if (probe_in_flight == 0) {
+			probe_out_time_ns = 0;
+			ctx->tx_since_probe_req += 1;
 		}
-		if (unlikely((rtt_till_now > ((uint32_t)SMARTT_REPS_ABORT_TIME_NS << ctx->abort_cnt)) ||
-			     (ctx->rtt_req_to_rtt_sent > 2))) {
+		if (unlikely((probe_out_time_ns > ((uint32_t)SMARTT_REPS_ABORT_TIME_NS << ctx->abort_cnt)) ||
+			     (ctx->tx_since_probe_req > 2))) {
 			rtt_req = 1;
 			/* Cap the backoff exponent: 300000 << 14 wraps u32 and << 32 is UB
 			 * (latent in the swift/timely originals; abort_cnt only ever grows).
 			 * 12 caps the abort threshold at ~1.2 s. */
-			if ((rtt_till_now > ((uint32_t)SMARTT_REPS_ABORT_TIME_NS << ctx->abort_cnt)) &&
+			if ((probe_out_time_ns > ((uint32_t)SMARTT_REPS_ABORT_TIME_NS << ctx->abort_cnt)) &&
 			    (ctx->abort_cnt < 12))
 				ctx->abort_cnt += 1;
-			ctx->rtt_req_to_rtt_sent = 1;
+			ctx->tx_since_probe_req = 1;
 		}
 	}
 
