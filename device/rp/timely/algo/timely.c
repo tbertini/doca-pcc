@@ -295,10 +295,10 @@ static inline void timely_handle_new_flow(doca_pcc_dev_event_t *event,
 	ccctx->prev_rtt = 0;
 	ccctx->rtt_diff = 0;
 	ccctx->neg_gradient_count = 0;
-	ccctx->start_delay = timestamp;
-	ccctx->rtt_meas_psn = 0;
+	ccctx->probe_start_ts = timestamp;
+	ccctx->probe_in_flight = 0;
 	ccctx->abort_cnt = 0;
-	ccctx->rtt_req_to_rtt_sent = 1;
+	ccctx->tx_since_probe_req = 1;
 
 	results->rate = new_flow_rate;
 	results->rtt_req = 1;
@@ -328,31 +328,31 @@ static inline void timely_handle_tx(doca_pcc_dev_event_t *event,
 				    doca_pcc_dev_results_t *results)
 {
 	uint8_t rtt_req = 0;
-	uint32_t rtt_meas_psn = ccctx->rtt_meas_psn;
+	uint32_t probe_in_flight = ccctx->probe_in_flight;
 	uint32_t timestamp = doca_pcc_dev_get_timestamp(event);
 	doca_pcc_dev_event_general_attr_t ev_attr = doca_pcc_dev_get_ev_attr(event);
 
-	if (unlikely((ev_attr.flags & DOCA_PCC_DEV_TX_FLAG_RTT_REQ_SENT) && (rtt_meas_psn == 0))) {
-		ccctx->rtt_meas_psn = 1;
-		ccctx->rtt_req_to_rtt_sent = 0;
-		ccctx->start_delay = timestamp;
+	if (unlikely((ev_attr.flags & DOCA_PCC_DEV_TX_FLAG_RTT_REQ_SENT) && (probe_in_flight == 0))) {
+		ccctx->probe_in_flight = 1;
+		ccctx->tx_since_probe_req = 0;
+		ccctx->probe_start_ts = timestamp;
 	} else {
-		uint32_t rtt_till_now = timestamp - ccctx->start_delay;
+		uint32_t probe_out_time_ns = timestamp - ccctx->probe_start_ts;
 
-		if (unlikely(ccctx->start_delay > timestamp))
-			rtt_till_now += UINT32_MAX;
+		if (unlikely(ccctx->probe_start_ts > timestamp))
+			probe_out_time_ns += UINT32_MAX;
 
-		if (rtt_meas_psn == 0) {
-			rtt_till_now = 0;
-			ccctx->rtt_req_to_rtt_sent += 1;
+		if (probe_in_flight == 0) {
+			probe_out_time_ns = 0;
+			ccctx->tx_since_probe_req += 1;
 		}
 		uint32_t abort_threshold = (uint32_t)TIMELY_ABORT_TIME_NS << ccctx->abort_cnt;
-		if (unlikely((rtt_till_now > abort_threshold) ||
-			     (ccctx->rtt_req_to_rtt_sent > 2))) {
+		if (unlikely((probe_out_time_ns > abort_threshold) ||
+			     (ccctx->tx_since_probe_req > 2))) {
 			rtt_req = 1;
-			if (rtt_till_now > abort_threshold)
+			if (probe_out_time_ns > abort_threshold)
 				ccctx->abort_cnt += 1;
-			ccctx->rtt_req_to_rtt_sent = 1;
+			ccctx->tx_since_probe_req = 1;
 		}
 	}
 
@@ -372,16 +372,16 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 				     cc_ctxt_timely_t *ccctx,
 				     doca_pcc_dev_results_t *results)
 {
-	uint32_t rtt_meas_psn = ccctx->rtt_meas_psn;
+	uint32_t probe_in_flight = ccctx->probe_in_flight;
 
 	/* Drop spurious RTT events that are not the one we are waiting for
 	 * (e.g., from a previously aborted probe). Mirrors rtt_template. */
-	if (unlikely((rtt_meas_psn == 0) && (ccctx->rtt_req_to_rtt_sent == 0))) {
+	if (unlikely((probe_in_flight == 0) && (ccctx->tx_since_probe_req == 0))) {
 		results->rate = ccctx->cur_rate;
 		results->rtt_req = 0;
 		return;
 	}
-	ccctx->rtt_meas_psn = 0;
+	ccctx->probe_in_flight = 0;
 	ccctx->abort_cnt = 0;
 
 	/* --- RTT calculation (paper §3.1: NIC timestamps for RTT) ---
@@ -389,9 +389,9 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 	 * Without time sync we cannot subtract the NP processing time
 	 * (resp_send_ts - req_recv_ts), so the measurement includes a small
 	 * but consistent NP-side delay. */
-	uint32_t start_rtt = doca_pcc_dev_get_rtt_req_send_timestamp(event);
-	uint32_t end_rtt = doca_pcc_dev_get_timestamp(event);
-	uint32_t new_rtt = timely_diff_with_wrap32(end_rtt, start_rtt);
+	uint32_t req_send_ts = doca_pcc_dev_get_rtt_req_send_timestamp(event);
+	uint32_t resp_recv_ts = doca_pcc_dev_get_timestamp(event);
+	uint32_t new_rtt = timely_diff_with_wrap32(resp_recv_ts, req_send_ts);
 
 	uint32_t t_low = param[TIMELY_P_T_LOW_NS];
 	uint32_t t_high = param[TIMELY_P_T_HIGH_NS];
@@ -476,7 +476,7 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 
 		if (n_factor != 1)
 			TIMELY_TRACE(param, TIMELY_TRACE_FMT_HAI,
-				     TIMELY_TRACE_TSFLOW(end_rtt, doca_pcc_dev_get_flowtag(event)),
+				     TIMELY_TRACE_TSFLOW(resp_recv_ts, doca_pcc_dev_get_flowtag(event)),
 				     neg_count, n_factor, delta, cur_rate);
 		goto done;
 	}
@@ -514,10 +514,10 @@ done:;
 	ccctx->cur_rate = cur_rate;
 	results->rate = cur_rate;
 	results->rtt_req = 1;
-	ccctx->rtt_req_to_rtt_sent = 1;
+	ccctx->tx_since_probe_req = 1;
 
 	TIMELY_TRACE(param, TIMELY_TRACE_FMT_RTT,
-		     TIMELY_TRACE_TSFLOW(end_rtt, doca_pcc_dev_get_flowtag(event)),
+		     TIMELY_TRACE_TSFLOW(resp_recv_ts, doca_pcc_dev_get_flowtag(event)),
 		     new_rtt, (uint64_t)(int64_t)(int32_t)(normalized_gradient),
 		     branch_taken, cur_rate);
 	TIMELY_TRACE_FLUSH(param);

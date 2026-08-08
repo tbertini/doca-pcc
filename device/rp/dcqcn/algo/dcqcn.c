@@ -254,11 +254,11 @@ static inline void dcqcn_handle_new_flow(doca_pcc_dev_event_t *event,
 	ccctx->target_rate = new_flow_rate;
 	ccctx->alpha = DCQCN_INITIAL_ALPHA;
 	ccctx->last_alpha_ts = timestamp;
-	ccctx->last_timer_ts = timestamp;
+	ccctx->last_rate_timer_ts = timestamp;
 	ccctx->bytes_accumulated = 0;
 	ccctx->t_count = 0;
 	ccctx->bc_count = 0;
-	ccctx->last_sent_32bytes = 0;
+	ccctx->prev_tx_cntr_32b = 0;
 
 	results->rate = new_flow_rate;
 	results->rtt_req = 0;
@@ -324,7 +324,7 @@ static inline void dcqcn_handle_cnp(doca_pcc_dev_event_t *event,
 	/* Step 4 (Figure 7): Reset(Timer, ByteCounter, T, BC, AlphaTimer) */
 	ccctx->t_count = 0;
 	ccctx->bc_count = 0;
-	ccctx->last_timer_ts = timestamp;
+	ccctx->last_rate_timer_ts = timestamp;
 	ccctx->last_alpha_ts = timestamp;
 	ccctx->bytes_accumulated = 0;
 
@@ -385,7 +385,7 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 	}
 
 	/* --- Rate Increase Timer (Figure 7: Timer expires → T++; rate increase) --- */
-	uint32_t timer_elapsed = dcqcn_diff_with_wrap32(timestamp, ccctx->last_timer_ts);
+	uint32_t timer_elapsed = dcqcn_diff_with_wrap32(timestamp, ccctx->last_rate_timer_ts);
 
 	if (timer_period > 0 && timer_elapsed >= timer_period) {
 		uint32_t n_timer = timer_elapsed / timer_period;
@@ -400,9 +400,9 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 		 * firing the cap on every subsequent event. */
 		if (n_timer > DCQCN_MAX_TIMER_CATCHUP) {
 			n_timer = DCQCN_MAX_TIMER_CATCHUP;
-			ccctx->last_timer_ts = timestamp;
+			ccctx->last_rate_timer_ts = timestamp;
 		} else {
-			ccctx->last_timer_ts += n_timer * timer_period;
+			ccctx->last_rate_timer_ts += n_timer * timer_period;
 		}
 
 		for (uint32_t i = 0; i < n_timer; i++) {
@@ -416,9 +416,9 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 	 * (32-byte units, 16-bit wrapping), so accumulate the wrapped delta * 32. */
 	doca_pcc_dev_roce_tx_cntrs_t tx_cntrs = doca_pcc_dev_get_roce_tx_cntrs(event);
 	uint16_t cur_sent_32bytes = tx_cntrs.sent_32bytes;
-	uint16_t delta_32bytes = cur_sent_32bytes - ccctx->last_sent_32bytes; /* 16-bit wrap is fine */
+	uint16_t delta_32bytes = cur_sent_32bytes - ccctx->prev_tx_cntr_32b; /* 16-bit wrap is fine */
 
-	ccctx->last_sent_32bytes = cur_sent_32bytes;
+	ccctx->prev_tx_cntr_32b = cur_sent_32bytes;
 	ccctx->bytes_accumulated += (uint32_t)delta_32bytes * 32;
 
 	/* One increase step per whole B crossed, not one per event: the paper's byte

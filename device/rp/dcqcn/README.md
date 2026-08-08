@@ -301,7 +301,7 @@ wraparound. Idle catch-up is bounded on all three (`DCQCN_MAX_ALPHA_CATCHUP` = 3
 and rate jumps after idle.
 
 **Both the rate-increase timer and the byte counter consume whole units and carry the
-remainder.** The timer advances `last_timer_ts += n_timer * timer_period` (not
+remainder.** The timer advances `last_rate_timer_ts += n_timer * timer_period` (not
 `= timestamp`) and the byte counter subtracts `n_bc * byte_threshold` (not a single
 `byte_threshold`), so neither runs slow just because the DPA only gets to observe them
 on TX events. Both drop the backlog instead of carrying it once their catch-up bound is
@@ -333,7 +333,7 @@ The paper leaves several points undefined; the decisions made here are:
   (2 MiB, ≈167 µs at 100 Gbps).
 - **First event of a flow**: consumed by context initialization, so it is not also
   dispatched to a handler — a flow whose very first event is a CNP does not cut, and
-  its first TX event does not increment `tx_events`. `last_sent_32bytes` starts at 0
+  its first TX event does not increment `tx_events`. `prev_tx_cntr_32b` starts at 0
   rather than at the event's counter value, which offsets the first byte-counter
   interval by at most 2 MiB; the remainder carries, so this is a one-time phase
   offset and not a drift. The counter cannot be read during initialization because

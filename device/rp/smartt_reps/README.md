@@ -181,9 +181,9 @@ typedef struct {
     uint32_t last_cnp_ts;     /* CNP arrival ts for the ECN-hold predicate    [4]  */
     uint32_t qa_epoch_start;  /* QuickAdapt trtt-epoch start ("end" anchor)   [4]  */
     uint32_t last_ack_psn;    /* PSN tracker for ΔSN acked-packets            [4]  */
-    uint32_t probe_start_ts;  /* RTT-probe abort machine (swift start_delay)  [4]  */
+    uint32_t probe_start_ts;  /* RTT-probe abort machine (swift probe_start_ts)  [4]  */
     uint16_t acked_pkts;      /* acked in current trtt epoch (saturating)     [2]  */
-    uint16_t ignore_pkts;     /* bytes_to_ignore, packets                     [2]  */
+    uint16_t packets_to_ignore;     /* bytes_to_ignore, packets                     [2]  */
     uint16_t ignored_pkts;    /* bytes_ignored, packets (saturating)          [2]  */
     uint16_t avg_wtd_fxp16;   /* WTD EWMA, capped 65535 (≈1.0)                [2]  */
     uint16_t fast_inc_count;  /* FastIncrease byte counter, packets (sat)     [2]  */
@@ -191,7 +191,7 @@ typedef struct {
                                  bit3 qa_epoch_valid  bit4 cnp_seen
                                  bit5 rtt_probe_outstanding                   [1]  */
     uint8_t  abort_cnt;       /* probe abort backoff exponent                 [1]  */
-    uint8_t  rtt_req_to_rtt_sent; /* TX events between req and SENT flag      [1]  */
+    uint8_t  tx_since_probe_req; /* TX events between req and SENT flag      [1]  */
     uint8_t  reserved8;       /*                                              [1]  */
     uint16_t reserved16;      /*                                              [2]  */
     uint32_t reserved32;      /* pad to exactly 48                            [4]  */
@@ -289,7 +289,7 @@ called on the current event — never re-derived, cached, or approximated.
 |---|---|---|---|
 | 6 | `ev_type, flow_tag, port, algo_slot, rate` | `tsflow, ev_type, port, algo_slot, rate` | `flow_tag` folded into tsflow's low 32 bits |
 | 20 ack | `branch, rtt, cwnd, rate, acked_pkts` | `tsflow, branch, rtt, cwnd, rate` | `acked_pkts` dropped — the coalesced-ACK size is already visible on fmt 22 (`cnt_ncoal` low half) and fmt 23 (`delta_ncoal` high half); a third copy on every ack/blackout/new-flow emission was redundant |
-| 21 qa | `acked_epoch, new_cwnd, ignore_pkts, rate, src` | `tsflow, src, ignore_pkts, new_cwnd, rate` | `acked_epoch` dropped — it is exactly the running sum of fmt-23's `delta_ncoal` high half over the trtt epoch, so it is reconstructible off-device from data already traced |
+| 21 qa | `acked_epoch, new_cwnd, packets_to_ignore, rate, src` | `tsflow, src, packets_to_ignore, new_cwnd, rate` | `acked_epoch` dropped — it is exactly the running sum of fmt-23's `delta_ncoal` high half over the trtt epoch, so it is reconstructible off-device from data already traced |
 | 22 fastinc | `count, cwnd, rate, rtt, ncoal` | `tsflow, cnt_ncoal, rtt, cwnd, rate` | no field dropped — `count` (`fast_inc_count`) and `ncoal` packed together into `cnt_ncoal` to make room for tsflow at a fixed 5-arg budget |
 | 23 sig | `first_sn, sn, delta_pkts, ncoal, avg_wtd` | `tsflow, first_sn, delta_ncoal, avg_wtd, 0` | `sn` (`doca_pcc_dev_get_sn(event)`) dropped — for one coalesced event `sn ≈ first_sn + delta_pkts`, so it carries no information beyond `first_sn` + `delta_ncoal`'s high half, which are both still traced; `delta_pkts` and `ncoal` packed into `delta_ncoal`. This format has no rate field, so the 5th slot is an unused `0` placeholder (rate-last doesn't apply — nothing to put last) |
 | 24 loss | `first_sn(psn), cwnd, rate, ignored_pkts, trigger_qa` | `tsflow, first_sn, ign_qa, cwnd, rate` | no field dropped — `ignored_pkts` and `trigger_qa` packed together into `ign_qa` to make room for tsflow |
