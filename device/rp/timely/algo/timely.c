@@ -414,8 +414,6 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 
 	int32_t new_rtt_diff = (int32_t)new_rtt - (int32_t)ccctx->prev_rtt;
 	ccctx->prev_rtt = new_rtt;
-	int32_t new_rtt_diff = (int32_t)new_rtt - (int32_t)ccctx->prev_rtt;
-	ccctx->prev_rtt = new_rtt;
 
 	/* rtt_diff EWMA = (1-α)·rtt_diff + α·new_rtt_diff. Signed 64-bit intermediates
 	 * so a negative new_rtt_diff (queue draining) stays negative. */
