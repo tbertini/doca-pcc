@@ -83,12 +83,16 @@ host-side fixup is needed.
 
 The compiled-in defaults in the `timely_params[]` table in `algo/timely_params.h`
 are `min_rtt_ns=3800`, `t_low=10000`, `t_high=80000`, `delta=1049`,
-`beta=52429`, `alpha=57344`. These were retuned for this cluster's
+`beta=52429`, `alpha=1311`. The RTT-scale ones were retuned for this cluster's
 **100 Gbps BlueField-3 fabric with ~3.8 µs 1:1 base RTT** — they are *not* the
 paper's 10 Gbps / ~20 µs §6.1 values. On a different fabric you must retune:
 measure base RTT (e.g. minimum `ib_write_lat` or `ping`, approximating wire
 propagation delay), and scale δ with the NIC line rate (δ/line_rate is the
-dimensionless additive step). `timely_params.h` is the single source of truth —
+dimensionless additive step). `alpha` is fabric-independent and is *not* a
+retuning target: the paper gives no value for it, and 1311 (0.02 in FXP16) is
+the value recommended by the first author's own
+[code snippet](https://radhikam.web.illinois.edu/timely-code-snippet.cc).
+`timely_params.h` is the single source of truth —
 edit the table there, or rely on the PPCC runtime path below to override without
 recompiling.
 
@@ -309,7 +313,11 @@ grep -rn "FIXME:" device/rp/timely/algo/ device/rp/timely/rp_timely_dev_main.c
 ```
 
 Highlights:
-- **α (EWMA weight):** paper labels it but never gives a value. Default 0.875 (FXP16 = 57344).
+- **α (EWMA weight):** ~~unknown~~ **resolved, no longer a FIXME.** The paper labels it in
+  Algorithm 1 but gives no value, there or in §6. The first author publishes a rate-computation
+  [code snippet](https://radhikam.web.illinois.edu/timely-code-snippet.cc) alongside the paper
+  whose header reads `ewma_alpha: recommended value = 0.02`. Default is now 1311 (0.02 in FXP16),
+  was 0.875 (57344) — a guess. The same snippet confirms β = 0.8 and HAI_Thresh = 5.
 - **minRTT:** paper says "fixed value… known ahead of time" without specifying. Default 3.8 µs (`3800` ns — measured BF3-to-BF3 1:1 `ib_write_bw`).
 - **min_rate:** paper does not define a floor. Default `1<<6` (FXP20), matches DCQCN.
 - **NACK handling:** paper assumes a PFC fabric where NACKs don't happen — matched exactly: NACK events are ignored (the fabric's PFC baseline is the precondition, applied per run by incast-bench; validated 2026-08-07).

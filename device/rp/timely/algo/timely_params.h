@@ -102,9 +102,15 @@ struct timely_param_desc {
  *   N Mbps -> N*1e6 / 100e9 * (1<<20) = N*10.486 (rounded).
  */
 
+/* alpha=1311 (0.02 in FXP16) -- the paper names the EWMA weight in Algorithm 1 but gives no
+ * value for it, neither there nor in its §6 parameter list. The value comes from the rate
+ * computation code snippet the paper's first author publishes alongside the paper
+ * (https://radhikam.web.illinois.edu/timely-code-snippet.cc), whose header reads
+ * "ewma_alpha: recommended value = 0.02". The same snippet recommends beta=0.8 and
+ * HAI_Thresh=5, which the defaults below already match.
+ */
+
 /* Paper-silent choices (the README "Known unknowns / FIXMEs"); revisit if retuning:
- * FIXME: alpha=57344 (0.875 in FXP16) -- the paper names the EWMA weight but gives no value;
- *   0.875 weights recent RTT samples heavily, matching TIMELY's fast gradient-reaction goal.
  * FIXME: delta=1049 (FXP20) -- the paper gives delta as absolute bandwidth (10 Mbps); we encode
  *   it as a line-rate fraction, 1049 ~= 100 Mbps on 100 Gbps (the paper's 10 Mbps ~= 105).
  *   Re-tune with the NIC line rate.
@@ -118,7 +124,7 @@ static const struct timely_param_desc timely_params[TIMELY_NUM_PARAMS] = {
 	[TIMELY_P_T_HIGH_NS]       = {"t_high",        "ns",       80000,   10000, 2000000},
 	[TIMELY_P_DELTA_FXP20]     = {"delta",         "FXP20",     1049,      10,   10486},
 	[TIMELY_P_BETA_FXP16]      = {"beta",          "FXP16",    52429,   13107,   65535},
-	[TIMELY_P_ALPHA_FXP16]     = {"alpha",         "FXP16",    57344,     256,   65535},
+	[TIMELY_P_ALPHA_FXP16]     = {"alpha",         "FXP16",     1311,     256,   65535},
 	[TIMELY_P_MIN_RTT_NS]      = {"min_rtt_ns",    "ns",        3800,     500,  100000},
 	[TIMELY_P_HAI_THRESHOLD]   = {"hai_threshold", "count",        5,       1,      50},
 	[TIMELY_P_MIN_RATE_FXP20]  = {"min_rate",      "FXP20",       64,       1,  104858},

@@ -405,6 +405,15 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 	uint32_t cur_rate = ccctx->cur_rate;
 	int32_t prev_rtt_diff = ccctx->rtt_diff;
 
+	/* This if statement comes from the author's code snippet.
+	 * On a new flow, prev_rtt=0, so new_rtt_diff=new_rtt.
+	 * Aka a possible 'big' increase in RTT, resulting in a possible
+	 * not needed rate cut. */
+	if (unlikely(ccctx->prev_rtt == 0))
+		ccctx->prev_rtt = new_rtt;
+
+	int32_t new_rtt_diff = (int32_t)new_rtt - (int32_t)ccctx->prev_rtt;
+	ccctx->prev_rtt = new_rtt;
 	int32_t new_rtt_diff = (int32_t)new_rtt - (int32_t)ccctx->prev_rtt;
 	ccctx->prev_rtt = new_rtt;
 
