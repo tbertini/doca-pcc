@@ -102,6 +102,51 @@ the value recommended by the first author's own
 edit the table there, or rely on the PPCC runtime path below to override without
 recompiling.
 
+### Measured throughput tuning (2-sender incast, 2026-08-10)
+
+Two BlueField-3 senders (`u50d-01`, `u50d-02`) → one CX-5 receiver (`u55c-03`),
+30 s `ib_write_bw`, aggregate sender bandwidth, PPCC overrides only (no rebuild
+between points). Defaults give ~50 Gb/s here with σ ≈ 3 Gb/s over four runs, so
+differences under ~6 Gb/s are not separable from run-to-run noise.
+
+| Configuration | Aggregate |
+|---|---:|
+| defaults | 49.6 / 50.5 / 46.6 / 53.5 |
+| `hai_threshold=50` (HAI suppressed) | 33.4 |
+| `delta=5243` | 76.7 |
+| `delta=10486` | 81.1 |
+| `delta=10486 beta=13107` | 76.0 |
+| `delta=10486 hai_threshold=1` | 86.2 |
+| `delta=10486 t_high=200000` | 95.4 |
+| `delta=10486 t_high=500000` | 96.0 |
+| `delta=10486 t_high=2000000` | 96.0 |
+| `t_high=200000 hai_threshold=1` (default δ) | 61.4 |
+| `delta=5243 t_high=200000 hai_threshold=1` | 96.3 |
+| **`delta=10486 t_high=200000 hai_threshold=1`** | **97.1 / 96.4 / 96.4 / 96.7** |
+
+Three parameters carry the whole effect and none of them is sufficient alone:
+δ sets how fast the rate climbs, `hai_threshold=1` makes every non-decreasing
+event a 5δ hyper-additive step instead of requiring a streak of five, and
+`t_high` decides whether the absolute-RTT decrease branch fires at all. The
+counter deltas show the mechanism directly: raising `t_high` from 80 µs to
+200 µs drops `md_thigh` from ~79,000 to ~1,000 per run, `hai_threshold=1` moves
+essentially all increases from `ai` (~233,000 → ~1,000) to `hai`, and
+`rate_clamped_max` rises from ~700 to ~325,000, i.e. the rate sits pinned at the
+line-rate ceiling on about two thirds of RTT events. `beta` and `t_low` are not
+levers here — softening the decrease (`beta=13107`) *lost* 5 Gb/s, and
+`rtt_lt_tlow` is 0 in every run, so the pure-AI region below `t_low` is never
+entered under load.
+
+This is a throughput tuning, not a latency one. It works because the fabric is
+lossless: PFC absorbs what TIMELY no longer backs off from. Between the default
+and the tuned configuration, sender `rx_prio3_pause` goes from ~86,000 to
+~10.2 M frames and pause duration from ~80,000 to ~20.4 M quanta, and the
+receiver's `np_cnp_sent` from ~17,000 to ~759,000. With `t_high` at 200 µs the
+algorithm has effectively delegated the deep-queue case to PFC and is running on
+the gradient branch alone (`md_gradient` still fires ~114,000 times per run, so
+it is not open-loop). On a fabric without PFC, or when queueing delay matters,
+`t_high` must come back down.
+
 ### Runtime override via PPCC (no recompile)
 
 The 9 parameters in `algo/timely_params.h` are also exposed through the
