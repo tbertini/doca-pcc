@@ -6,6 +6,9 @@
 #include "pcc_common_dev.h"
 #include "timely.h"
 
+#define DOCA_PCC_DEV_EVNT_ROCE_CNP_MASK (1 << DOCA_PCC_DEV_EVNT_ROCE_CNP)
+#define DOCA_PCC_DEV_EVNT_ROCE_ACK_MASK (1 << DOCA_PCC_DEV_EVNT_ROCE_ACK)
+#define DOCA_PCC_DEV_EVNT_ROCE_NACK_MASK (1 << DOCA_PCC_DEV_EVNT_ROCE_NACK)
 #define PCC_TRACE_FMT_EVENT (6)
 
 /*
@@ -68,14 +71,9 @@ void doca_pcc_dev_user_algo(doca_pcc_dev_algo_ctxt_t *algo_ctxt,
  * The function will be called once per process load and should init all supported
  * algorithms and all ports.
  *
- * Unlike DCQCN (which masks ACK events because it relies on CNPs), TIMELY relies on
- * RTT events (ev_type=DOCA_PCC_DEV_EVNT_RTT). We do NOT disable any events; in
- * particular ACK events are kept enabled to ensure no event path is unintentionally
- * blocked. RTT events are produced by the NP in response to results->rtt_req=1.
- *
- * FIXME: if ACK event volume causes performance issues we may want to disable them
- * (TIMELY does not act on ACKs). Verified empirically — measure event rate first
- * before adding masks.
+ * TIMELY acts on two event types only: RTT events (ev_type=DOCA_PCC_DEV_EVNT_RTT,
+ * produced by the NP in response to results->rtt_req=1) drive the rate computation,
+ * and TX events drive the probe watchdog plus first-event flow init. 
  *
  * @disable_event_bitmask [out]: user code can tell the infrastructure which event
  * types to ignore (mask out). Events of this type will be dropped and not passed to
@@ -94,8 +92,9 @@ void doca_pcc_dev_user_init(uint32_t *disable_event_bitmask)
 		doca_pcc_dev_trace_5(0, port_num, algo_idx, algo_slot, algo_en, 0);
 	}
 
-	/* Do not mask any event types; TIMELY needs RTT events to fire. */
-	*disable_event_bitmask = 0;
+	*disable_event_bitmask = DOCA_PCC_DEV_EVNT_ROCE_CNP_MASK |
+				 DOCA_PCC_DEV_EVNT_ROCE_ACK_MASK |
+				 DOCA_PCC_DEV_EVNT_ROCE_NACK_MASK;
 #ifdef TIMELY_DEBUG
 	doca_pcc_dev_printf("[TIMELY] %s: init complete, disable_event_bitmask=0x%x\n",
 			    __func__, *disable_event_bitmask);

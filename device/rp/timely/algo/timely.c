@@ -530,21 +530,6 @@ done:;
 	TIMELY_TRACE_FLUSH(param);
 }
 
-/*
- * Handle NACK event.
- * Not part of the paper's algorithm, however implemented just in case.
- * Note: NACKs have never been detected while running this algorithm when PFC
- * is correctly configured.
- */
-static inline void timely_handle_nack(doca_pcc_dev_event_t *event,
-				      uint32_t *param,
-				      cc_ctxt_timely_t *ccctx,
-				      doca_pcc_dev_results_t *results)
-{
-	results->rate = ccctx->cur_rate;
-	results->rtt_req = 0;
-}
-
 void timely_algo(doca_pcc_dev_event_t *event,
 		 uint32_t *param,
 		 uint32_t *counter,
@@ -565,8 +550,6 @@ void timely_algo(doca_pcc_dev_event_t *event,
 		timely_handle_rtt(event, param, counter, timely_ctx, results);
 	} else if (ev_type == DOCA_PCC_DEV_EVNT_ROCE_TX) {
 		timely_handle_tx(event, param, timely_ctx, results);
-	} else if (ev_type == DOCA_PCC_DEV_EVNT_ROCE_NACK) {
-		timely_handle_nack(event, param, timely_ctx, results);
 	} else {
 		results->rate = cur_rate;
 		results->rtt_req = 0;
