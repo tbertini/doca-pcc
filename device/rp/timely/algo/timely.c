@@ -426,7 +426,7 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 	/* normalized_gradient = rtt_diff / minRTT */
 	int32_t normalized_gradient = 0;
 	if (likely(min_rtt_ns != 0))
-		normalized_gradient = rtt_diff / (int32_t)min_rtt_ns;
+		normalized_gradient = (int32_t)(((int64_t)rtt_diff << 16) / (int32_t)min_rtt_ns);
 
 	/* HAI streak. Only strictly negative gradients extend it (paper Algorithm 1:
 	 * "N = 5 if gradient<0 for five completion events"); a zero or positive gradient
