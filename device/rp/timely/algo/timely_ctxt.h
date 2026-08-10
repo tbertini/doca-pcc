@@ -45,7 +45,8 @@ typedef struct {
 	uint32_t cur_rate;		/* R(t): current sending rate (FXP20) */
 	uint32_t prev_rtt;		/* RTT of the previous completion event (ns) */
 	int32_t  rtt_diff;		/* Smoothed RTT difference EWMA (signed, ns) */
-	uint16_t neg_gradient_count;	/* Consecutive completion events with gradient ≤ 0 (HAI trigger) */
+	uint16_t neg_gradient_count;	/* Consecutive RTT events with a strictly negative gradient (HAI trigger);
+					 * updated every event, before the threshold branches */
 	uint16_t reserved0;		/* Padding to 4-byte alignment */
 	/*
 	 * RTT measurement state machine (mirrors rtt_template).

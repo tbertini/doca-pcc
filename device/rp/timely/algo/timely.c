@@ -428,13 +428,31 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 	if (likely(min_rtt_ns != 0))
 		normalized_gradient = rtt_diff / (int32_t)min_rtt_ns;
 
+	/* HAI streak. Only strictly negative gradients extend it (paper Algorithm 1:
+	 * "N = 5 if gradient<0 for five completion events"); a zero or positive gradient
+	 * breaks it. Updated here, ahead of the branch chain, so that samples outside the
+	 * gradient zone keep the streak alive: HAI exists for the case where the fair
+	 * share grew and the RTT is falling (paper §4.3), which is exactly the regime
+	 * that drives samples below T_low, and the author's code snippet likewise updates
+	 * the counter before any threshold branch. The counted quantity stays the smoothed
+	 * normalized gradient rather than the snippet's raw RTT difference, matching what
+	 * Algorithm 1 calls the gradient. Saturated at hai_threshold: only the >= test
+	 * matters and it keeps the counter from wrapping on a long negative run. */
+	uint16_t neg_count = ccctx->neg_gradient_count;
+	if (normalized_gradient < 0) {
+		if (neg_count < (uint16_t)hai_threshold)
+			neg_count++;
+	} else {
+		neg_count = 0;
+	}
+	ccctx->neg_gradient_count = neg_count;
+
 	uint32_t branch_taken = 0;
 
 	/* T_low: additive increase. Uses INSTANTANEOUS new_rtt (paper §4.3 "need for RTT
 	 * low threshold" — filters burst spikes), not the smoothed value. */
 	if (new_rtt < t_low) {
 		cur_rate += delta;
-		ccctx->neg_gradient_count = 0;
 		branch_taken = TIMELY_BRANCH_T_LOW;
 		if (counter != NULL) {
 			counter[TIMELY_C_RTT_LT_TLOW]++;
@@ -448,7 +466,6 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 	if (new_rtt > t_high) {
 		uint32_t one_minus_ratio = TIMELY_FXP16_ONE - timely_t_high_over_rtt_fxp16(t_high, new_rtt);
 		cur_rate = timely_apply_md(cur_rate, beta, one_minus_ratio);
-		ccctx->neg_gradient_count = 0;
 		branch_taken = TIMELY_BRANCH_T_HIGH;
 		if (counter != NULL) {
 			counter[TIMELY_C_RTT_GT_THIGH]++;
@@ -457,20 +474,10 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 		goto done;
 	}
 
-	/* gradient ≤ 0 (queue draining or stable): additive, or HAI after a neg streak.
-	 * Only strictly negative gradients extend the streak (paper Algorithm 1:
-	 * "N = 5 if gradient<0 for five completion events"); a zero gradient still
-	 * takes this branch with N = 1 but breaks the streak's consecutiveness. */
+	/* gradient ≤ 0 (queue draining or stable): additive, or HAI once the streak is
+	 * long enough. A zero gradient takes this branch with N = 1, having already
+	 * broken the streak above. */
 	if (normalized_gradient <= 0) {
-		uint16_t neg_count = ccctx->neg_gradient_count;
-		if (normalized_gradient < 0) {
-			if (neg_count < (uint16_t)hai_threshold)
-				neg_count++;
-		} else {
-			neg_count = 0;
-		}
-		ccctx->neg_gradient_count = neg_count;
-
 		uint32_t n_factor = (neg_count >= (uint16_t)hai_threshold) ? TIMELY_HAI_FACTOR : 1;
 		cur_rate += n_factor * delta;
 		branch_taken = TIMELY_BRANCH_GRAD_LE;
@@ -498,7 +505,6 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 					      ? (uint32_t)(TIMELY_FXP16_ONE - 1)
 					      : (uint32_t)grad_fxp16_signed;
 		cur_rate = timely_apply_md(cur_rate, beta, grad_fxp16);
-		ccctx->neg_gradient_count = 0;
 		branch_taken = TIMELY_BRANCH_GRAD_GT;
 		if (counter != NULL)
 			counter[TIMELY_C_MD_GRADIENT]++;
