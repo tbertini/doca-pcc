@@ -423,10 +423,25 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 	int32_t rtt_diff = term_old + term_new;
 	ccctx->rtt_diff = rtt_diff;
 
-	/* normalized_gradient = rtt_diff / minRTT */
+	/* normalized_gradient = rtt_diff / minRTT, in FXP16 (1<<16 = 1.0). The FXP16 scale
+	 * is what makes the sign test meaningful: rtt_diff is an ns-domain EWMA that lives
+	 * within a few hundred ns of zero, so an integer division by minRTT (3800 ns) would
+	 * truncate to 0 on essentially every event and neither the HAI streak nor the
+	 * gradient-decrease branch would ever fire.
+	 * Saturated into int32 rather than truncated: at min_rtt_ns=3800 an rtt_diff past
+	 * ~122 µs overflows the shifted quotient and would flip the sign, turning a large
+	 * RTT increase into an apparent decrease. The decrease branch clamps this again to
+	 * FXP16_ONE-1 before scaling by β. */
 	int32_t normalized_gradient = 0;
-	if (likely(min_rtt_ns != 0))
-		normalized_gradient = (int32_t)(((int64_t)rtt_diff << 16) / (int32_t)min_rtt_ns);
+	if (likely(min_rtt_ns != 0)) {
+		int64_t grad = ((int64_t)rtt_diff << 16) / (int32_t)min_rtt_ns;
+
+		if (grad > INT32_MAX)
+			grad = INT32_MAX;
+		else if (grad < INT32_MIN)
+			grad = INT32_MIN;
+		normalized_gradient = (int32_t)grad;
+	}
 
 	/* HAI streak. Only strictly negative gradients extend it (paper Algorithm 1:
 	 * "N = 5 if gradient<0 for five completion events"); a zero or positive gradient
@@ -496,14 +511,13 @@ static inline void timely_handle_rtt(doca_pcc_dev_event_t *event,
 	}
 
 	/* gradient > 0: multiplicative decrease, rate ← rate·(1 - β·normalized_gradient).
-	 * rtt_diff/min_rtt_ns are ns; the FXP16 ratio is (rtt_diff<<16)/min_rtt_ns,
+	 * normalized_gradient is already the FXP16 ratio; here it is known positive, and is
 	 * saturated at FXP16_ONE-1 so (1 - β·ratio) stays positive on large gradients.
 	 * FIXME: paper doesn't bound this multiplier; saturation is our choice. */
 	{
-		int64_t grad_fxp16_signed = ((int64_t)rtt_diff << 16) / (int32_t)min_rtt_ns;
-		uint32_t grad_fxp16 = (grad_fxp16_signed >= TIMELY_FXP16_ONE)
+		uint32_t grad_fxp16 = (normalized_gradient >= (int32_t)TIMELY_FXP16_ONE)
 					      ? (uint32_t)(TIMELY_FXP16_ONE - 1)
-					      : (uint32_t)grad_fxp16_signed;
+					      : (uint32_t)normalized_gradient;
 		cur_rate = timely_apply_md(cur_rate, beta, grad_fxp16);
 		branch_taken = TIMELY_BRANCH_GRAD_GT;
 		if (counter != NULL)
@@ -514,16 +528,21 @@ done:;
 	/* Paper §5 scales rate updates by (completions per minRTT) because their algorithm
 	 * runs on every data-segment ACK (high cadence at small segment sizes). DOCA PCC
 	 * decouples our handler from data ACKs: it runs only on RTT events driven by
-	 * dedicated probes (requested via results->rtt_req). Empirically, probe inter-arrival
-	 * on our setup is ~16 ms ≫ minRTT (~µs), i.e. far fewer than 1 update per minRTT.
+	 * dedicated probes (requested via results->rtt_req). Measured probe inter-arrival on
+	 * our setup is ~39 µs (762,175 RTT events on one flow over a 30 s 2-sender incast,
+	 * i.e. 25.4 k/s), which is ~10x minRTT (3.8 µs) — far fewer than 1 update per minRTT.
 	 * Paper's "≤1 completion per minRTT" assumption holds → no scaling needed. */
 
 	uint32_t clamp_min = 0, clamp_max = 0;
 	cur_rate = timely_clamp_rate(cur_rate, min_rate, &clamp_min, &clamp_max);
 	if (clamp_min || clamp_max)
 		branch_taken |= TIMELY_BRANCH_CLAMPED_BIT;
-	if (clamp_min && counter != NULL)
-		counter[TIMELY_C_RATE_CLAMPED_MIN]++;
+	if (counter != NULL) {
+		if (clamp_min)
+			counter[TIMELY_C_RATE_CLAMPED_MIN]++;
+		if (clamp_max)
+			counter[TIMELY_C_RATE_CLAMPED_MAX]++;
+	}
 	ccctx->cur_rate = cur_rate;
 	results->rate = cur_rate;
 	results->rtt_req = 1;

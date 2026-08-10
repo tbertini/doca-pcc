@@ -51,7 +51,10 @@ static char *trace_message_formats[] = {
 	"format 9 - dcqcn tx: tsflow=0x%lx alpha=%lu t_bc=0x%lx bytes_accum=%lu cur_rate=%lu\n",
 	"format 10 - dcqcn rate_inc: tsflow=0x%lx old_rate=%lu target=%lu phase=%lu new_rate=%lu\n",
 	"format 11 - timely new_flow: tsflow=0x%lx rate=%lu\n",
-	/* branch low nibble = T_LOW(0)/T_HIGH(1)/GRAD_LE(2)/GRAD_GT(3); bit 0x80 = clamped */
+	/* branch low nibble = T_LOW(0)/T_HIGH(1)/GRAD_LE(2)/GRAD_GT(3); bit 0x80 = clamped.
+	 * norm_grad is FXP16 (65536 = a gradient of 1.0, i.e. rtt_diff == min_rtt_ns), signed.
+	 * It used to be an integer ns/ns quotient, which truncated to 0 on every event; the
+	 * field name is unchanged because incast-bench's tools/pcc_trace_parse.py keys on it. */
 	"format 12 - timely rtt: tsflow=0x%lx new_rtt=%lu norm_grad=%ld branch=0x%lx new_rate=%lu\n",
 	"format 13 - retired (clamp folded into format 12 branch bit 0x80)\n",
 	"format 14 - timely hai: tsflow=0x%lx neg_count=%lu N=%lu delta=%lu new_rate=%lu\n",

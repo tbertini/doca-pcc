@@ -10,7 +10,7 @@ specifically Algorithm 1 in §4.3 with the default parameters from §6.
 |---|---|
 | `algo/timely.h` | Public API: `timely_init`, `timely_algo`, `timely_set_algo_params` |
 | `algo/timely_ctxt.h` | Per-flow state struct (cur_rate, prev_rtt, signed rtt_diff, HAI counter, RTT-probe abort machinery) |
-| `algo/timely_params.h` | The PPCC **contract** AND the single source of truth for defaults: 10-param (9 tuning + 1 diagnostic `trace_on`) / 8-counter table (name, unit, default, min, max), shared between the DPA algorithm and the host-side `timely_params_dump` |
+| `algo/timely_params.h` | The PPCC **contract** AND the single source of truth for defaults: 10-param (9 tuning + 1 diagnostic `trace_on`) / 9-counter table (name, unit, default, min, max), shared between the DPA algorithm and the host-side `timely_params_dump` |
 | `algo/timely.c` | Algorithm 1 implementation (see [§Algorithm 1 mapping](#algorithm-1-mapping)) |
 | `rp_timely_dev_main.c` | DPA entry points (`doca_pcc_dev_user_algo`, `doca_pcc_dev_user_init`); slot-15 fallback bypass (see [§Slot 0 vs slot 15](#slot-0-vs-slot-15)) |
 
@@ -71,6 +71,12 @@ format 6 - pcc event: tsflow=0x1888e2a05439fabb ev_type=4 port=0 algo_slot=15 ra
 format 12 - timely rtt: tsflow=0x1888e2a05439fabb new_rtt=600000 norm_grad=0 branch=0x82 new_rate=64
 ```
 
+This particular capture predates the FXP16 gradient fix, which is why its
+`norm_grad` reads 0 — see [Format 12's `norm_grad` is FXP16](#trace-format-normalization)
+below. On a current build the field is a signed FXP16 ratio (e.g. `norm_grad=-2317`
+is a gradient of −0.035), and `norm_grad=0` on *every* line is the signature of a
+broken gradient computation, not of a quiet fabric.
+
 `tools/timely-prettify.sh` substitutes `ev_type=4` → `ev_type=ACK` and
 `branch=0x82` → `branch=GRAD_LE+CLAMP` unchanged (those fields kept their names,
 just moved next to `tsflow`), and rewrites `tsflow=0x...` itself to
@@ -104,7 +110,7 @@ vector between runs without rebuilding the DPA binary. The Mac-side
 [`incast-bench`](https://github.com/tbertini/incast-bench) orchestrator uses this path:
 it dumps the contract via `timely_params_dump` at start-of-run, pushes the
 chosen vector via `mlxreg` `cmd_type=0xB` (bulk set params), and scrapes the
-8 TIMELY counters via `cmd_type=0xC` / `0xD`. See `incast-bench --help` and
+9 TIMELY counters via `cmd_type=0xC` / `0xD`. See `incast-bench --help` and
 the `--timely-param` / `--timely-params` flags. Re-tuning the compiled-in
 defaults is still worthwhile (faster startup, sane values when nothing pushes
 overrides), but for sweeps the PPCC path is what you want.
@@ -161,7 +167,7 @@ uint32_t *counter = doca_pcc_dev_get_counters(0, 0);
 This is deliberate: TIMELY is the only algorithm in the binary, so slot
 negotiation is irrelevant. The practical consequence for tuning: **a parameter
 vector pushed via PPCC `algo_slot=0` governs the slot-15 benchmark traffic**,
-and the 8 TIMELY counters read from slot 0 aggregate that traffic. If a future
+and the 9 TIMELY counters read from slot 0 aggregate that traffic. If a future
 build runs several algorithms side-by-side, this dispatcher must instead read
 `attr->algo_slot` and map it to the matching algorithm.
 
@@ -189,7 +195,7 @@ array. Revisit if a build ever drives multiple physical ports.
 | 6 | per-event summary (`rp_timely_dev_main.c`) | `tsflow` (packed timestamp+flow_tag, see below); `ev_type` (see table below); `port`; `algo_slot` (15 = ECE fallback / no negotiation, 0 = registered TIMELY slot); `rate` (FXP20 after our algo ran) |
 | 7–10 | reserved for DCQCN | placeholder strings — never emitted on the timely branch |
 | 11 | TIMELY `new_flow` | `tsflow`; `rate` (FXP20 initial = 1048576 = full line rate) |
-| 12 | TIMELY `rtt` (Algorithm 1 ran) | `tsflow`; `new_rtt` (ns); `norm_grad` (signed `rtt_diff/min_rtt`); `branch` (see table below); `new_rate` (FXP20) |
+| 12 | TIMELY `rtt` (Algorithm 1 ran) | `tsflow`; `new_rtt` (ns); `norm_grad` (signed `rtt_diff/min_rtt` in **FXP16** — 65536 = gradient 1.0); `branch` (see table below); `new_rate` (FXP20) |
 | 13 | retired | clamp info folded into format-12 `branch` bit `0x80` |
 | 14 | TIMELY `hai` | `tsflow`; `neg_count` (consecutive <0 gradients, counted on every RTT event whatever branch follows; a zero or positive gradient resets the streak; saturates at `hai_threshold`); `N` (HAI multiplier — 1 normally, 5 in HAI mode); `delta` (additive step δ); `new_rate` |
 
@@ -234,7 +240,7 @@ Notes:
   both now live packed inside `tsflow` (see above).
 - **Format 12 drops `rtt_diff`.** It is still computed and kept in
   `cc_ctxt_timely_t.rtt_diff` for the algorithm's own EWMA (`normalized_gradient
-  = rtt_diff / min_rtt_ns`) — only the trace argument was dropped, to keep
+  = (rtt_diff << 16) / min_rtt_ns`) — only the trace argument was dropped, to keep
   `tsflow` within the format's fixed 5-argument budget. It remains derivable
   off-device: group format-12 lines by the flow_tag half of `tsflow`, and two
   consecutive `new_rtt` samples for the same flow give
@@ -249,6 +255,19 @@ Notes:
   sign-extends through `int64_t` before reinterpreting the bits as `uint64_t`,
   so `%ld` on the host recovers the correct sign directly — no host-side
   workaround needed.
+- **Format 12's `norm_grad` changed units: it is now FXP16, not a raw ns/ns
+  quotient.** `rtt_diff` is an EWMA in the nanosecond domain that lives within a
+  few hundred ns of zero, so the old integer division by `min_rtt_ns` (3800)
+  truncated to 0 on essentially every event — the traced field read 0 and, worse,
+  the algorithm's own sign test never fired, so neither the HAI streak nor the
+  gradient-decrease branch could trigger. The division is now done in FXP16
+  (`65536` = a gradient of 1.0, i.e. `rtt_diff == min_rtt_ns`), and the quotient
+  is saturated into `int32` because at `min_rtt_ns=3800` an `rtt_diff` past
+  ~122 µs would otherwise overflow and flip sign, reading a large RTT *increase*
+  as a decrease. The **field name is deliberately unchanged**: `norm_grad` is a
+  parsed key in incast-bench's `tools/pcc_trace_parse.py` and is asserted on in
+  its selftest, so renaming it would break a cross-repo wire contract for no
+  gain — same reasoning as the append-only param table.
 - **`tools/timely-prettify.sh` has since been updated for this normalization**
   (was out of scope for this change, fixed in a follow-up) — see
   [Useful flags](#reading-the-trace-output) above for the current `--filter-flow`
@@ -305,7 +324,7 @@ else:                                             (TIMELY_BRANCH_GRAD_GT)
     rate ← rate · (1 - β·normalized_gradient)
 ```
 
-Default parameters, units, and min/max bounds are in [`algo/timely_params.h`](algo/timely_params.h) — the single source of truth for the PPCC contract, shared between the DPA algorithm and the host-side dumper. Per-event params are runtime-configurable via the standard DOCA PCC param interface (9 params, see `TIMELY_P_*` enum in [`algo/timely_params.h`](algo/timely_params.h); 8 counters via `TIMELY_C_*`).
+Default parameters, units, and min/max bounds are in [`algo/timely_params.h`](algo/timely_params.h) — the single source of truth for the PPCC contract, shared between the DPA algorithm and the host-side dumper. Per-event params are runtime-configurable via the standard DOCA PCC param interface (9 params, see `TIMELY_P_*` enum in [`algo/timely_params.h`](algo/timely_params.h); 9 counters via `TIMELY_C_*`).
 
 ## Known unknowns / FIXMEs
 

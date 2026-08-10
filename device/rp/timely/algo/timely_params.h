@@ -75,7 +75,13 @@ enum timely_param_idx {
  * those branches (TX, and RTT events from spurious probes; CNP/ACK/NACK are
  * masked at init and never counted). RTT_LT_TLOW
  * and RTT_GT_THIGH are independent classification counters (RTT_LT_TLOW counts
- * coincide with AI on the T_low branch; RTT_GT_THIGH coincide with MD_THIGH). */
+ * coincide with AI on the T_low branch; RTT_GT_THIGH coincide with MD_THIGH).
+ *
+ * RATE_CLAMPED_MIN/MAX are saturation counters: MIN means a decrease run drove the
+ * rate into the floor, MAX means the increase side is pinned at line rate and δ is
+ * larger than the fabric can absorb. Both are needed to read a δ sweep -- without
+ * MAX you cannot distinguish "δ is well tuned" from "δ overshoots every event and
+ * the ceiling is doing the work". */
 enum timely_counter_idx {
 	TIMELY_C_EVENTS           = 0,
 	TIMELY_C_MD_GRADIENT      = 1,
@@ -85,6 +91,7 @@ enum timely_counter_idx {
 	TIMELY_C_RTT_LT_TLOW      = 5,
 	TIMELY_C_RTT_GT_THIGH     = 6,
 	TIMELY_C_RATE_CLAMPED_MIN = 7,
+	TIMELY_C_RATE_CLAMPED_MAX = 8,  /* appended: rate hit the line-rate ceiling */
 	TIMELY_NUM_COUNTERS
 };
 
@@ -144,6 +151,7 @@ static const char *const timely_counter_names[TIMELY_NUM_COUNTERS] = {
 	[TIMELY_C_RTT_LT_TLOW]      = "rtt_lt_tlow",
 	[TIMELY_C_RTT_GT_THIGH]     = "rtt_gt_thigh",
 	[TIMELY_C_RATE_CLAMPED_MIN] = "rate_clamped_min",
+	[TIMELY_C_RATE_CLAMPED_MAX] = "rate_clamped_max",
 };
 
 #endif /* TIMELY_PARAMS_H_ */
