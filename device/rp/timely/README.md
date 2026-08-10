@@ -191,7 +191,7 @@ array. Revisit if a build ever drives multiple physical ports.
 | 11 | TIMELY `new_flow` | `tsflow`; `rate` (FXP20 initial = 1048576 = full line rate) |
 | 12 | TIMELY `rtt` (Algorithm 1 ran) | `tsflow`; `new_rtt` (ns); `norm_grad` (signed `rtt_diff/min_rtt`); `branch` (see table below); `new_rate` (FXP20) |
 | 13 | retired | clamp info folded into format-12 `branch` bit `0x80` |
-| 14 | TIMELY `hai` | `tsflow`; `neg_count` (consecutive <0 gradients; a zero gradient resets the streak); `N` (HAI multiplier — 1 normally, 5 in HAI mode); `delta` (additive step δ); `new_rate` |
+| 14 | TIMELY `hai` | `tsflow`; `neg_count` (consecutive <0 gradients, counted on every RTT event whatever branch follows; a zero or positive gradient resets the streak; saturates at `hai_threshold`); `N` (HAI multiplier — 1 normally, 5 in HAI mode); `delta` (additive step δ); `new_rate` |
 
 ### `tsflow` (arg1 of formats 6/11/12/14)
 
@@ -290,6 +290,9 @@ new_rtt_diff  ← new_rtt - prev_rtt
 prev_rtt      ← new_rtt
 rtt_diff      ← (1-α)·rtt_diff + α·new_rtt_diff   (signed FXP16 EWMA)
 normalized_gradient ← rtt_diff / minRTT
+
+neg_streak ← neg_streak + 1 if normalized_gradient < 0 else 0
+                                                  (HAI streak, updated every event)
 
 if new_rtt < T_low: rate ← rate + δ; return       (TIMELY_BRANCH_T_LOW)
 if new_rtt > T_high:                              (TIMELY_BRANCH_T_HIGH)
