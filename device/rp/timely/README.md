@@ -260,13 +260,13 @@ Notes:
 |---|---|---|
 | 0 | `NULL` | Unspecified / no event |
 | 1 | `FW` | Deprecated, not used |
-| 2 | `CNP` | RoCE Congestion Notification Packet received |
+| 2 | `CNP` | RoCE Congestion Notification Packet received — masked at init, never appears |
 | 3 | `TX` | TX packet burst transition ended |
-| 4 | `ACK` | RoCE ACK received |
-| 5 | `NACK` | RoCE NACK received |
+| 4 | `ACK` | RoCE ACK received — masked at init, never appears |
+| 5 | `NACK` | RoCE NACK received — masked at init, never appears |
 | 6 | `RTT` | RTT probe response received — TIMELY's main signal |
 
-TIMELY adjusts the rate only on `ev_type=6` (RTT). TX events maintain the RTT-probe abort state machine (re-issue dropped probes). NACK is ignored: Algorithm 1 has no NACK input and the paper assumes a PFC-protected fabric (§5), which this cluster provides (incast-bench applies the ConnectX-side PFC baseline per run; A/B-validated 2026-08-07 — zero NACKs with it in place).
+TIMELY adjusts the rate only on `ev_type=6` (RTT). TX events maintain the RTT-probe abort state machine (re-issue dropped probes). CNP, ACK and NACK carry no Algorithm-1 input, so they are masked via `disable_event_bitmask` in `doca_pcc_dev_user_init` and never reach the algorithm — only ev_types 3 and 6 can appear in format-6 traces. NACKs specifically: the paper assumes a PFC-protected fabric (§5), which this cluster provides (incast-bench applies the ConnectX-side PFC baseline per run; A/B-validated 2026-08-07 — zero NACKs with it in place).
 
 ### `branch` (format 12, low nibble = Algorithm-1 branch; bit `0x80` = clamped)
 
@@ -320,7 +320,7 @@ Highlights:
   was 0.875 (57344) — a guess. The same snippet confirms β = 0.8 and HAI_Thresh = 5.
 - **minRTT:** paper says "fixed value… known ahead of time" without specifying. Default 3.8 µs (`3800` ns — measured BF3-to-BF3 1:1 `ib_write_bw`).
 - **min_rate:** paper does not define a floor. Default `1<<6` (FXP20), matches DCQCN.
-- **NACK handling:** paper assumes a PFC fabric where NACKs don't happen — matched exactly: NACK events are ignored (the fabric's PFC baseline is the precondition, applied per run by incast-bench; validated 2026-08-07).
+- **NACK handling:** paper assumes a PFC fabric where NACKs don't happen — matched exactly: NACK events are masked at init and never delivered to the algorithm (the fabric's PFC baseline is the precondition, applied per run by incast-bench; validated 2026-08-07).
 - **Rate update scaling per minRTT (§5):** paper mentions but doesn't formalize. We do naive per-event update.
 - **δ:** paper specifies as absolute bandwidth (10 Mbps); we encode as an FXP20 line-rate fraction. Default `1049` ≈ 100 Mbps on a 100 Gbps NIC (retuned 2026-05-03; the paper's 10 Mbps would be ~`105`). Re-tune if NIC speed changes.
 

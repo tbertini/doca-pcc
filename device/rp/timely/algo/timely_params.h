@@ -72,7 +72,8 @@ enum timely_param_idx {
 
 /* Counter indices. EVENTS is the total event count; the four branch counters
  * (MD_GRADIENT, MD_THIGH, AI, HAI) sum to ~EVENTS minus events that took none of
- * those branches (e.g., RTT events from spurious probes, TX/NACK). RTT_LT_TLOW
+ * those branches (TX, and RTT events from spurious probes; CNP/ACK/NACK are
+ * masked at init and never counted). RTT_LT_TLOW
  * and RTT_GT_THIGH are independent classification counters (RTT_LT_TLOW counts
  * coincide with AI on the T_low branch; RTT_GT_THIGH coincide with MD_THIGH). */
 enum timely_counter_idx {
