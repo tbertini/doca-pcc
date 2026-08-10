@@ -123,6 +123,7 @@ static const volatile char timely_counter_hai_desc[] = "HAI, hyper-additive incr
 static const volatile char timely_counter_rtt_lt_tlow_desc[] = "RTT_LT_TLOW, instantaneous RTT < T_low";
 static const volatile char timely_counter_rtt_gt_thigh_desc[] = "RTT_GT_THIGH, instantaneous RTT > T_high";
 static const volatile char timely_counter_rate_clamped_min_desc[] = "RATE_CLAMPED_MIN, rate clamped to min floor";
+static const volatile char timely_counter_rate_clamped_max_desc[] = "RATE_CLAMPED_MAX, rate clamped to line-rate ceiling";
 
 void timely_init(uint32_t algo_idx)
 {
@@ -186,6 +187,7 @@ void timely_init(uint32_t algo_idx)
 	TIMELY_REG_COUNTER(TIMELY_C_RTT_LT_TLOW,      timely_counter_rtt_lt_tlow_desc);
 	TIMELY_REG_COUNTER(TIMELY_C_RTT_GT_THIGH,     timely_counter_rtt_gt_thigh_desc);
 	TIMELY_REG_COUNTER(TIMELY_C_RATE_CLAMPED_MIN, timely_counter_rate_clamped_min_desc);
+	TIMELY_REG_COUNTER(TIMELY_C_RATE_CLAMPED_MAX, timely_counter_rate_clamped_max_desc);
 #undef TIMELY_REG_COUNTER
 }
 
