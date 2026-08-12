@@ -24,7 +24,7 @@ window (`ecwnd`, paper §3.3) is deferred — see [FIXMEs](#known-unknowns--fixm
 | `algo/swift.h` | Public API: `swift_init`, `swift_algo`, `swift_set_algo_params`; trace gate + format IDs |
 | `algo/swift_ctxt.h` | Per-flow state struct, **exactly 48 bytes** (`fcwnd`, `cur_rate`, `t_last_decrease`, `retx_cnt`, RTT-probe abort machinery; `ecwnd`/endpoint reserved) |
 | `algo/swift_algo_params.h` | Compiled-in default `#define`s — every value cites a paper section or is marked `FIXME:` |
-| `algo/swift_params.h` | The PPCC **contract**: 21-param (20 tuning + 1 diagnostic `trace_on`) / 13-counter table (name, unit, default, min, max), shared by the DPA algorithm and the host `swift_params_dump`. Single source of truth |
+| `algo/swift_params.h` | The PPCC **contract**: 20-param (19 tuning + 1 diagnostic `trace_on`) / 13-counter table (name, unit, default, min, max), shared by the DPA algorithm and the host `swift_params_dump`. Single source of truth |
 | `algo/swift.c` | Algorithm 1 + §3.5 target (see [§ Algorithm 1 mapping](#algorithm-1-mapping)) |
 | `rp_swift_dev_main.c` | DPA entry points; slot-15 fallback bypass (see [§ Slot 0 vs slot 15](#slot-0-vs-slot-15)) |
 
@@ -68,7 +68,7 @@ therefore keeps `cwnd` as the control variable and maps it to a rate every event
 the **pacing law** — the BDP identity evaluated at the *measured* fabric RTT:
 
 ```
-pacing_rtt = pacing_rtt_on ? clamp(last_fabric_rtt, min_rtt, 100 ms) : min_rtt
+pacing_rtt = clamp(last_fabric_rtt, min_rtt, 100 ms)
 BDP_pkts   = line_rate_bps × pacing_rtt_s / (mss_bytes × 8)
 rate_fxp20 = clamp( (cwnd_fxp16 << 20) / bdp_fxp16,  min_rate,  MAX_RATE )
 ```
@@ -88,8 +88,19 @@ leaving Swift's delay loop to claw the excess back indirectly. The denominator i
 on every usable RTT event; the `min_rtt` floor means the live mapping is never *faster*
 than the constant one at the same cwnd (a sub-`min_rtt` sample is noise, not headroom),
 and the 100 ms cap only guards uint64 arithmetic. Before the first sample (and on the
-new-flow path) it falls back to `min_rtt`. The `pacing_rtt_on` param (default 1) flips
-back to the constant-`min_rtt` mapping at runtime for A/B comparison runs under incast.
+new-flow path) it falls back to `min_rtt`.
+
+The claim was verified on hardware (2026-08-12, 2:1 incast: BF3 Swift sender +
+uncontrolled CX-5 sender → BF3 receiver, 3×20 s per arm, via a temporary
+`pacing_rtt_on` toggle removed after the comparison). Live-RTT vs constant-`min_rtt`,
+per run: over-target RTT samples 24.7% vs 33.9%, receiver ECN marks ~2.5 k vs ~13.7 k
+(5.4×), CNPs ~1.8 k vs ~10 k, PFC pauses at the sender 40/0/0 vs ~130 every run,
+`cwnd_below_one` 0 vs ~50 — for 0.7 Gb/s (1.6%) less of the receiver against the
+uncontrolled competitor, at identical ~97.8 Gb/s aggregate. The constant mapping holds
+a deeper queue for a sliver of share; the live mapping is the law and has no toggle.
+(One counter reads high by design: `rate_clamped_max` — the live mapping runs a larger
+equilibrium cwnd, so a near-`min_rtt` sample momentarily maps it above line rate and
+the clamp catches it.)
 
 > Incast floor caveat: `min_cwnd` defaults to 0.001 pkt (paper §3.4). It is only
 > realizable if the FXP20 `min_rate` floor is below the rate that 0.001 pkt maps to;
