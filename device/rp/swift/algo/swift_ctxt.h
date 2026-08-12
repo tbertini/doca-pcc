@@ -65,7 +65,7 @@ typedef struct {
 
 	uint32_t last_fabric_rtt;	/* Last usable fabric RTT sample (ns); 0 = none yet. Raw last
 					 * sample (not a filter -- §3.2 instantaneous-delay rationale):
-					 * pacing denominator for cwnd->rate when pacing_rtt_on=1. */
+					 * the pacing denominator for cwnd->rate. */
 	uint32_t reserved[3];		/* Pad to 48 bytes total (12 dwords). Do not exceed. */
 } cc_ctxt_swift_t;
 

@@ -37,9 +37,9 @@
  * *absolute*, flow-scaled target delay. We keep cwnd as the control variable and, on
  * BlueField-3 (which has no usable credit/window actuator), actuate it through the
  * FXP20 rate limiter via the paper's pacing law rate = cwnd/rtt (swift_cwnd_to_rate),
- * dividing by the last measured fabric RTT (clamped >= min_rtt; constant-min_rtt BDP
- * mapping selectable via pacing_rtt_on=0): cwnd == BDP -> line rate, cwnd < 1 -> deep
- * pacing (== Algorithm 1's pacing_delay = rtt/cwnd regime).
+ * dividing by the last measured fabric RTT (clamped to [min_rtt, 100 ms]):
+ * cwnd == BDP -> line rate, cwnd < 1 -> deep pacing (== Algorithm 1's
+ * pacing_delay = rtt/cwnd regime).
  *
  * v1 is FABRIC-ONLY: one window (fcwnd) driven by the fabric RTT. The endpoint window
  * (ecwnd, paper §3.3) is deferred (see FIXMEs); ecwnd/endpoint state in the context is
@@ -113,7 +113,6 @@ static const volatile char swift_p_line_rate_desc[]     = "LINE_RATE_MBPS, NIC l
 static const volatile char swift_p_min_rate_desc[]      = "MIN_RATE, rate floor (FXP20 of line rate)";
 static const volatile char swift_p_ep_target_desc[]     = "ENDPOINT_TARGET_NS, endpoint window target (ns); phase 2, inert";
 static const volatile char swift_p_ep_ewma_desc[]       = "ENDPOINT_EWMA, endpoint-delay EWMA weight (FXP16); phase 2, inert";
-static const volatile char swift_p_pacing_rtt_desc[]    = "PACING_RTT_ON, cwnd->rate divides by live fabric RTT (0 = constant min_rtt)";
 static const volatile char swift_p_trace_on_desc[]      = "TRACE_ON, runtime trace toggle (0/1); always on if built -DSWIFT_DEBUG";
 static const volatile char swift_c_events_desc[]        = "EVENTS, total events dispatched";
 static const volatile char swift_c_ai_desc[]            = "AI, additive-increase applications";
@@ -167,7 +166,6 @@ void swift_init(uint32_t algo_idx)
 	SWIFT_REG_PARAM(SWIFT_P_MIN_RATE_FXP20,      swift_p_min_rate_desc);
 	SWIFT_REG_PARAM(SWIFT_P_ENDPOINT_TARGET_NS,  swift_p_ep_target_desc);
 	SWIFT_REG_PARAM(SWIFT_P_ENDPOINT_EWMA_FXP16, swift_p_ep_ewma_desc);
-	SWIFT_REG_PARAM(SWIFT_P_PACING_RTT_ON,       swift_p_pacing_rtt_desc);
 	SWIFT_REG_PARAM(SWIFT_P_TRACE_ON,            swift_p_trace_on_desc);
 #undef SWIFT_REG_PARAM
 
@@ -267,30 +265,27 @@ static inline uint32_t swift_flow_scaled_target(uint32_t *param, uint32_t cwnd_f
 }
 
 /*
- * Pacing denominator for the cwnd->rate mapping (ns).
+ * Pacing denominator for the cwnd->rate mapping (ns): the last usable fabric RTT
+ * sample, clamped to [min_rtt, SWIFT_PACING_RTT_MAX_NS].
  *
- * pacing_rtt_on=1 (default): the last usable fabric RTT sample, clamped to
- * [min_rtt, SWIFT_PACING_RTT_MAX_NS]. This is the paper's pacing law rate = cwnd/rtt
- * (Algorithm 1 lines 29-32): as the fabric RTT inflates the same cwnd maps to a lower
- * rate, holding inflight ~= rate * rtt = cwnd (Little's law) -- the self-adjusting
- * property of a real window, which a constant denominator loses (it admits
- * inflight ~= cwnd * rtt_live/min_rtt under load).
+ * This is the paper's pacing law rate = cwnd/rtt (Algorithm 1 lines 29-32): as the
+ * fabric RTT inflates the same cwnd maps to a lower rate, holding
+ * inflight ~= rate * rtt = cwnd (Little's law) -- the self-adjusting property of a
+ * real window, which a constant denominator loses (it admits
+ * inflight ~= cwnd * rtt_live/min_rtt under load; see the README for the measured
+ * A/B against the constant-min_rtt mapping that settled this).
  *
- * The min_rtt floor makes the live mapping never FASTER than the constant-BDP one for
- * the same cwnd: min_rtt is by definition the no-load RTT, so a smaller sample is
+ * The min_rtt floor: min_rtt is by definition the no-load RTT, so a smaller sample is
  * measurement noise, not headroom. The 100 ms cap only guards the uint64 arithmetic in
  * swift_compute_bdp_fxp16 (see SWIFT_PACING_RTT_MAX_NS); no real sample gets near it.
  * No sample yet (== 0, zero-filled ctxt) also falls back to min_rtt.
- *
- * pacing_rtt_on=0: the constant min_rtt param -- the pre-refinement BDP mapping, kept
- * runtime-selectable for A/B comparison under incast.
  */
 static inline uint32_t swift_pacing_rtt_ns(uint32_t *param, const cc_ctxt_swift_t *ccctx)
 {
 	uint32_t min_rtt = param[SWIFT_P_MIN_RTT_NS];
 	uint32_t rtt = ccctx->last_fabric_rtt;
 
-	if (param[SWIFT_P_PACING_RTT_ON] == 0 || rtt <= min_rtt)
+	if (rtt <= min_rtt)
 		return min_rtt;
 	if (unlikely(rtt > SWIFT_PACING_RTT_MAX_NS))
 		return SWIFT_PACING_RTT_MAX_NS;

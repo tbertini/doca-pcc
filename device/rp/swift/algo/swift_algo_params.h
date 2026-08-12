@@ -175,20 +175,19 @@
  * is unbacked on BF3), so Swift actuates its cwnd through the FXP20 rate limiter:
  *   BDP_pkts(rtt) = line_rate_bps * rtt_s / (mss_bytes * 8)
  *   rate_fxp20    = clamp((cwnd_fxp16 << 20) / bdp_fxp16(rtt), min_rate, MAX_RATE)
- * With pacing_rtt_on=1 (default), rtt = the last measured fabric RTT clamped to
- * >= min_rtt: this is the paper's pacing law rate = cwnd/rtt (Algorithm 1 lines
- * 29-32), and by Little's law it holds inflight ~= rate * rtt = cwnd as the fabric
- * loads -- the self-adjusting property of a real window. With pacing_rtt_on=0, rtt
- * = the constant min_rtt param (the pre-refinement BDP mapping, kept for A/B runs);
- * under load that admits inflight ~= cwnd * rtt_live/min_rtt (~4x at the RTTs
- * measured on this fabric: ~15 us loaded vs 3.8 us idle).
+ * rtt = the last measured fabric RTT clamped to >= min_rtt: this is the paper's
+ * pacing law rate = cwnd/rtt (Algorithm 1 lines 29-32), and by Little's law it holds
+ * inflight ~= rate * rtt = cwnd as the fabric loads -- the self-adjusting property
+ * of a real window. A constant min_rtt denominator instead admits
+ * inflight ~= cwnd * rtt_live/min_rtt under load (~4x at the RTTs measured on this
+ * fabric: ~15 us loaded vs 3.8 us idle); the measured incast A/B against that
+ * mapping is recorded in the README.
  * cwnd == BDP -> line rate; cwnd == BDP/2 -> half; cwnd < 1 -> deep pacing, which is
  * exactly Algorithm 1's pacing_delay = rtt/cwnd regime realized by the rate limiter.
  */
 #define SWIFT_MSS_BYTES       (4096)    /* FIXME: verify the RoCE MTU/segment size in use */
 #define SWIFT_MIN_RTT_NS      (3800)    /* measured BF3<->BF3 base RTT (cf. TIMELY) */
 #define SWIFT_LINE_RATE_MBPS  (100000)  /* FIXME: verify NIC line rate (100 GbE assumed) */
-#define SWIFT_PACING_RTT_ON   (1)       /* divide cwnd by live fabric RTT (paper pacing law) */
 
 /*
  * Arithmetic guard on the pacing denominator: line_rate_mbps * rtt_ns * 2^16 must fit
