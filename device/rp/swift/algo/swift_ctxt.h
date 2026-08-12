@@ -63,7 +63,10 @@ typedef struct {
 	uint16_t abort_cnt;		/* Consecutive abort/retry rounds (exponential backoff) */
 	uint16_t tx_since_probe_req;	/* TX events between rtt_req=1 and RTT_REQ_SENT flag */
 
-	uint32_t reserved[4];		/* Pad to 48 bytes total (12 dwords). Do not exceed. */
+	uint32_t last_fabric_rtt;	/* Last usable fabric RTT sample (ns); 0 = none yet. Raw last
+					 * sample (not a filter -- §3.2 instantaneous-delay rationale):
+					 * pacing denominator for cwnd->rate when pacing_rtt_on=1. */
+	uint32_t reserved[3];		/* Pad to 48 bytes total (12 dwords). Do not exceed. */
 } cc_ctxt_swift_t;
 
 #endif /* SWIFT_CTXT_H_ */

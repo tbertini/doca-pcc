@@ -36,8 +36,10 @@
  * runs AIMD on a congestion *window* (cwnd, in fractional packets) against an
  * *absolute*, flow-scaled target delay. We keep cwnd as the control variable and, on
  * BlueField-3 (which has no usable credit/window actuator), actuate it through the
- * FXP20 rate limiter via the BDP identity (swift_cwnd_to_rate): cwnd == BDP -> line
- * rate, cwnd < 1 -> deep pacing (== Algorithm 1's pacing_delay = rtt/cwnd regime).
+ * FXP20 rate limiter via the paper's pacing law rate = cwnd/rtt (swift_cwnd_to_rate),
+ * dividing by the last measured fabric RTT (clamped >= min_rtt; constant-min_rtt BDP
+ * mapping selectable via pacing_rtt_on=0): cwnd == BDP -> line rate, cwnd < 1 -> deep
+ * pacing (== Algorithm 1's pacing_delay = rtt/cwnd regime).
  *
  * v1 is FABRIC-ONLY: one window (fcwnd) driven by the fabric RTT. The endpoint window
  * (ecwnd, paper §3.3) is deferred (see FIXMEs); ecwnd/endpoint state in the context is
@@ -111,6 +113,7 @@ static const volatile char swift_p_line_rate_desc[]     = "LINE_RATE_MBPS, NIC l
 static const volatile char swift_p_min_rate_desc[]      = "MIN_RATE, rate floor (FXP20 of line rate)";
 static const volatile char swift_p_ep_target_desc[]     = "ENDPOINT_TARGET_NS, endpoint window target (ns); phase 2, inert";
 static const volatile char swift_p_ep_ewma_desc[]       = "ENDPOINT_EWMA, endpoint-delay EWMA weight (FXP16); phase 2, inert";
+static const volatile char swift_p_pacing_rtt_desc[]    = "PACING_RTT_ON, cwnd->rate divides by live fabric RTT (0 = constant min_rtt)";
 static const volatile char swift_p_trace_on_desc[]      = "TRACE_ON, runtime trace toggle (0/1); always on if built -DSWIFT_DEBUG";
 static const volatile char swift_c_events_desc[]        = "EVENTS, total events dispatched";
 static const volatile char swift_c_ai_desc[]            = "AI, additive-increase applications";
@@ -164,6 +167,7 @@ void swift_init(uint32_t algo_idx)
 	SWIFT_REG_PARAM(SWIFT_P_MIN_RATE_FXP20,      swift_p_min_rate_desc);
 	SWIFT_REG_PARAM(SWIFT_P_ENDPOINT_TARGET_NS,  swift_p_ep_target_desc);
 	SWIFT_REG_PARAM(SWIFT_P_ENDPOINT_EWMA_FXP16, swift_p_ep_ewma_desc);
+	SWIFT_REG_PARAM(SWIFT_P_PACING_RTT_ON,       swift_p_pacing_rtt_desc);
 	SWIFT_REG_PARAM(SWIFT_P_TRACE_ON,            swift_p_trace_on_desc);
 #undef SWIFT_REG_PARAM
 
@@ -263,18 +267,47 @@ static inline uint32_t swift_flow_scaled_target(uint32_t *param, uint32_t cwnd_f
 }
 
 /*
- * Map cwnd (FXP16 packets) to the FXP20 rate fraction via the BDP identity:
- *   BDP_pkts   = line_rate_mbps * min_rtt_ns / (mss_bytes * 8000)   [since 1e6*1e-9=1e-3]
- *   bdp_fxp16  = line_rate_mbps * min_rtt_ns * 2^16 / (mss_bytes * 8000)
+ * Pacing denominator for the cwnd->rate mapping (ns).
+ *
+ * pacing_rtt_on=1 (default): the last usable fabric RTT sample, clamped to
+ * [min_rtt, SWIFT_PACING_RTT_MAX_NS]. This is the paper's pacing law rate = cwnd/rtt
+ * (Algorithm 1 lines 29-32): as the fabric RTT inflates the same cwnd maps to a lower
+ * rate, holding inflight ~= rate * rtt = cwnd (Little's law) -- the self-adjusting
+ * property of a real window, which a constant denominator loses (it admits
+ * inflight ~= cwnd * rtt_live/min_rtt under load).
+ *
+ * The min_rtt floor makes the live mapping never FASTER than the constant-BDP one for
+ * the same cwnd: min_rtt is by definition the no-load RTT, so a smaller sample is
+ * measurement noise, not headroom. The 100 ms cap only guards the uint64 arithmetic in
+ * swift_compute_bdp_fxp16 (see SWIFT_PACING_RTT_MAX_NS); no real sample gets near it.
+ * No sample yet (== 0, zero-filled ctxt) also falls back to min_rtt.
+ *
+ * pacing_rtt_on=0: the constant min_rtt param -- the pre-refinement BDP mapping, kept
+ * runtime-selectable for A/B comparison under incast.
+ */
+static inline uint32_t swift_pacing_rtt_ns(uint32_t *param, const cc_ctxt_swift_t *ccctx)
+{
+	uint32_t min_rtt = param[SWIFT_P_MIN_RTT_NS];
+	uint32_t rtt = ccctx->last_fabric_rtt;
+
+	if (param[SWIFT_P_PACING_RTT_ON] == 0 || rtt <= min_rtt)
+		return min_rtt;
+	if (unlikely(rtt > SWIFT_PACING_RTT_MAX_NS))
+		return SWIFT_PACING_RTT_MAX_NS;
+	return rtt;
+}
+
+/*
+ * Map cwnd (FXP16 packets) to the FXP20 rate fraction via the BDP identity at the given
+ * RTT (the pacing denominator, see swift_pacing_rtt_ns):
+ *   BDP_pkts   = line_rate_mbps * rtt_ns / (mss_bytes * 8000)   [since 1e6*1e-9=1e-3]
+ *   bdp_fxp16  = line_rate_mbps * rtt_ns * 2^16 / (mss_bytes * 8000)
  *   rate_fxp20 = cwnd_fxp16 * 2^20 / bdp_fxp16
  * cwnd==BDP -> MAX_RATE; cwnd<1 -> deep sub-line pacing (Algorithm 1 pacing regime).
- *
- * FIXME: BDP depends only on (line_rate, min_rtt, mss) params, recomputed each event for
- * simplicity; could be cached in swift_set_algo_params if it shows on the hot path.
  */
-static inline uint32_t swift_compute_bdp_fxp16(uint32_t *param)
+static inline uint32_t swift_compute_bdp_fxp16(uint32_t *param, uint32_t rtt_ns)
 {
-	uint64_t num = (uint64_t)param[SWIFT_P_LINE_RATE_MBPS] * param[SWIFT_P_MIN_RTT_NS] * (1ull << 16);
+	uint64_t num = (uint64_t)param[SWIFT_P_LINE_RATE_MBPS] * rtt_ns * (1ull << 16);
 	uint64_t den = (uint64_t)param[SWIFT_P_MSS_BYTES] * 8000ull;
 	if (unlikely(den == 0))
 		return 0;
@@ -304,11 +337,12 @@ static inline uint32_t swift_clamp_rate(uint32_t rate, uint32_t min_rate,
 }
 
 /*
- * Convert cwnd -> clamped FXP20 rate (BDP), recording clamp counters.
+ * Convert cwnd -> clamped FXP20 rate at the given pacing RTT, recording clamp counters.
  */
-static inline uint32_t swift_cwnd_to_rate(uint32_t *param, uint32_t *counter, uint32_t cwnd_fxp16)
+static inline uint32_t swift_cwnd_to_rate(uint32_t *param, uint32_t *counter, uint32_t cwnd_fxp16,
+					  uint32_t rtt_ns)
 {
-	uint32_t bdp_fxp16 = swift_compute_bdp_fxp16(param);
+	uint32_t bdp_fxp16 = swift_compute_bdp_fxp16(param, rtt_ns);
 	uint32_t rate;
 	uint32_t clamp_min = 0, clamp_max = 0;
 
@@ -365,7 +399,8 @@ static inline void swift_handle_new_flow(doca_pcc_dev_event_t *event,
 {
 	uint32_t timestamp = doca_pcc_dev_get_timestamp(event);
 	uint32_t init_cwnd = param[SWIFT_P_INIT_CWND];
-	uint32_t rate = swift_cwnd_to_rate(param, counter, init_cwnd);
+	/* No RTT sample exists yet: pace at min_rtt (the no-load BDP), same as legacy. */
+	uint32_t rate = swift_cwnd_to_rate(param, counter, init_cwnd, param[SWIFT_P_MIN_RTT_NS]);
 
 	ccctx->cur_rate = rate;
 	ccctx->fcwnd = init_cwnd;
@@ -377,13 +412,15 @@ static inline void swift_handle_new_flow(doca_pcc_dev_event_t *event,
 	ccctx->probe_in_flight = 0;
 	ccctx->abort_cnt = 0;
 	ccctx->tx_since_probe_req = 1;
+	ccctx->last_fabric_rtt = 0;        /* no sample yet -> pacing falls back to min_rtt */
 
 	results->rate = rate;
 	results->rtt_req = 1; /* request first RTT probe */
 
 	SWIFT_TRACE(param, SWIFT_TRACE_FMT_NEW_FLOW,
 		    SWIFT_TRACE_TSFLOW(timestamp, doca_pcc_dev_get_flowtag(event)), init_cwnd,
-		    param[SWIFT_P_LINE_RATE_MBPS], swift_compute_bdp_fxp16(param), rate);
+		    param[SWIFT_P_LINE_RATE_MBPS],
+		    swift_compute_bdp_fxp16(param, param[SWIFT_P_MIN_RTT_NS]), rate);
 	SWIFT_TRACE_FLUSH(param);
 }
 
@@ -518,6 +555,12 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 	uint32_t delay = fabric_rtt;
 	uint32_t now = arrival;
 
+	/* Usable sample: record it as the pacing denominator for every cwnd->rate mapping
+	 * until the next sample (this event's included). The drop path above never reaches
+	 * here, so an unstamped responder leaves the last good sample (or the min_rtt
+	 * fallback) in place. */
+	ccctx->last_fabric_rtt = fabric_rtt;
+
 	/* Load params. */
 	uint32_t ai       = param[SWIFT_P_AI_FXP16];
 	uint32_t md_beta  = param[SWIFT_P_MD_BETA_FXP16];
@@ -604,10 +647,11 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 	ccctx->fcwnd = cwnd;
 
 	/* === Algorithm 1 lines 29-32 + Output: actuate cwnd as a rate ===
-	 * The BDP mapping realizes both the windowed regime (cwnd>=1) and the pacing regime
-	 * (cwnd<1, pacing_delay = rtt/cwnd) as a single FXP20 rate. */
+	 * rate = cwnd/BDP(pacing_rtt) realizes both the windowed regime (cwnd>=1, Little's
+	 * law holds inflight ~= cwnd at the measured RTT) and the pacing regime (cwnd<1,
+	 * pacing_delay = rtt/cwnd) as a single FXP20 rate. */
 	uint32_t clamp_min = 0, clamp_max = 0;
-	uint32_t bdp_fxp16 = swift_compute_bdp_fxp16(param);
+	uint32_t bdp_fxp16 = swift_compute_bdp_fxp16(param, swift_pacing_rtt_ns(param, ccctx));
 	uint32_t rate = (bdp_fxp16 == 0) ? DOCA_PCC_DEV_MAX_RATE
 					 : (uint32_t)(((uint64_t)cwnd << 20) / bdp_fxp16);
 	rate = swift_clamp_rate(rate, param[SWIFT_P_MIN_RATE_FXP20], &clamp_min, &clamp_max);
@@ -692,7 +736,7 @@ static inline void swift_handle_nack(doca_pcc_dev_event_t *event,
 	cwnd = swift_clamp_cwnd(cwnd, min_cwnd, max_cwnd);
 	ccctx->fcwnd = cwnd;
 
-	uint32_t rate = swift_cwnd_to_rate(param, counter, cwnd);
+	uint32_t rate = swift_cwnd_to_rate(param, counter, cwnd, swift_pacing_rtt_ns(param, ccctx));
 	ccctx->cur_rate = rate;
 	results->rate = rate;
 	results->rtt_req = 0;

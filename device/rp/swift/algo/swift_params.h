@@ -72,7 +72,8 @@
  *
  * Grouping: [0..5] target-delay scaling (§3.5); [6..12] AIMD on cwnd (Algorithm 1);
  * [13..16] cwnd->rate actuation (BDP); [17..18] endpoint window (paper §3.3, phase 2,
- * reserved+inert in v1 so the index map is stable when ecwnd lands); [19] diagnostics.
+ * reserved+inert in v1 so the index map is stable when ecwnd lands); [19] cwnd->rate
+ * actuation, appended (pacing-RTT toggle); [20] diagnostics.
  *
  * TRACE_ON is a diagnostics-only toggle, NOT a tuning knob: it gates runtime emission
  * of the format 15/16/17/18 device traces (see swift.h). It rides in the param array
@@ -102,8 +103,11 @@ enum swift_param_idx {
 	/* --- endpoint window (paper §3.3); reserved + inert in v1 (fabric-only) --- */
 	SWIFT_P_ENDPOINT_TARGET_NS = 17, /* ecwnd target delay (ns); phase 2 */
 	SWIFT_P_ENDPOINT_EWMA_FXP16 = 18,/* ecwnd endpoint-delay EWMA weight; phase 2 */
+	/* --- cwnd -> rate actuation, appended (see APPEND-ONLY note above) --- */
+	SWIFT_P_PACING_RTT_ON      = 19, /* 1: divide cwnd by live fabric RTT (paper pacing law);
+					  * 0: constant min_rtt BDP (legacy mapping, for A/B) */
 	/* --- diagnostics (KEEP LAST) --- */
-	SWIFT_P_TRACE_ON           = 19, /* runtime trace toggle (0/1); not a tuning param */
+	SWIFT_P_TRACE_ON           = 20, /* runtime trace toggle (0/1); not a tuning param */
 	SWIFT_NUM_PARAMS
 };
 
@@ -181,6 +185,12 @@ static const struct swift_param_desc swift_params[SWIFT_NUM_PARAMS] = {
 	[SWIFT_P_MIN_RATE_FXP20]      = {"min_rate",            "FXP20",        64,       1,   104858},
 	[SWIFT_P_ENDPOINT_TARGET_NS]  = {"endpoint_target_ns",  "ns",       100000,       1,  2000000},
 	[SWIFT_P_ENDPOINT_EWMA_FXP16] = {"endpoint_ewma",       "FXP16",     32768,       1,    65535},
+	/* cwnd->rate denominator: 1 (default) = last measured fabric RTT, clamped to
+	 * >= min_rtt_ns -- the paper's pacing law rate = cwnd/rtt, which keeps
+	 * inflight ~= cwnd as the fabric loads (Little's law). 0 = constant min_rtt
+	 * BDP (the pre-refinement mapping), kept switchable for A/B comparison runs.
+	 * min MUST be 0 so the legacy mapping stays reachable at runtime. */
+	[SWIFT_P_PACING_RTT_ON]       = {"pacing_rtt_on",       "bool",          1,       0,        1},
 	/* Diagnostics-only: gates runtime device-trace emission. def=0 (quiet), range [0,1].
 	 * min MUST be 0 so traces can be turned back off at runtime. */
 	[SWIFT_P_TRACE_ON]            = {"trace_on",            "bool",          0,       0,        1},

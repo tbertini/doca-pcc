@@ -24,7 +24,7 @@ window (`ecwnd`, paper §3.3) is deferred — see [FIXMEs](#known-unknowns--fixm
 | `algo/swift.h` | Public API: `swift_init`, `swift_algo`, `swift_set_algo_params`; trace gate + format IDs |
 | `algo/swift_ctxt.h` | Per-flow state struct, **exactly 48 bytes** (`fcwnd`, `cur_rate`, `t_last_decrease`, `retx_cnt`, RTT-probe abort machinery; `ecwnd`/endpoint reserved) |
 | `algo/swift_algo_params.h` | Compiled-in default `#define`s — every value cites a paper section or is marked `FIXME:` |
-| `algo/swift_params.h` | The PPCC **contract**: 20-param (19 tuning + 1 diagnostic `trace_on`) / 13-counter table (name, unit, default, min, max), shared by the DPA algorithm and the host `swift_params_dump`. Single source of truth |
+| `algo/swift_params.h` | The PPCC **contract**: 21-param (20 tuning + 1 diagnostic `trace_on`) / 13-counter table (name, unit, default, min, max), shared by the DPA algorithm and the host `swift_params_dump`. Single source of truth |
 | `algo/swift.c` | Algorithm 1 + §3.5 target (see [§ Algorithm 1 mapping](#algorithm-1-mapping)) |
 | `rp_swift_dev_main.c` | DPA entry points; slot-15 fallback bypass (see [§ Slot 0 vs slot 15](#slot-0-vs-slot-15)) |
 
@@ -57,33 +57,44 @@ SWIFT_DEBUG=1 meson setup --wipe /tmp/build -Denable_all_applications=false -Den
 
 BlueField-3's per-flow actuator is `doca_pcc_dev_results_t.rate` (FXP20, `1<<20` = line
 rate). The struct also has `credits`/`reload_credits` — the closest thing to a true
-window — but on BF3 these are **unbacked** (no field in
-`doca_pcc_dev_data_structure_le_bf3.h`, no helpers, no sample usage), so they cannot
-actuate a window. Swift therefore keeps `cwnd` as the control variable and maps it to a
-rate every event via the **BDP identity**:
+window — but these are **dead fields**: disassembling the shipped device library
+(DOCA 2.10, `libdoca_pcc_dev.a` → `pcc_rp_dev_rp.<chip>.o` LLVM bitcode) shows the
+framework glue that runs after `doca_pcc_dev_user_algo` loads only `rate` (offset 0,
+passed through `llvm.riscv.nv.rcp` — HW takes the reciprocal, a period) and `rtt_req`
+(offset 4), packs them into a single 64-bit DPA-outbox doorbell store, and never reads
+offsets 12/16 (`credits`/`reload_credits`) — on BF3, CX7, *or* CX8 (CX8 additionally
+reads `probe_type_slot`). NVIDIA's own built-in DCQCN never writes them either. Swift
+therefore keeps `cwnd` as the control variable and maps it to a rate every event via
+the **pacing law** — the BDP identity evaluated at the *measured* fabric RTT:
 
 ```
-BDP_pkts   = line_rate_bps × min_rtt_s / (mss_bytes × 8)
+pacing_rtt = pacing_rtt_on ? clamp(last_fabric_rtt, min_rtt, 100 ms) : min_rtt
+BDP_pkts   = line_rate_bps × pacing_rtt_s / (mss_bytes × 8)
 rate_fxp20 = clamp( (cwnd_fxp16 << 20) / bdp_fxp16,  min_rate,  MAX_RATE )
 ```
 
 `cwnd == BDP → line rate`; `cwnd == BDP/2 → half`; **`cwnd < 1 → a deep sub-line-rate
 fraction, which is exactly Algorithm 1's `pacing_delay = rtt/cwnd` regime** realized by
 the rate limiter. So the one mapping covers both Swift output regimes (windowed for
-cwnd≥1, paced for cwnd<1). BDP is computed on-device from the `line_rate_mbps`,
-`min_rtt_ns`, and `mss_bytes` params.
+cwnd≥1, paced for cwnd<1).
+
+Dividing by the **live** RTT (the paper's actual law, Algorithm 1 lines 29–32) is what
+preserves window semantics on a rate actuator: inflight = rate × RTT (Little's law), so
+`rate = cwnd·MSS·8/rtt` holds inflight ≈ cwnd as the fabric loads. A constant
+denominator loses that: at the RTTs measured on this fabric (~15 µs loaded vs 3.8 µs
+idle) the old constant-`min_rtt` mapping admits ≈ 4× cwnd of inflight under load,
+leaving Swift's delay loop to claw the excess back indirectly. The denominator is the
+`last_fabric_rtt` ctxt field — the same instantaneous sample that drives AIMD, updated
+on every usable RTT event; the `min_rtt` floor means the live mapping is never *faster*
+than the constant one at the same cwnd (a sub-`min_rtt` sample is noise, not headroom),
+and the 100 ms cap only guards uint64 arithmetic. Before the first sample (and on the
+new-flow path) it falls back to `min_rtt`. The `pacing_rtt_on` param (default 1) flips
+back to the constant-`min_rtt` mapping at runtime for A/B comparison runs under incast.
 
 > Incast floor caveat: `min_cwnd` defaults to 0.001 pkt (paper §3.4). It is only
 > realizable if the FXP20 `min_rate` floor is below the rate that 0.001 pkt maps to;
 > otherwise `min_rate` — not 0.001 pkt — is the effective floor. Trace `cwnd`↔`rate`
 > (formats 16/17) to confirm they track.
-
-> Pacing-law caveat: the paper's `pacing_delay = rtt/cwnd` (Algorithm 1 lines 29–32)
-> uses the *live measured* RTT, so paper-Swift spaces packets further apart as the
-> fabric loads. This port's BDP mapping uses the constant `min_rtt` param, so a given
-> `cwnd < 1` always paces at no-load spacing — more aggressive than the paper under
-> congestion. Faithful near no-load; keep in mind for deep-incast sweeps (an optional
-> refinement: scale the mapping by measured RTT when cwnd < 1).
 
 ## The flow-scaled target (§3.5) and integer 1/√cwnd
 
@@ -297,7 +308,7 @@ else if can_decrease:                                    (SWIFT_BRANCH_MD)
 
 cwnd ← clamp(min_cwnd, cwnd, max_cwnd)
 if cwnd ≤ cwnd_prev: t_last_decrease ← now
-rate ← cwnd_to_rate(cwnd)                                # BDP; realizes pacing for cwnd<1
+rate ← cwnd_to_rate(cwnd, pacing_rtt)     # cwnd/BDP(live RTT); realizes pacing for cwnd<1
 
 # On ACK (Algorithm 1 line 5): retx_cnt ← 0 — data forward progress; no window change
 #   (delay is probe-driven on BF3). Usable RTT samples also reset it; dropped ones don't.
