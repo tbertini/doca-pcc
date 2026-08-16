@@ -115,6 +115,11 @@ extern struct doca_pcc_app *pcc_rp_dcqcn_app;
 extern struct doca_pcc_app *pcc_rp_swift_app;
 
 /*
+ * DOCA PCC Reaction Point Swift-CX8 DPA program name
+ */
+extern struct doca_pcc_app *pcc_rp_swift_cx8_app;
+
+/*
  * DOCA PCC Reaction Point SMaRTT-REPS DPA program name
  */
 extern struct doca_pcc_app *pcc_rp_smartt_reps_app;
