@@ -39,9 +39,10 @@ ninja -C /tmp/build
 | `dcqcn` | DCQCN (ECN/CNP) | 0xBFFE | 7–10 |
 | `swift` | Swift (absolute delay, windowed) | 0xBFFC | 15–19 |
 | `smartt-reps` | SMaRTT (per-ACK ECN+delay, windowed; REPS out of scope) | 0xBFFB | 20–24 |
+| `pre-master` (sibling tree) | Swift-CX8 (credit-window Swift, per-ACK AIMD) | 0xBFFA | 15–19 (shared with `swift` by design) |
 | all | templates (`rtt_template` = 0xBFFF) | — | 6 = shared per-event summary |
 
-Trace-format IDs and algo_ids are a cross-branch registry — never reuse another branch's. Host-side helper scripts (`tools/mlxreg-pretty.py`, trace prettifiers) live on the `timely` branch. `timely-runtime-trace-toggle` was the structural template for the swift branch.
+Trace-format IDs and algo_ids are a cross-branch registry — never reuse another branch's. The one deliberate exception is Swift-CX8, which reuses swift's 15–19 and its host format strings verbatim: only one PCC app runs per card, the two Swift variants are never active together, and the host `trace_message_formats[]` table stays untouched. Swift-CX8 actuates `results->credits` — a field no DOCA 2.10 chip implements — so it is a compile-checked reference build, not a benchmark target (see `device/rp/swift_cx8/README.md`). Host-side helper scripts (`tools/mlxreg-pretty.py`, trace prettifiers) live on the `timely` branch. `timely-runtime-trace-toggle` was the structural template for the swift branch.
 
 ## Architecture
 
