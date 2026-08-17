@@ -37,10 +37,13 @@
  * Swift (Kumar et al., "Swift: Delay is Simple and Effective for Congestion Control
  * in the Datacenter", SIGCOMM 2020, DOI 10.1145/3387514.3406591) is a window-based
  * AIMD controller against an absolute, flow-scaled target delay. We control a
- * congestion window (cwnd, in packets, fractional) per Algorithm 1, and actuate it
- * on BlueField-3 by mapping cwnd -> Tx rate via the BDP identity (see swift_cx8.c). BF3
- * has no usable credit/window actuator (doca_pcc_dev_results_t.credits is unbacked),
- * so rate is the actuator; cwnd remains the control variable.
+ * congestion window (cwnd, in packets, fractional) per Algorithm 1 and actuate it AS a
+ * window: results->credits carries cwnd and the rate limiter is opened wide whenever
+ * cwnd >= 1 packet, so transmission is ACK-clocked. The FXP20 rate (BDP identity) is used
+ * only below one packet, where a credit count cannot express a fractional window. On
+ * BlueField-3 / DOCA 2.10 the credit writes never reach the hardware, so this variant
+ * degenerates to an uncontrolled sender there -- see the "READ THIS FIRST" block in
+ * swift_cx8.c and README.md.
  *
  * Wire encodings (consistent with the timely/dcqcn contracts in this repo):
  *   - time          -> nanoseconds (uint32)
@@ -79,8 +82,9 @@
  * [19] diagnostics.
  *
  * TRACE_ON is a diagnostics-only toggle, NOT a tuning knob: it gates runtime emission
- * of the format 15/16/17/18 device traces (see swift_cx8.h). It rides in the param array
- * so it can be flipped at runtime over the existing PPCC channel without rebuilding.
+ * of the format 6, 15-17 and 19 device traces (see swift_cx8.h); format 18 (loss) is
+ * always emitted. It rides in the param array so it can be flipped at runtime over the
+ * existing PPCC channel without rebuilding.
  */
 enum swift_cx8_param_idx {
 	/* --- target delay scaling (paper §3.5) --- */
@@ -117,7 +121,8 @@ enum swift_cx8_param_idx {
  * EVENTS is the total event count. AI and MD count the two Algorithm-1 control
  * branches on RTT events. DELAY_LT/GT_TARGET classify each RTT event's delay vs the
  * flow-scaled target (LT coincides with AI, GT with the MD attempt). The remaining
- * counters instrument the numeric edge cases the brief asked to watch.
+ * counters instrument the numeric edge cases worth watching: sub-1-packet cwnd,
+ * flow-scale saturation, blocked MDs, rate clamps, and the NACK reactions.
  *
  * RTT_DROPPED_UNSTAMPED counts probe responses discarded because the responder did
  * not stamp t2/t4 (or the stamps were inconsistent). The paper defines no fallback
@@ -152,7 +157,7 @@ struct swift_cx8_param_desc {
 
 /* THE contract. Edit only here.
  *
- * Honesty caveat (per brief §7): the Swift paper publishes formula structure and
+ * Honesty caveat: the Swift paper publishes formula structure and
  * parameter NAMES (Table 2 / §3.5) but NOT a canonical numeric tuning table. The only
  * concrete paper values: min_cwnd = 0.001 pkt (§3.4); base_target ~25 us (stack test)
  * and 50 us fabric / 100 us endpoint (storage test). ai=1, beta~0.8, max_mdf=0.5 are

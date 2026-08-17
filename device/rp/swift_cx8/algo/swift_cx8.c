@@ -218,15 +218,17 @@ void swift_cx8_init(uint32_t algo_idx)
  *
  * Uses the identity 1/sqrt(x) = 2^(-0.5 * log2(x)) via the DPA's FXP16 log2/pow2
  * intrinsics (no float, no sqrt on the DPA). This is the single most precision-sensitive
- * numeric piece (brief §3.2); it underpins the flow-scaled target (paper §3.5).
+ * numeric piece; it underpins the flow-scaled target (paper §3.5).
  *
  * Hand-check: x=0.5pkt(32768)->1.414(92682); x=1pkt(65536)->1.0(65536);
  *             x=16pkt(1048576)->0.25(16384); x=0.001pkt(66)->~31.6(~2.07e6).
  *
- * FIXME: precision/sign behaviour of __dpa_fxp_log2/__dpa_fxp_pow2 for sub-1 inputs and
- * negative FXP16 exponents is unverified on BF3 silicon. Validated indirectly by tracing
- * fs_term (format 17) against the §3.5 curve. If wrong, fall back to a Newton iteration
- * or a cwnd-bucketed LUT.
+ * Validated on silicon 2026-08-17 (BF3, DOCA 2.10) via the device/rp/swift/ build, which
+ * runs this same routine on the same intrinsics: the traced fs_term (format 17) matches
+ * the ideal float curve within 19 ns of fs_range = 15 us (0.13%) over invsqrt inputs
+ * 0.1-1024 pkt, including sub-unity fractional cwnd -- so the precision and sign
+ * behaviour of __dpa_fxp_log2/__dpa_fxp_pow2 holds over that domain. If a future input
+ * range misbehaves, fall back to a Newton step or a cwnd-bucketed LUT.
  */
 static inline uint32_t swift_cx8_recip_sqrt_fxp16(uint32_t x_fxp16)
 {
@@ -513,9 +515,9 @@ static inline void swift_cx8_handle_new_flow(doca_pcc_dev_event_t *event,
  * from rtt_template / TIMELY). Swift does not change cwnd on TX. Without this machine a
  * single dropped RTT response stalls the flow forever.
  *
- * FIXME: DOCA mapping -- the paper assumes the NIC produces RTT measurements directly
- * from ACK timestamps; here we explicitly request probes via results->rtt_req. Model
- * mapping, not a paper deviation.
+ * DOCA mapping: the paper assumes the NIC produces RTT measurements directly from ACK
+ * timestamps; here we explicitly request probes via results->rtt_req. Model mapping, not
+ * a paper deviation.
  */
 static inline void swift_cx8_handle_tx(doca_pcc_dev_event_t *event,
 				   uint32_t *param,

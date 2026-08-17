@@ -31,9 +31,11 @@
 /*
  * Runtime trace gate.
  *
- * Swift's format 15-19 device traces are compiled in unconditionally and gated
- * here, so they can be toggled at runtime via the trace_on PPCC param
+ * Swift's format 6, 15-17 and 19 device traces are compiled in unconditionally and
+ * gated here, so they can be toggled at runtime via the trace_on PPCC param
  * (param[SWIFT_P_TRACE_ON]) WITHOUT rebuilding the DPA binary. Default is off.
+ * Format 18 (loss/NACK) is not gated -- it is always emitted, since NACKs are rare and
+ * a loss event is always worth a line.
  *
  * Building with -DSWIFT_DEBUG forces them on from boot (e.g. to capture the earliest
  * events, before a param write can land), ignoring the param.
@@ -48,11 +50,11 @@
 #endif
 
 /*
- * Packed tsflow trace argument (trace-format normalization, 2026-07-10).
+ * Packed tsflow trace argument.
  *
  * Every Swift trace line (formats 6, 15-19) carries this as its FIRST doca_pcc_dev_trace_5
- * arg -- printed host-side as tsflow=0x%lx -- instead of a separate timestamp and/or
- * flow_tag field at whatever position each format used to put them. Packing:
+ * arg -- printed host-side as tsflow=0x%lx -- so "which flow, when" sits at one fixed
+ * position in every format instead of a separate timestamp and/or flow_tag field. Packing:
  *   bits 63:32 = ts_ns   (the uint32_t doca_pcc_dev_get_timestamp() value; wraps ~4.295s)
  *   bits 31:0  = flow_tag (the uint32_t doca_pcc_dev_get_flowtag() value)
  * Same event -> same tsflow: lines emitted for one RTT event (formats 19, 16, 17) carry
@@ -70,10 +72,10 @@
  * The two RTT-decision lines are split because doca_pcc_dev_trace_5 carries only five
  * 64-bit args and the per-event decision has more than five fields worth checking by
  * hand: format 16 carries the delay/target side, format 17 the cwnd/rate side. They
- * share the event so a reader joins them by timestamp/order (and, since the tsflow
- * normalization, by identical tsflow value too). Format 19 fires for every probe
- * response, including samples dropped for missing/inconsistent responder stamps; 16/17
- * fire only for usable samples, so a 19 line may stand alone.
+ * share the event so a reader joins them by timestamp/order, or by identical tsflow
+ * value. Format 19 fires for every probe response, including samples dropped for
+ * missing/inconsistent responder stamps; 16/17 fire only for usable samples, so a 19
+ * line may stand alone.
  *
  * Field lists below are in wire/print order (arg1 tsflow always first; rate last where
  * a format has one). A few fields dropped as host-derivable to make room -- see the
