@@ -114,7 +114,8 @@ enum swift_param_idx {
  * EVENTS is the total event count. AI and MD count the two Algorithm-1 control
  * branches on RTT events. DELAY_LT/GT_TARGET classify each RTT event's delay vs the
  * flow-scaled target (LT coincides with AI, GT with the MD attempt). The remaining
- * counters instrument the numeric edge cases the brief asked to watch.
+ * counters instrument the numeric edge cases worth watching: sub-1-packet cwnd,
+ * flow-scale saturation, blocked MDs, rate clamps, and the NACK reactions.
  *
  * RTT_DROPPED_UNSTAMPED counts probe responses discarded because the responder did
  * not stamp t2/t4 (or the stamps were inconsistent). The paper defines no fallback
@@ -149,7 +150,7 @@ struct swift_param_desc {
 
 /* THE contract. Edit only here.
  *
- * Honesty caveat (per brief §7): the Swift paper publishes formula structure and
+ * Honesty caveat: the Swift paper publishes formula structure and
  * parameter NAMES (Table 2 / §3.5) but NOT a canonical numeric tuning table. The only
  * concrete paper values: min_cwnd = 0.001 pkt (§3.4); base_target ~25 us (stack test)
  * and 50 us fabric / 100 us endpoint (storage test). ai=1, beta~0.8, max_mdf=0.5 are

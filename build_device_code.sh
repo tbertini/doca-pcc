@@ -121,7 +121,7 @@ then
         PCC_APP_DEVICE_ALGO_SRCS=`ls ${PCC_DEV_RP_SWIFT_DIR}/algo/*.c`
         PCC_DEVICE_SRC_FILES="${PCC_APP_DEVICE_SRCS} ${PCC_APP_DEVICE_ALGO_SRCS}"
         APP_INC_LIST="${DOCA_INC_LIST} -I${PCC_DEV_RP_SWIFT_DIR}/algo"
-        # Debug tracing: default-off. Build with SWIFT_DEBUG=1 to force format 15/16/17/18 on.
+        # Debug tracing: default-off. Build with SWIFT_DEBUG=1 to force formats 6, 15-17 and 19 on.
         if [ "${SWIFT_DEBUG:-0}" = "1" ]; then
                 SWIFT_DEBUG_FLAG="-DSWIFT_DEBUG"
         fi
@@ -136,7 +136,7 @@ then
         PCC_APP_DEVICE_ALGO_SRCS=`ls ${PCC_DEV_RP_SWIFT_CX8_DIR}/algo/*.c`
         PCC_DEVICE_SRC_FILES="${PCC_APP_DEVICE_SRCS} ${PCC_APP_DEVICE_ALGO_SRCS}"
         APP_INC_LIST="${DOCA_INC_LIST} -I${PCC_DEV_RP_SWIFT_CX8_DIR}/algo"
-        # Debug tracing: default-off. Build with SWIFT_CX8_DEBUG=1 to force format 15/16/17/18 on.
+        # Debug tracing: default-off. Build with SWIFT_CX8_DEBUG=1 to force formats 6, 15-17 and 19 on.
         if [ "${SWIFT_CX8_DEBUG:-0}" = "1" ]; then
                 SWIFT_CX8_DEBUG_FLAG="-DSWIFT_CX8_DEBUG"
         fi

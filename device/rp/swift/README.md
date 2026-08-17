@@ -125,8 +125,11 @@ fs_term = fs_range · (invsqrt(cwnd) − invsqrt(fs_max)) / (invsqrt(fs_min) −
 `cwnd ≤ fs_min_cwnd → fs_range` (max headroom for small/incast flows); `cwnd ≥
 fs_max_cwnd → 0`. The DPA has no float/`sqrt`, so `1/√x` uses the FXP16 identity
 `2^(−½·log2(x))` via the `__dpa_fxp_log2`/`__dpa_fxp_pow2` intrinsics
-(`swift_recip_sqrt_fxp16`). This is the single most precision-sensitive piece; it is
-verified indirectly by tracing `fs_term` against the §3.5 curve (`FIXME` in source).
+(`swift_recip_sqrt_fxp16`). This is the single most precision-sensitive piece, verified by
+tracing `fs_term` (format 17) against the §3.5 curve: on silicon (2026-08-17, BF3,
+DOCA 2.10) 610 traced pairs match the ideal float curve within 19 ns of the 15 µs
+`fs_range` (0.13%) over `invsqrt` inputs 0.1–1024 pkt, including sub-unity fractional
+`cwnd`.
 
 **BF3 note:** `doca_pcc_dev_get_ttl_hoplimit()` returns 0 on BF3, so `num_hops` is a
 fixed param and `hop_scale` defaults to 0 (the per-hop term is inert).
@@ -231,9 +234,9 @@ one array. Revisit if a build ever drives multiple physical ports.
 
 ## Trace format reference
 
-**Trace-format normalization (2026-07-10):** every Swift trace line (formats 6, 15–19)
-now carries a packed `tsflow` as arg1 instead of separate timestamp/flow_tag fields —
-printed `tsflow=0x%lx`. Packing (`SWIFT_TRACE_TSFLOW` in `algo/swift.h`):
+Every Swift trace line (formats 6, 15–19) carries a packed `tsflow` as its arg1 — printed
+`tsflow=0x%lx` — so "which flow, when" sits at one fixed position in every format.
+Packing (`SWIFT_TRACE_TSFLOW` in `algo/swift.h`):
 
 ```
 bits 63:32 = ts_ns    (the uint32_t doca_pcc_dev_get_timestamp() value; wraps ~4.295s)
@@ -241,10 +244,11 @@ bits 31:0  = flow_tag (the uint32_t doca_pcc_dev_get_flowtag() value)
 ```
 
 Printed fields are otherwise contiguous in emission order, with `rate` last wherever a
-format has one. Freeing that arg slot required dropping two fields that are derivable
-host-side rather than carried on the wire — see the before/after map below. Lines
-emitted for the *same* RTT event (formats 19, 16, 17) now carry an identical `tsflow`,
-so — in addition to log order — a reader can group them by that value.
+format has one. Two fields are deliberately not on the wire because they are derivable
+host-side: format 16 carries no `delay_minus_target` (it is `fabric_rtt − target`) and
+format 17 no `cwnd_prev` (it is the previous format-17 line for the same flow). Lines
+emitted for the *same* RTT event (formats 19, 16, 17) carry an identical `tsflow`, so — in
+addition to log order — a reader can group them by that value.
 
 | ID | Source | Field meanings |
 |---|---|---|
@@ -257,22 +261,6 @@ so — in addition to log order — a reader can group them by that value.
 | 17 | Swift `rtt` (window side) | `tsflow`; `cwnd` (FXP16 pkts); `fs_term` (ns, = target − base); `can_decr`; `rate` (FXP20) |
 | 18 | Swift `loss` (NACK) — **always emitted**, not gated by `trace_on` (NACKs are rare) | `tsflow`; `ev_subtype` (1=RNR, 2=OOS, 3=DUP_READ; measured: ramp NACKs are OOS=2); `retx_reset` (bits 31:1 = `retx_cnt`, bit0 = `reset`, 1 = collapsed to min_cwnd); `cwnd` (FXP16); `rate` (FXP20) |
 | 19 | Swift `rtt` raw timestamps | `tsflow` (ts half = `t6`/arrival); `t1_req_send`, `t2_req_recv`, `t4_resp_send` (raw ns, wrapping u32); `populated` (bit0 = t2≠0, bit1 = t4≠0; **3 = receiver stamped both**, else the sample is **dropped** and only `rtt_dropped_unstamped` moves) |
-
-### Before → after field map
-
-| Fmt | Before (arg1…arg5) | After (arg1…arg5) | Notes |
-|---|---|---|---|
-| 6 | `ev_type, flow_tag, port, algo_slot, rate` | `tsflow, ev_type, port, algo_slot, rate` | `flow_tag` absorbed into `tsflow` |
-| 15 | `init_cwnd, rate, ts, line_mbps, bdp_fxp16` | `tsflow, init_cwnd, line_mbps, bdp_fxp16, rate` | `ts` absorbed into `tsflow`; `rate` moved last |
-| 16 | `fabric_rtt, np_turn, delay_minus_target, target, branch` | `tsflow, fabric_rtt, np_turn, target, branch` | `delay_minus_target` **dropped** — derivable as `fabric_rtt − target` |
-| 17 | `cwnd_prev, cwnd, rate, fs_term, can_decr` | `tsflow, cwnd, fs_term, can_decr, rate` | `cwnd_prev` **dropped** — derivable from the previous format-17 line for the same flow; `rate` moved last |
-| 18 | `ev_subtype, retx_cnt, cwnd, rate, reset` | `tsflow, ev_subtype, retx_reset, cwnd, rate` | `retx_cnt`/`reset` packed into one `retx_reset` word (bits 31:1 / bit0) |
-| 19 | `t1, t2, t4, t6, populated` | `tsflow(t6), t1, t2, t4, populated` | `t6`/arrival folded into `tsflow`'s `ts_ns` half instead of its own field |
-
-`tsflow` gives every line "which flow, when" at a fixed position instead of scattered or
-absent fields; algorithm logic, branch semantics, and all still-present fields are
-byte-for-byte the same values as before — only trace-call arguments and format strings
-changed. Format 18 remains **always emitted**, ungated by `trace_on`, exactly as before.
 
 Formats 16 and 17 are two halves of one RTT decision (split because `trace_5` carries
 only five args); join them by order or by identical `tsflow`. Format 19 precedes them
@@ -342,9 +330,10 @@ grep -rn "FIXME" device/rp/swift/
 ```
 
 Highlights:
-- **Integer 1/√cwnd:** precision/sign behaviour of `__dpa_fxp_log2`/`__dpa_fxp_pow2` for
-  sub-1 inputs / negative exponents is unverified on silicon — validated by tracing `fs_term`.
-- **cwnd→rate BDP mapping:** the approximation most likely wrong on first pass — traced side-by-side.
+- **Integer 1/√cwnd:** no longer open — the precision/sign behaviour of
+  `__dpa_fxp_log2`/`__dpa_fxp_pow2` for sub-1 inputs and negative exponents was validated
+  on silicon (2026-08-17, see above); the Newton/LUT fallback stays noted in source in case
+  a future input range misbehaves.
 - **Flow-scale constants** (`fs_range`, `fs_min_cwnd`, `fs_max_cwnd`), **`md_beta`,
   `max_mdf`, `max_cwnd`, `retx_reset_threshold`:** paper gives no values — seeded, sweep.
 - **Endpoint window (`ecwnd`, §3.3):** deferred to phase 2 (params reserved, inert).
@@ -359,11 +348,15 @@ Highlights:
   *detection*, which is firmware-owned on BF3 (the RP only receives already-detected
   NACK events). Intentionally out of RP scope; only the *reaction* is implemented.
 - **`num_acked` / once-per-RTT cadence:** simplified to one step per event (see above).
-- **Serialization:** folded into `base_target` rather than subtracted (matches TIMELY; PDF §3.5).
+- **Serialization:** folded into `base_target` rather than subtracted (matches TIMELY; paper §3.5).
 
 ## Hardware / branch context
 
 - Targets BlueField-3 (DPA) at `alveo-u50d-01`. algo_id `0xBFFC`.
+- [`device/rp/swift_cx8/`](../swift_cx8/README.md) is a sibling variant (algo_id `0xBFFA`)
+  that actuates the same cwnd as a real credit window. Credits are unbacked on BF3, so it
+  is a paper-faithful reference implementation, not a benchmark target on this hardware —
+  use this directory for measurements.
 - Independent sibling of the `timely` (`0xBFFD`) and `dcqcn` (`0xBFFE`) branches — no
   shared algorithm code (disjoint `device/rp/*` trees). The build/host glue is additive
   so all three can merge into one runtime-selectable build; trace format IDs 6–14 mirror

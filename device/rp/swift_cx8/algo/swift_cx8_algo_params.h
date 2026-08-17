@@ -60,11 +60,13 @@
  *
  * Paper-stated points: ~25 us (a stack-limited test), 50 us fabric (a storage test).
  * FIXME: those are Google's fabric. Idle fabric RTT on this BF3 setup measured ~3-4 us
- * (cf. TIMELY min_rtt 3800 ns). A 25 us target would sit far above no-load RTT and the
- * controller would never decrease. Start ~10 us and RETUNE from a no-load fabric_rtt
- * trace (format 16). FIXME: also revisit if variable segment sizes appear -- a
- * per-segment serialization subtraction (delay -= seg_bytes*8*1e9/line_rate) would
- * then be warranted, but BF3 exposes no clean per-event segment-byte source.
+ * (cf. TIMELY min_rtt 3800 ns), so a 25 us target would sit far above no-load RTT and
+ * the controller would never decrease. Seeded at ~10 us; RETUNE from a no-load
+ * fabric_rtt trace (format 16).
+ *
+ * FIXME: revisit if variable segment sizes appear -- a per-segment serialization
+ * subtraction (delay -= seg_bytes*8*1e9/line_rate) would then be warranted, but BF3
+ * exposes no clean per-event segment-byte source.
  */
 #define SWIFT_CX8_BASE_TARGET_NS  (10000)
 
@@ -97,11 +99,11 @@
  * Per-hop target term: target += num_hops * hop_scale (paper §3.5 "Topology-based
  * Scaling", the #hops*hbar term).
  *
- * FIXME: DOCA mapping -- doca_pcc_dev_get_ttl_hoplimit() returns 0 on BlueField-3
- * (real only on CX8+), so #hops cannot be read from the IP TTL. num_hops is therefore
- * a FIXED configurable param and hop_scale defaults to 0, making the per-hop term
- * inert on BF3 (target = base_target + fs_term). Set hop_scale > 0 only on a fabric
- * where the per-hop latency is known and worth modelling.
+ * DOCA mapping: doca_pcc_dev_get_ttl_hoplimit() returns 0 on BlueField-3
+ * (doca_pcc_dev_event.h; real only on CX8+), so #hops cannot be read from the IP TTL.
+ * num_hops is therefore a FIXED configurable param and hop_scale defaults to 0, making
+ * the per-hop term inert on BF3 (target = base_target + fs_term). Set hop_scale > 0 only
+ * on a fabric where the per-hop latency is known and worth modelling.
  */
 #define SWIFT_CX8_NUM_HOPS      (1)
 #define SWIFT_CX8_HOP_SCALE_NS  (0)
@@ -147,7 +149,7 @@
  *
  * min_cwnd: paper §3.4 explicitly augments Swift to let cwnd fall to 0.001 pkt for
  *   large-scale incast (translated to inter-packet pacing). 0.001 * 2^16 = 65.5 -> 66.
- *   NB (brief §4): the FXP20 rate floor (min_rate) must be able to represent the rate
+ *   NB: the FXP20 rate floor (min_rate) must be able to represent the rate
  *   that min_cwnd maps to, else that floor -- not 0.001 pkt -- is the effective limit.
  * max_cwnd: paper §3.2 caps cwnd as an upper guard. FIXME: paper gives no value; near/
  *   above BDP (~12-46 pkt here). Seeded 64 pkt. Above BDP, rate clamps at MAX anyway,
@@ -184,9 +186,14 @@
  * min_rtt_ns keeps its second job in both regimes: it is the once-per-RTT fallback
  * period on NACK events, which carry no delay measurement.
  */
-#define SWIFT_CX8_MSS_BYTES       (4096)    /* FIXME: verify the RoCE MTU/segment size in use */
+/*
+ * MSS and line rate below are measured on the deployment fabric (2026-08-17): ibv_devinfo
+ * reports active_mtu 4096 on both BF3 hosts and ethtool reports a 100000 Mb/s link. Both
+ * stay PPCC-tunable for a fabric with a different MTU or link speed.
+ */
+#define SWIFT_CX8_MSS_BYTES       (4096)    /* measured RoCE MTU (active_mtu) */
 #define SWIFT_CX8_MIN_RTT_NS      (3800)    /* measured BF3<->BF3 base RTT (cf. TIMELY) */
-#define SWIFT_CX8_LINE_RATE_MBPS  (100000)  /* FIXME: verify NIC line rate (100 GbE assumed) */
+#define SWIFT_CX8_LINE_RATE_MBPS  (100000)  /* measured link rate (100 GbE) */
 
 /*
  * Arithmetic guard on the pacing denominator: line_rate_mbps * rtt_ns * 2^16 must fit
