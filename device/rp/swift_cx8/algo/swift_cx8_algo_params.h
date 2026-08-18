@@ -27,83 +27,52 @@
 #define _SWIFT_CX8_ALGO_PARAMS_H_
 
 /*
- * Compile-time defaults for Swift. These mirror the swift_cx8_params[] descriptor table
- * (swift_cx8_params.h) and are the values a flow uses until the orchestrator pushes a
- * PPCC param write. Each value cites a paper section or is flagged FIXME.
- *
- * Reference: Kumar et al., "Swift: Delay is Simple and Effective for Congestion
- * Control in the Datacenter", SIGCOMM 2020 (DOI 10.1145/3387514.3406591).
- *
- * NB: the paper gives formula structure and parameter names (Table 2, §3.5) but no
- * canonical numeric tuning table -- treat all tuning values as seeds to sweep.
+ * Compile-time defaults for Swift-CX8 (Kumar et al., SIGCOMM 2020). These mirror the
+ * swift_cx8_params[] descriptor table (swift_cx8_params.h) and apply until the
+ * orchestrator pushes a PPCC param write. The paper publishes no numeric tuning table,
+ * so every value it does not fix is a seed, flagged FIXME.
  */
 
 /* ===== Fixed-point conventions (match TIMELY/DCQCN) ===== */
 #define SWIFT_CX8_FXP16_ONE     (1 << 16)   /* 1.0 in FXP16 (ratios, gains, cwnd packets) */
 #define SWIFT_CX8_FXP16_SHIFT   (16)
 #define SWIFT_CX8_RATE_MAX      (1 << 20)   /* 100% line rate in FXP20 (== DOCA_PCC_DEV_MAX_RATE) */
-#define SWIFT_CX8_CWND_ONE_FXP16 (1 << 16)  /* cwnd == 1.0 packet, the AI/pacing regime boundary */
+#define SWIFT_CX8_CWND_ONE_FXP16 (1 << 16)  /* cwnd == 1.0 packet, the credit/pacing regime boundary */
 
-/* ===== Target delay scaling (paper §3.5, Table 2) =====
- *   t = base_target + #hops*hbar + max(0, min(alpha/sqrt(fcwnd) + beta, fs_range))
- * with alpha/beta DERIVED on-device from fs_range/fs_min_cwnd/fs_max_cwnd.
- */
+/* ===== Target delay scaling (paper §3.5) =====
+ *   t = base_target + num_hops*hop_scale + max(0, min(alpha/sqrt(fcwnd) + beta, fs_range))
+ * alpha/beta derived on-device from fs_range / fs_min_cwnd / fs_max_cwnd. */
 
 /*
- * base_target: base fabric target delay (ns).
- *
- * Paper §3.5 folds the FIXED portion of fabric delay -- propagation, NIC/switch
- * serialization, small-flow queueing, timestamp measurement error -- into base_target.
- * Per the design decision (and matching TIMELY, which subtracts NO serialization and
- * folds everything into its empirically-retuned t_low/t_high), Swift v1 does NOT
- * subtract serialization separately; base_target absorbs it.
- *
- * Paper-stated points: ~25 us (a stack-limited test), 50 us fabric (a storage test).
- * FIXME: those are Google's fabric. Idle fabric RTT on this BF3 setup measured ~3-4 us
- * (cf. TIMELY min_rtt 3800 ns), so a 25 us target would sit far above no-load RTT and
- * the controller would never decrease. Seeded at ~10 us; RETUNE from a no-load
- * fabric_rtt trace (format 16).
- *
- * FIXME: revisit if variable segment sizes appear -- a per-segment serialization
- * subtraction (delay -= seg_bytes*8*1e9/line_rate) would then be warranted, but BF3
- * exposes no clean per-event segment-byte source.
+ * base_target: base fabric target delay (ns); absorbs the fixed portion of fabric
+ * delay (propagation, serialization) -- nothing is subtracted separately.
+ * FIXME: the paper's 25-50 us points are Google's fabric; idle fabric RTT here is
+ * ~3-4 us, so 10 us is used instead.
+ * FIXME: revisit if variable segment sizes appear (a per-segment serialization
+ * subtraction would then be warranted; BF3 exposes no per-event segment-byte source).
  */
 #define SWIFT_CX8_BASE_TARGET_NS  (10000)
 
 /*
- * fs_range: maximum additional target delay granted to small flows (ns).
- *
- * Paper §3.5 "Flow-based Scaling": the target gains headroom as cwnd shrinks so that
- * many small flows (incast) tolerate more queueing without over-reacting. fs_range is
- * the full span of that headroom (the vertical extent in paper Figure 5).
- *
- * FIXME: paper gives no numeric value; this is topology/fabric dependent. Seeded at
- * 1.5x base_target. Sweep on hardware against incast fairness.
+ * fs_range: maximum extra target delay granted to small flows (ns) -- the full span
+ * of the flow-scaling curve (paper §3.5).
+ * FIXME: paper gives no value; 1.5x base_target is used.
  */
 #define SWIFT_CX8_FS_RANGE_NS  (15000)
 
 /*
- * fs_min_cwnd / fs_max_cwnd: the two knees of the flow-scaling curve (FXP16 packets).
- *   cwnd <= fs_min_cwnd  -> fs_term = fs_range (max headroom; deep-incast small flows)
- *   cwnd >= fs_max_cwnd  -> fs_term = 0        (single flow can fill the pipe)
- *
- * Paper Figure 5 places the knees roughly at ~0.1 pkt and the upper-cwnd regime.
- * FIXME: paper gives no numeric values. Seeded 0.5 pkt and 16 pkt (the latter near a
- * ~12-46 pkt BDP for this 100G/3.8us fabric). MUST satisfy fs_min_cwnd < fs_max_cwnd
- * (swift_cx8.c guards the derived alpha against a non-positive denominator).
+ * fs_min_cwnd / fs_max_cwnd: knees of the flow-scaling curve (FXP16 packets):
+ * fs_term = fs_range at/below fs_min_cwnd, 0 at/above fs_max_cwnd. Must satisfy
+ * fs_min_cwnd < fs_max_cwnd (guarded in swift_cx8.c and set_algo_params).
+ * FIXME: paper gives no values; 0.5 pkt and 16 pkt are used.
  */
 #define SWIFT_CX8_FS_MIN_CWND_FXP16  (32768)    /* 0.5 pkt */
 #define SWIFT_CX8_FS_MAX_CWND_FXP16  (1048576)  /* 16 pkt  */
 
 /*
- * Per-hop target term: target += num_hops * hop_scale (paper §3.5 "Topology-based
- * Scaling", the #hops*hbar term).
- *
- * DOCA mapping: doca_pcc_dev_get_ttl_hoplimit() returns 0 on BlueField-3
- * (doca_pcc_dev_event.h; real only on CX8+), so #hops cannot be read from the IP TTL.
- * num_hops is therefore a FIXED configurable param and hop_scale defaults to 0, making
- * the per-hop term inert on BF3 (target = base_target + fs_term). Set hop_scale > 0 only
- * on a fabric where the per-hop latency is known and worth modelling.
+ * Per-hop target term: target += num_hops * hop_scale (paper §3.5).
+ * doca_pcc_dev_get_ttl_hoplimit() returns 0 on BF3, so num_hops is a fixed param;
+ * hop_scale defaults to 0, keeping the term inert.
  */
 #define SWIFT_CX8_NUM_HOPS      (1)
 #define SWIFT_CX8_HOP_SCALE_NS  (0)
@@ -111,115 +80,72 @@
 /* ===== AIMD on cwnd (paper Algorithm 1) ===== */
 
 /*
- * ai: additive increment (FXP16 packets).
- *
- * Paper Algorithm 1: on delay < target, cwnd += (ai/cwnd)*num_acked (cwnd>=1) so the
- * cumulative increase over one RTT is ai; community-typical ai = 1 packet.
- *
- * swift_cx8 implements that literally: the AIMD step runs on ACK events and num_acked
- * comes from the ACK PSN difference (swift_cx8_psn_delta), so one window of ACKs adds
- * ai in total. This is the difference from device/rp/swift/, which has no per-ACK
- * control loop and applies one +ai step per RTT-probe event instead.
- *
- * FIXME: paper does not give an authoritative ai value (1 is typical).
+ * ai: additive increment (FXP16 packets), applied per ACK as (ai/cwnd)*num_acked so
+ * one window of ACKs adds ai in total (paper "On Receiving ACK").
+ * FIXME: paper does not give a concrete value; 1 pkt = 2^16 is used.
  */
-#define SWIFT_CX8_AI_FXP16  (65536)  /* 1.0 pkt */
+#define SWIFT_CX8_AI_FXP16  (65536)
 
 /*
- * md_beta: multiplicative-decrease gain (FXP16). Paper Algorithm 1 line 14:
- *   cwnd <- max(1 - beta*(delay-target)/delay, 1 - max_mdf) * cwnd
- *
- * FIXME: paper does not give an authoritative beta (community-typical ~0.8). 0.8 in
- * FXP16 = 52429 (matches the TIMELY beta default).
+ * md_beta: multiplicative-decrease gain (FXP16), paper Algorithm 1 line 14.
+ * FIXME: paper does not give a concrete value; 0.8 = 52429 is used.
  */
-#define SWIFT_CX8_MD_BETA_FXP16  (52429)  /* 0.8 */
+#define SWIFT_CX8_MD_BETA_FXP16  (52429)
 
 /*
- * max_mdf: maximum multiplicative decrease factor (FXP16) -- the floor on the MD
- * multiplier, i.e. cwnd is never cut below (1 - max_mdf)*cwnd in a single step. Also
- * the cut applied on loss (paper §3.6: NACK/RTO multiply cwnd by (1 - max_mdf)).
- *
- * FIXME: paper §3.2 names max_mdf but gives no value (community-typical 0.5). 0.5 in
- * FXP16 = 32768.
+ * max_mdf: floor on the MD multiplier (FXP16); also the cut applied on loss
+ * (paper §3.6).
+ * FIXME: paper names max_mdf but gives no value; 0.5 = 32768 is used.
  */
-#define SWIFT_CX8_MAX_MDF_FXP16  (32768)  /* 0.5 */
+#define SWIFT_CX8_MAX_MDF_FXP16  (32768)
 
 /*
  * min_cwnd / max_cwnd / init_cwnd (FXP16 packets).
- *
- * min_cwnd: paper §3.4 explicitly augments Swift to let cwnd fall to 0.001 pkt for
- *   large-scale incast (translated to inter-packet pacing). 0.001 * 2^16 = 65.5 -> 66.
- *   NB: the FXP20 rate floor (min_rate) must be able to represent the rate
- *   that min_cwnd maps to, else that floor -- not 0.001 pkt -- is the effective limit.
- * max_cwnd: paper §3.2 caps cwnd as an upper guard. FIXME: paper gives no value; near/
- *   above BDP (~12-46 pkt here). Seeded 64 pkt. Above BDP, rate clamps at MAX anyway,
- *   so this mainly bounds integrator windup.
- * init_cwnd: paper §3.2 "initial value of cwnd has little effect". Seeded ~16 pkt
- *   (~BDP), so a new flow starts near line rate (cf. TIMELY/DCQCN start at line rate).
+ * min_cwnd = 0.001 pkt (paper §3.4); min_rate must be able to represent the rate it
+ * maps to, else min_rate is the effective floor.
+ * FIXME: paper gives no max_cwnd / init_cwnd values; 64 pkt and 16 pkt (~BDP) are used.
  */
-#define SWIFT_CX8_MIN_CWND_FXP16   (66)       /* 0.001 pkt (paper §3.4) */
-#define SWIFT_CX8_MAX_CWND_FXP16   (4194304)  /* 64 pkt; FIXME near BDP */
-#define SWIFT_CX8_INIT_CWND_FXP16  (1048576)  /* 16 pkt; FIXME ~BDP -> near line-rate start */
+#define SWIFT_CX8_MIN_CWND_FXP16   (66)       /* 0.001 pkt */
+#define SWIFT_CX8_MAX_CWND_FXP16   (4194304)  /* 64 pkt */
+#define SWIFT_CX8_INIT_CWND_FXP16  (1048576)  /* 16 pkt */
 
 /*
  * retx_reset_threshold: consecutive NACK/RTO events after which cwnd collapses to
- * min_cwnd (paper §3.6 / Algorithm 1 "On Retransmit Timeout": if retransmit_cnt >=
- * RETX_RESET_THRESHOLD then cwnd <- min_cwnd).
- *
- * FIXME: paper does not give a numeric threshold. Seeded 3.
+ * min_cwnd (paper §3.6).
+ * FIXME: paper gives no value; 3 is used.
  */
 #define SWIFT_CX8_RETX_RESET_THRESHOLD  (3)
 
-/* ===== sub-packet pacing (pacing law / BDP identity) ===== */
+/* ===== Sub-packet pacing ===== */
 
 /*
- * swift_cx8 actuates cwnd as a credit window, so these three params matter ONLY in the
- * sub-one-packet regime, where a credit count cannot express a fractional window and
- * the FXP20 rate limiter paces the single packet instead:
- *   BDP_pkts(rtt) = line_rate_bps * rtt_s / (mss_bytes * 8)
- *   rate_fxp20    = clamp((cwnd_fxp16 << 20) / bdp_fxp16(rtt), min_rate, MAX_RATE)
- * rtt = the last measured fabric RTT clamped to >= min_rtt. That is exactly Algorithm 1
- * lines 29-32 (pacing_delay = rtt/cwnd) realized by the rate limiter. Above one packet
- * the limiter is pinned at MAX_RATE and the credit window governs, so mss_bytes /
- * line_rate_mbps have no effect there.
- *
- * min_rtt_ns keeps its second job in both regimes: it is the once-per-RTT fallback
- * period on NACK events, which carry no delay measurement.
- */
-/*
- * MSS and line rate below are measured on the deployment fabric (2026-08-17): ibv_devinfo
- * reports active_mtu 4096 on both BF3 hosts and ethtool reports a 100000 Mb/s link. Both
- * stay PPCC-tunable for a fabric with a different MTU or link speed.
+ * cwnd is actuated as a credit window; the rate limiter matters only below one packet,
+ * where it implements the paper's pacing law: rate = cwnd / BDP(rtt), rtt = last
+ * fabric sample clamped to >= min_rtt. Above one packet the limiter is pinned open.
+ * min_rtt_ns is also the once-per-RTT fallback period on NACK events.
  */
 #define SWIFT_CX8_MSS_BYTES       (4096)    /* measured RoCE MTU (active_mtu) */
-#define SWIFT_CX8_MIN_RTT_NS      (3800)    /* measured BF3<->BF3 base RTT (cf. TIMELY) */
+#define SWIFT_CX8_MIN_RTT_NS      (3800)    /* measured BF3<->BF3 base RTT */
 #define SWIFT_CX8_LINE_RATE_MBPS  (100000)  /* measured link rate (100 GbE) */
 
 /*
- * Arithmetic guard on the pacing denominator: line_rate_mbps * rtt_ns * 2^16 must fit
- * in uint64 (worst case 800000 Mbps * rtt * 65536 -> rtt <= ~350 ms). 100 ms is far
- * beyond any real fabric RTT and comfortably inside the bound; a sample above it is a
- * broken measurement, not a signal.
+ * Guard on the pacing arithmetic: line_rate_mbps * rtt_ns * 2^16 must fit in uint64;
+ * a sample above 100 ms is a broken measurement, not a signal.
  */
 #define SWIFT_CX8_PACING_RTT_MAX_NS  (100000000)  /* 100 ms */
 
 /*
- * min_rate: rate floor in FXP20.
- * FIXME: paper defines no minimum rate. Use the same 1<<6 floor as TIMELY/DCQCN to keep
- * the rate from collapsing to zero on a long run of decreases / sub-1 cwnd.
+ * min_rate: rate floor (FXP20).
+ * FIXME: paper defines no minimum rate; the TIMELY/DCQCN floor 1<<6 is used.
  */
 #define SWIFT_CX8_MIN_RATE_FXP20  (1 << 6)
 
-/* ===== Endpoint window (paper §3.3) -- reserved + inert in v1 (fabric-only) ===== */
+/* ===== Endpoint window (paper §3.3) -- reserved, inert in v1 ===== */
 
 /*
- * FIXME: paper §3.2/§3.3 -- the endpoint congestion window (ecwnd) is NOT implemented
- * in v1. Cleanly separating host-queue delay from NP processing on BF3 is unverified
- * (doca_pcc_dev_get_rtt_np_rx_byte_counter returns 0 on BF3; the endpoint signal would
- * need a custom NP probe-response payload via doca_pcc_dev_get_rtt_raw_data). These two
- * params are registered now -- so the param index map is stable when ecwnd lands in
- * phase 2 -- but are unused by the v1 algorithm. Paper storage-test point: ~100 us
- * endpoint target.
+ * FIXME: the endpoint window (ecwnd) is not implemented in v1 (fabric-only). The two
+ * params are registered so the index map stays stable when it lands; the v1 algorithm
+ * does not read them.
  */
 #define SWIFT_CX8_ENDPOINT_TARGET_NS    (100000)
 #define SWIFT_CX8_ENDPOINT_EWMA_FXP16   (32768)  /* 0.5 */

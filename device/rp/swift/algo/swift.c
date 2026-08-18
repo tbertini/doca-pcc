@@ -24,26 +24,13 @@
  */
 
 /*
- * Swift: delay-based, window AIMD congestion control
- *
- * Implementation of the RP (Reaction Point) algorithm from:
+ * Swift: delay-based, window-AIMD congestion control (RP side).
  * Kumar et al., "Swift: Delay is Simple and Effective for Congestion Control in the
- * Datacenter", SIGCOMM 2020 (DOI 10.1145/3387514.3406591).
+ * Datacenter", SIGCOMM 2020 -- Algorithm 1 (§3.2) with the flow-scaled target (§3.5).
  *
- * Reference: Algorithm 1 (§3.2) and target-delay scaling (§3.5).
- *
- * Swift is a simplification of TIMELY: instead of reacting to the RTT *gradient*, it
- * runs AIMD on a congestion *window* (cwnd, in fractional packets) against an
- * *absolute*, flow-scaled target delay. We keep cwnd as the control variable and, on
- * BlueField-3 (which has no usable credit/window actuator), actuate it through the
- * FXP20 rate limiter via the paper's pacing law rate = cwnd/rtt (swift_cwnd_to_rate),
- * dividing by the last measured fabric RTT (clamped to [min_rtt, 100 ms]):
- * cwnd == BDP -> line rate, cwnd < 1 -> deep pacing (== Algorithm 1's
- * pacing_delay = rtt/cwnd regime).
- *
- * v1 is FABRIC-ONLY: one window (fcwnd) driven by the fabric RTT. The endpoint window
- * (ecwnd, paper §3.3) is deferred (see FIXMEs); ecwnd/endpoint state in the context is
- * reserved but unused.
+ * cwnd is the control variable; BF3 has no usable credit actuator, so cwnd is actuated
+ * through the FXP20 rate limiter as rate = cwnd/BDP(rtt) (swift_cwnd_to_rate).
+ * v1 is fabric-only: the endpoint window (paper §3.3) is reserved but unused.
  */
 
 #include <doca_pcc_dev.h>
@@ -58,9 +45,7 @@
 
 #pragma clang diagnostic ignored "-Wunused-parameter"
 
-/* Per-event trace emission, gated by SWIFT_TRACE_ENABLED(param) (see swift.h):
- * compiled in unconditionally, emitted only when the trace_on PPCC param is set at
- * runtime (or always under -DSWIFT_DEBUG). The flush is gated too. */
+/* Trace emission, gated at runtime by the trace_on PPCC param (see swift.h). */
 #define SWIFT_TRACE(param, fmt_id, a1, a2, a3, a4, a5) \
 	do { \
 		if (SWIFT_TRACE_ENABLED(param)) \
@@ -77,10 +62,9 @@
 #define SWIFT_ABORT_TIME_NS (300000)
 
 /*
- * Calculate wrap around in case of 32-bit timestamp overflow.
- * Local static copy to avoid a duplicate-symbol clash with the ALWAYS_INLINE
- * diff_with_wrap32 in pcc_common_dev.h under -flto (it doesn't survive LTO when pulled
- * into two translation units). Mirrors TIMELY's timely_diff_with_wrap32.
+ * 32-bit wrap-safe timestamp difference. Local static copy: the ALWAYS_INLINE
+ * diff_with_wrap32 in pcc_common_dev.h duplicate-symbol clashes under -flto when
+ * pulled into two translation units.
  */
 static inline uint32_t swift_diff_with_wrap32(uint32_t greater_num, uint32_t smaller_num)
 {
@@ -89,10 +73,8 @@ static inline uint32_t swift_diff_with_wrap32(uint32_t greater_num, uint32_t sma
 	return greater_num - smaller_num;
 }
 
-/* Param/counter indices and default/min/max values come from swift_params.h (the PPCC
- * contract; single source of truth). Description strings are kept const volatile to
- * prevent dead-code elimination by LTO (they are read out-of-band by the host, never
- * dereferenced on-device, so without volatile the contract strings vanish). */
+/* Contract descriptor strings. const volatile prevents LTO dead-code elimination:
+ * they are read out-of-band by the host, never dereferenced on-device. */
 const volatile char swift_desc[] = "Swift v1.0 fabric-only (Kumar et al. SIGCOMM 2020)";
 static const volatile char swift_p_base_target_desc[]   = "BASE_TARGET_NS, base fabric target delay (ns)";
 static const volatile char swift_p_fs_range_desc[]      = "FS_RANGE_NS, max additional target for small flows (ns)";
@@ -140,9 +122,8 @@ void swift_init(uint32_t algo_idx)
 
 	doca_pcc_dev_algo_init_metadata(algo_idx, &algo_def, SWIFT_NUM_PARAMS, SWIFT_NUM_COUNTERS);
 
-	/* Register every parameter from the contract table. min/max/def come from
-	 * swift_params[]; permissions=1 (updatable). Passing the table's min (not a
-	 * hardcoded 1) lets hop_scale and trace_on accept a write of 0. */
+	/* Register from the contract table. Passing the table's min (not a hardcoded 1)
+	 * lets hop_scale and trace_on accept a write of 0. */
 #define SWIFT_REG_PARAM(idx, desc) \
 	doca_pcc_dev_algo_init_param(algo_idx, (idx), swift_params[(idx)].def, swift_params[(idx)].max, \
 				     swift_params[(idx)].min, 1, sizeof(desc), (uint64_t)(desc))
@@ -189,20 +170,9 @@ void swift_init(uint32_t algo_idx)
 }
 
 /*
- * Reciprocal square root in FXP16: returns (1/sqrt(x)) * 2^16 for x given in FXP16.
- *
- * Uses the identity 1/sqrt(x) = 2^(-0.5 * log2(x)) via the DPA's FXP16 log2/pow2
- * intrinsics (no float, no sqrt on the DPA). This is the single most precision-sensitive
- * numeric piece; it underpins the flow-scaled target (paper §3.5).
- *
- * Hand-check: x=0.5pkt(32768)->1.414(92682); x=1pkt(65536)->1.0(65536);
- *             x=16pkt(1048576)->0.25(16384); x=0.001pkt(66)->~31.6(~2.07e6).
- *
- * Validated on silicon 2026-08-17 (BF3, DOCA 2.10): the traced fs_term (format 17)
- * matches the ideal float curve within 19 ns of fs_range = 15 us (0.13%) over invsqrt
- * inputs 0.1-1024 pkt, including sub-unity fractional cwnd -- so the precision and sign
- * behaviour of __dpa_fxp_log2/__dpa_fxp_pow2 holds over that domain. If a future input
- * range misbehaves, fall back to a Newton step or a cwnd-bucketed LUT.
+ * Reciprocal square root in FXP16: (1/sqrt(x)) * 2^16, via the identity
+ * 1/sqrt(x) = 2^(-0.5*log2(x)) on the DPA's FXP16 log2/pow2 intrinsics (no float, no
+ * sqrt on the DPA). Validated on silicon: within 0.13% of fs_range over 0.1-1024 pkt.
  */
 static inline uint32_t swift_recip_sqrt_fxp16(uint32_t x_fxp16)
 {
@@ -214,19 +184,12 @@ static inline uint32_t swift_recip_sqrt_fxp16(uint32_t x_fxp16)
 }
 
 /*
- * Flow-scaled target delay (paper §3.5, Table 2):
+ * Flow-scaled target delay (paper §3.5):
  *   t = base_target + num_hops*hop_scale + max(0, min(alpha/sqrt(fcwnd) + beta, fs_range))
- * with alpha = fs_range / (1/sqrt(fs_min_cwnd) - 1/sqrt(fs_max_cwnd)),
- *      beta  = -alpha / sqrt(fs_max_cwnd).
- *
- * Since beta = -alpha*invsqrt(fs_max), the scaled term collapses to a clean linear
- * interpolation of fs_range over the 1/sqrt(cwnd) axis between the two knees -- no
- * explicit alpha/beta (and no division of fs_range by a tiny denominator):
+ * Since beta = -alpha*invsqrt(fs_max), the scaled term collapses to a linear
+ * interpolation of fs_range over the 1/sqrt(cwnd) axis between the knees:
  *   fs_term = fs_range * (invsqrt(cwnd) - invsqrt(fs_max)) / (invsqrt(fs_min) - invsqrt(fs_max))
- * clamped to [0, fs_range]. cwnd<=fs_min -> fs_range; cwnd>=fs_max -> 0.
- *
- * BF3 note: doca_pcc_dev_get_ttl_hoplimit() returns 0, so num_hops is a fixed param and
- * hop_scale defaults to 0 (per-hop term inert). See swift_algo_params.h.
+ * clamped to [0, fs_range].
  */
 static inline uint32_t swift_flow_scaled_target(uint32_t *param, uint32_t cwnd_fxp16, uint32_t *counter)
 {
@@ -266,20 +229,10 @@ static inline uint32_t swift_flow_scaled_target(uint32_t *param, uint32_t cwnd_f
 }
 
 /*
- * Pacing denominator for the cwnd->rate mapping (ns): the last usable fabric RTT
- * sample, clamped to [min_rtt, SWIFT_PACING_RTT_MAX_NS].
- *
- * This is the paper's pacing law rate = cwnd/rtt (Algorithm 1 lines 29-32): as the
- * fabric RTT inflates the same cwnd maps to a lower rate, holding
- * inflight ~= rate * rtt = cwnd (Little's law) -- the self-adjusting property of a
- * real window, which a constant denominator loses (it admits
- * inflight ~= cwnd * rtt_live/min_rtt under load; see the README for the measured
- * A/B against the constant-min_rtt mapping that settled this).
- *
- * The min_rtt floor: min_rtt is by definition the no-load RTT, so a smaller sample is
- * measurement noise, not headroom. The 100 ms cap only guards the uint64 arithmetic in
- * swift_compute_bdp_fxp16 (see SWIFT_PACING_RTT_MAX_NS); no real sample gets near it.
- * No sample yet (== 0, zero-filled ctxt) also falls back to min_rtt.
+ * Pacing denominator (ns): the last usable fabric RTT sample, clamped to
+ * [min_rtt, SWIFT_PACING_RTT_MAX_NS]. Dividing by the live RTT keeps
+ * inflight ~= rate*rtt = cwnd, the defining property of a window (see README).
+ * No sample yet (zero-filled ctxt) falls back to min_rtt.
  */
 static inline uint32_t swift_pacing_rtt_ns(uint32_t *param, const cc_ctxt_swift_t *ccctx)
 {
@@ -294,12 +247,9 @@ static inline uint32_t swift_pacing_rtt_ns(uint32_t *param, const cc_ctxt_swift_
 }
 
 /*
- * Map cwnd (FXP16 packets) to the FXP20 rate fraction via the BDP identity at the given
- * RTT (the pacing denominator, see swift_pacing_rtt_ns):
- *   BDP_pkts   = line_rate_mbps * rtt_ns / (mss_bytes * 8000)   [since 1e6*1e-9=1e-3]
- *   bdp_fxp16  = line_rate_mbps * rtt_ns * 2^16 / (mss_bytes * 8000)
- *   rate_fxp20 = cwnd_fxp16 * 2^20 / bdp_fxp16
- * cwnd==BDP -> MAX_RATE; cwnd<1 -> deep sub-line pacing (Algorithm 1 pacing regime).
+ * BDP in FXP16 packets at the given RTT:
+ *   bdp_fxp16 = line_rate_mbps * rtt_ns * 2^16 / (mss_bytes * 8000)   [1e6*1e-9 = 1e-3]
+ * The caller maps rate_fxp20 = cwnd_fxp16 * 2^20 / bdp_fxp16.
  */
 static inline uint32_t swift_compute_bdp_fxp16(uint32_t *param, uint32_t rtt_ns)
 {
@@ -310,9 +260,7 @@ static inline uint32_t swift_compute_bdp_fxp16(uint32_t *param, uint32_t rtt_ns)
 	return (uint32_t)(num / den);
 }
 
-/*
- * Clamp the actuated rate to [min_rate, MAX_RATE], reporting which bound (if any) hit.
- */
+/* Clamp the actuated rate to [min_rate, MAX_RATE], reporting which bound hit. */
 static inline uint32_t swift_clamp_rate(uint32_t rate, uint32_t min_rate,
 					uint32_t *clamp_min_flag, uint32_t *clamp_max_flag)
 {
@@ -332,9 +280,7 @@ static inline uint32_t swift_clamp_rate(uint32_t rate, uint32_t min_rate,
 	return rate;
 }
 
-/*
- * Convert cwnd -> clamped FXP20 rate at the given pacing RTT, recording clamp counters.
- */
+/* Convert cwnd -> clamped FXP20 rate at the given pacing RTT, recording clamp counters. */
 static inline uint32_t swift_cwnd_to_rate(uint32_t *param, uint32_t *counter, uint32_t cwnd_fxp16,
 					  uint32_t rtt_ns)
 {
@@ -358,9 +304,8 @@ static inline uint32_t swift_cwnd_to_rate(uint32_t *param, uint32_t *counter, ui
 }
 
 /*
- * Compute target/delay in FXP16 for the MD branch, clamped to (0, FXP16_ONE).
- * Mirrors TIMELY's t_high_over_rtt idiom. Only called when delay >= target, so the
- * ratio is in (0, 1]; we return FXP16_ONE when delay <= target (no decrease).
+ * target/delay in FXP16 for the MD branch, clamped to (0, FXP16_ONE); returns
+ * FXP16_ONE when delay <= target (no decrease).
  */
 static inline uint32_t swift_target_over_delay_fxp16(uint32_t target, uint32_t delay)
 {
@@ -381,12 +326,7 @@ static inline uint32_t swift_clamp_cwnd(uint32_t cwnd_fxp16, uint32_t min_cwnd, 
 	return cwnd_fxp16;
 }
 
-/*
- * Handle new flow initialization.
- * Start cwnd at init_cwnd (~BDP -> near line rate), actuate, and request the first RTT
- * probe so subsequent RTT events drive Algorithm 1. Paper §3.2: the initial cwnd has
- * little effect.
- */
+/* New flow: start cwnd at init_cwnd, actuate, and request the first RTT probe. */
 static inline void swift_handle_new_flow(doca_pcc_dev_event_t *event,
 					 uint32_t *param,
 					 uint32_t *counter,
@@ -395,7 +335,7 @@ static inline void swift_handle_new_flow(doca_pcc_dev_event_t *event,
 {
 	uint32_t timestamp = doca_pcc_dev_get_timestamp(event);
 	uint32_t init_cwnd = param[SWIFT_P_INIT_CWND];
-	/* No RTT sample exists yet: pace at min_rtt (the no-load BDP), same as legacy. */
+	/* No RTT sample yet: pace at min_rtt. */
 	uint32_t rate = swift_cwnd_to_rate(param, counter, init_cwnd, param[SWIFT_P_MIN_RTT_NS]);
 
 	ccctx->cur_rate = rate;
@@ -421,13 +361,9 @@ static inline void swift_handle_new_flow(doca_pcc_dev_event_t *event,
 }
 
 /*
- * Handle TX event: maintain the RTT-probe abort/retry state machine (ported verbatim
- * from rtt_template / TIMELY). Swift does not change cwnd on TX. Without this machine a
- * single dropped RTT response stalls the flow forever.
- *
- * DOCA mapping: the paper assumes the NIC produces RTT measurements directly from ACK
- * timestamps; here we explicitly request probes via results->rtt_req. Model mapping,
- * not a paper deviation.
+ * TX event: maintain the RTT-probe abort/retry state machine (ported from
+ * rtt_template). Swift does not change cwnd on TX; without this machine a single
+ * dropped RTT response stalls the flow forever.
  */
 static inline void swift_handle_tx(doca_pcc_dev_event_t *event,
 				   uint32_t *param,
@@ -467,20 +403,12 @@ static inline void swift_handle_tx(doca_pcc_dev_event_t *event,
 }
 
 /*
- * Handle RTT event -- THE MAIN HANDLER (paper Algorithm 1, §3.2, with the flow-scaled
- * target of §3.5).
- *
- * delay = fabric_rtt, where:
- *   total_rtt     = arrival_ts - req_send_ts        (local-clock duration, t6 - t1)
- *   np_turnaround = resp_send_ts - req_recv_ts       (remote-clock duration, t4 - t2)
- *   fabric_rtt    = total_rtt - np_turnaround        (NIC-to-NIC, queue-aware)
- * Both terms are durations (each within one clock), so this is sync-free. np_turnaround
- * is the paper's "remote-queuing" (§3.1 Measuring Delays), reflected by the responder
- * and subtracted by the sender (§3.3). A response that does not carry it is dropped --
- * the paper defines no fallback and neither do we (see the drop path below). NO
- * serialization is subtracted: per the design decision (and matching TIMELY) it is
- * folded into base_target. The residual local NIC-Rx delay (paper t6 - t5; BF3 exposes
- * no t5) stays in fabric_rtt -- endpoint signal, deferred to the ecwnd window (phase 2).
+ * RTT event -- the main handler (Algorithm 1, §3.2, with the flow-scaled target §3.5).
+ *   total_rtt     = arrival_ts - req_send_ts       (local clock, t6 - t1)
+ *   np_turnaround = resp_send_ts - req_recv_ts     (remote clock, t4 - t2)
+ *   fabric_rtt    = total_rtt - np_turnaround      (sync-free: both are durations)
+ * delay = fabric_rtt. Serialization is folded into base_target; the residual local
+ * NIC-Rx delay (paper t6 - t5; BF3 exposes no t5) stays in the signal.
  */
 static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 				    uint32_t *param,
@@ -490,8 +418,7 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 {
 	uint32_t probe_in_flight = ccctx->probe_in_flight;
 
-	/* Drop spurious RTT events not matching a probe we are waiting on (e.g. from an
-	 * aborted probe). Mirrors rtt_template / TIMELY. */
+	/* Drop spurious RTT events not matching a probe we are waiting on. */
 	if (unlikely((probe_in_flight == 0) && (ccctx->tx_since_probe_req == 0))) {
 		results->rate = ccctx->cur_rate;
 		results->rtt_req = 0;
@@ -509,37 +436,24 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 	uint32_t total_rtt = swift_diff_with_wrap32(arrival, req_send);
 	uint32_t np_turnaround = 0;
 
-	/* Packed tsflow (ts half = arrival/t6) for every trace line this handler emits for
-	 * this event (formats 19, 16, 17 below) -- see SWIFT_TRACE_TSFLOW. Computed here,
-	 * ahead of the drop-path check, so the format-19 line below carries it even for a
-	 * dropped sample. */
 	uint64_t tsflow = SWIFT_TRACE_TSFLOW(arrival, doca_pcc_dev_get_flowtag(event));
 
-	/* Raw probe timestamps (format 19): "did the responder stamp t2/t4?". Emitted for
-	 * dropped samples too -- it is the diagnostic that explains the drops. populated:
-	 * bit0 = t2 nonzero, bit1 = t4 nonzero; 3 = usable sample. t6/arrival is folded into
-	 * tsflow instead of passed as its own field. */
+	/* Raw probe timestamps (format 19), emitted for dropped samples too.
+	 * populated: bit0 = t2 nonzero, bit1 = t4 nonzero; 3 = usable sample. */
 	SWIFT_TRACE(param, SWIFT_TRACE_FMT_RTT_TS, tsflow, req_send, req_recv, resp_send,
 		    (uint64_t)(req_recv != 0) | ((uint64_t)(resp_send != 0) << 1));
 
 	if (resp_send != 0 && req_recv != 0)
 		np_turnaround = swift_diff_with_wrap32(resp_send, req_recv);
 
-	/* Paper §3.1 (Measuring Delays): the responder reflects its Rx->Tx time (t4 - t2,
-	 * "remote-queuing") on every ACK and the sender subtracts it from the end-to-end
-	 * RTT; the paper defines NO fallback for endpoints that do not report it. An
-	 * unstamped (t2/t4 zero) or physically inconsistent (turnaround >= total RTT)
-	 * response is therefore not a delay sample: drop it, count it, keep probing. cwnd
-	 * and rate stay untouched, so a non-stamping responder (e.g. a ConnectX-5
-	 * reflecting probes without timestamps) leaves Swift visibly inert -- AI/MD
-	 * counters frozen, RTT_DROPPED_UNSTAMPED climbing -- instead of silently
+	/* Paper §3.1 defines no fallback for endpoints that do not reflect t4 - t2. An
+	 * unstamped or inconsistent (turnaround >= total RTT) response is not a delay
+	 * sample: dropped, counted, cwnd/rate untouched, next probe re-armed. A
+	 * non-stamping responder leaves Swift visibly inert rather than silently
 	 * regulating on total RTT. */
 	if (unlikely(resp_send == 0 || req_recv == 0 || np_turnaround >= total_rtt)) {
 		if (counter != NULL)
 			counter[SWIFT_C_RTT_DROPPED_UNSTAMPED]++;
-		/* Fully inert otherwise: not a delay sample, and not loss-counter
-		 * progress either -- data ACKs own the retx_cnt reset (Algorithm 1
-		 * line 5, swift_handle_ack). Just re-arm the next probe. */
 		results->rate = ccctx->cur_rate;
 		results->rtt_req = 1;
 		ccctx->tx_since_probe_req = 1;
@@ -547,26 +461,20 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 		return;
 	}
 
-	uint32_t fabric_rtt = total_rtt - np_turnaround; /* paper §3.3: RTT minus the endpoint term */
+	uint32_t fabric_rtt = total_rtt - np_turnaround;
 	uint32_t delay = fabric_rtt;
 	uint32_t now = arrival;
 
-	/* Usable sample: record it as the pacing denominator for every cwnd->rate mapping
-	 * until the next sample (this event's included). The drop path above never reaches
-	 * here, so an unstamped responder leaves the last good sample (or the min_rtt
-	 * fallback) in place. */
+	/* Record as the pacing denominator until the next usable sample. */
 	ccctx->last_fabric_rtt = fabric_rtt;
 
-	/* Load params. */
 	uint32_t ai       = param[SWIFT_P_AI_FXP16];
 	uint32_t md_beta  = param[SWIFT_P_MD_BETA_FXP16];
 	uint32_t max_mdf  = param[SWIFT_P_MAX_MDF_FXP16];
 	uint32_t min_cwnd = param[SWIFT_P_MIN_CWND];
 	uint32_t max_cwnd = param[SWIFT_P_MAX_CWND];
 
-	/* === Algorithm 1 line 5: "On Receiving ACK: retransmit_cnt <- 0" ===
-	 * Data ACKs reset this in swift_handle_ack; a usable RTT measurement is
-	 * equally forward progress, so it resets here too. */
+	/* Algorithm 1 line 5: a usable RTT sample is forward progress, like a data ACK. */
 	ccctx->retx_cnt = 0;
 
 	/* === Algorithm 1 line 2: cwnd_prev <- cwnd === */
@@ -574,9 +482,7 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 	uint32_t cwnd_prev = cwnd;
 
 	/* === Algorithm 1 line 3: can_decrease = (now - t_last_decrease >= rtt) ===
-	 * Use the measured total RTT as the once-per-RTT period. With probe-driven RTT
-	 * events arriving >> 1 RTT apart this is ~always true, which is correct: each event
-	 * legitimately represents >= 1 elapsed RTT. */
+	 * Probe-driven RTT events arrive >= 1 RTT apart, so this is ~always true. */
 	uint32_t since_dec = swift_diff_with_wrap32(now, ccctx->t_last_decrease);
 	uint32_t rtt_guard = (total_rtt != 0) ? total_rtt : param[SWIFT_P_MIN_RTT_NS];
 	uint32_t can_decrease = (since_dec >= rtt_guard);
@@ -590,11 +496,8 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 		/* === Algorithm 1 lines 7-11: Additive Increase === */
 		if (counter != NULL)
 			counter[SWIFT_C_DELAY_LT_TARGET]++;
-		/* DOCA cadence mapping (see swift_algo_params.h AI FIXME): one RTT event ==
-		 * one control interval, so apply a single +ai step. For cwnd>=1 the paper's
-		 * (ai/cwnd)*num_acked nets ai over an RTT; for cwnd<1 the paced single ack
-		 * contributes ~ai. Both therefore add ai per event; the if/else preserves
-		 * Algorithm 1's structure for future divergence. */
+		/* One RTT event == one control interval -> a single +ai step in both
+		 * regimes; the if/else preserves Algorithm 1's structure. */
 		if (cwnd >= SWIFT_CWND_ONE_FXP16)
 			cwnd += ai;
 		else
@@ -642,10 +545,8 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 
 	ccctx->fcwnd = cwnd;
 
-	/* === Algorithm 1 lines 29-32 + Output: actuate cwnd as a rate ===
-	 * rate = cwnd/BDP(pacing_rtt) realizes both the windowed regime (cwnd>=1, Little's
-	 * law holds inflight ~= cwnd at the measured RTT) and the pacing regime (cwnd<1,
-	 * pacing_delay = rtt/cwnd) as a single FXP20 rate. */
+	/* === Algorithm 1 lines 29-32: actuate cwnd as rate = cwnd/BDP(pacing_rtt);
+	 * cwnd < 1 degenerates to the paper's pacing regime. === */
 	uint32_t clamp_min = 0, clamp_max = 0;
 	uint32_t bdp_fxp16 = swift_compute_bdp_fxp16(param, swift_pacing_rtt_ns(param, ccctx));
 	uint32_t rate = (bdp_fxp16 == 0) ? DOCA_PCC_DEV_MAX_RATE
@@ -666,11 +567,8 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 	results->rtt_req = 1; /* request next RTT probe */
 	ccctx->tx_since_probe_req = 1;
 
-	/* Two-line decision trace (joined by shared tsflow, and by order, after the
-	 * format-19 line emitted above): delay side then window side. Neither line carries
-	 * delay_minus_target (signed, negative when the queue is draining) or cwnd_prev:
-	 * both are derivable host-side (fabric_rtt - target; the prior line's cwnd for this
-	 * flow), which keeps the arg slot free for tsflow. */
+	/* Two-line decision trace joined by tsflow: delay side (16), window side (17).
+	 * delay - target and cwnd_prev are derivable host-side. */
 	SWIFT_TRACE(param, SWIFT_TRACE_FMT_RTT_DELAY, tsflow, fabric_rtt, np_turnaround,
 		    target, branch);
 	SWIFT_TRACE(param, SWIFT_TRACE_FMT_RTT_WINDOW, tsflow, cwnd,
@@ -679,21 +577,12 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 }
 
 /*
- * Handle NACK event = the loss / retransmit signal (paper §3.6, Algorithm 1 "On
- * Retransmit Timeout"). retx_cnt++; on reaching the threshold, collapse cwnd to
- * min_cwnd; otherwise apply the maximum multiplicative cut (1 - max_mdf), once per RTT.
- *
- * FIXME: every NACK is folded into the conservative RTO path (retx_cnt++ toward the
- * collapse threshold). MEASURED 2026-07-06: ev_subtype IS populated -- ramp NACKs
- * arrive as OOS (=2; doca_pcc_dev_nack_event_sub_type_enum: 1=RNR, 2=OOS,
- * 3=DUP_READ) -- so the paper's split is implementable: OOS/DUP_READ are
- * SACK/fast-recovery-class (Algorithm 1 lines 22-25: retx_cnt<-0, single MD), while
- * RNR is receiver-app backpressure, arguably not congestion at all. The enum has NO
- * timeout subtype: a true RTO retransmits from firmware without a received NACK
- * packet, so it may never surface here -- which reframes what the retx_reset
- * threshold actually guards. Unimplemented pending a design decision. Data ACKs
- * (swift_handle_ack) and usable RTT samples reset retx_cnt, so isolated NACKs decay
- * rather than accumulate to a reset.
+ * NACK event = the loss signal (Algorithm 1 "On Retransmit Timeout"): retx_cnt++;
+ * at the threshold collapse cwnd to min_cwnd, otherwise apply the maximum
+ * multiplicative cut (1 - max_mdf), once per RTT.
+ * FIXME: every NACK folds into the conservative RTO path. ev_subtype is populated
+ * (measured: ramp NACKs arrive as OOS), so the paper's fast-recovery/RTO split is
+ * implementable; unimplemented pending a design decision.
  */
 static inline void swift_handle_nack(doca_pcc_dev_event_t *event,
 				     uint32_t *param,
@@ -737,12 +626,8 @@ static inline void swift_handle_nack(doca_pcc_dev_event_t *event,
 	results->rate = rate;
 	results->rtt_req = 0;
 
-	/* Always emitted (not gated by trace_on): NACKs are rare (~2 per run at ramp on
-	 * this fabric), a loss event is always worth a line, and ev_subtype is being
-	 * surveyed to learn whether firmware distinguishes NACK causes (see FIXME above --
-	 * it decides whether the fast-recovery/RTO split is implementable). retx_reset packs
-	 * retx_cnt into bits[31:1] and the reset flag into bit0 (see SWIFT_TRACE_TSFLOW /
-	 * README) to fit tsflow into the same five doca_pcc_dev_trace_5 arg slots. */
+	/* Always emitted (ungated): loss is rare and always worth a line. The third
+	 * field packs retx_cnt into bits[31:1] and the reset flag into bit0. */
 	doca_pcc_dev_trace_5(SWIFT_TRACE_FMT_LOSS,
 			     SWIFT_TRACE_TSFLOW(now, doca_pcc_dev_get_flowtag(event)),
 			     doca_pcc_dev_get_ev_attr(event).ev_subtype,
@@ -751,12 +636,9 @@ static inline void swift_handle_nack(doca_pcc_dev_event_t *event,
 }
 
 /*
- * Handle ACK event = Algorithm 1 line 5: "On Receiving ACK: retransmit_cnt <- 0".
- * Data ACKs are the paper's forward-progress signal for the loss counter. Delay/cwnd
- * are driven exclusively by RTT probe events in this port (no per-ACK delay on BF3),
- * so an ACK changes no window state -- it only clears the consecutive-loss count and
- * passes the current rate through. ACK events are frequent (~5-pkt coalescing at line
- * rate), so this reset is strictly more timely than the probe-response one.
+ * ACK event = Algorithm 1 line 5: "On Receiving ACK: retransmit_cnt <- 0". Delay/cwnd
+ * are driven exclusively by RTT probe events (no per-ACK delay on BF3), so an ACK
+ * changes no window state.
  */
 static inline void swift_handle_ack(doca_pcc_dev_event_t *event,
 				    uint32_t *param,
@@ -768,11 +650,7 @@ static inline void swift_handle_ack(doca_pcc_dev_event_t *event,
 	results->rtt_req = 0;
 }
 
-/*
- * Handle CNP event. Swift is delay-based and does not react to ECN (paper §3.7 isolates
- * traffic via QoS, not CNP). Pass the current rate through; the next RTT event adjusts
- * cwnd from the actual delay.
- */
+/* CNP event: Swift is delay-based and does not react to ECN; pass the rate through. */
 static inline void swift_handle_cnp(doca_pcc_dev_event_t *event,
 				    uint32_t *param,
 				    cc_ctxt_swift_t *ccctx,
@@ -819,9 +697,7 @@ doca_pcc_dev_error_t swift_set_algo_params(uint32_t param_id_base,
 					   const uint32_t *new_param_values,
 					   uint32_t *params)
 {
-	/* Reject writes that would run off the end of the param array. param_id_base
-	 * and param_num are bounded individually AND together: param_id_base+param_num
-	 * must stay within SWIFT_NUM_PARAMS, otherwise the copy below writes OOB. */
+	/* Reject writes that would run off the end of the param array. */
 	if ((param_id_base >= SWIFT_NUM_PARAMS) ||
 	    (param_num > SWIFT_NUM_PARAMS) ||
 	    (param_id_base + param_num > SWIFT_NUM_PARAMS))
@@ -830,15 +706,10 @@ doca_pcc_dev_error_t swift_set_algo_params(uint32_t param_id_base,
 	if ((new_param_values == NULL) || (params == NULL))
 		return DOCA_PCC_DEV_STATUS_FAIL;
 
-	/* Commit the validated values into the live param array. The framework does
-	 * NOT auto-copy: per the doca_pcc_dev_user_set_algo_params contract, returning
-	 * OK means "the callback set them" (FAIL means "nothing changed"). Without this
-	 * loop, the array returned by doca_pcc_dev_get_algo_params() keeps the init-time
-	 * defaults, so PPCC writes read back correctly (register image) yet never reach
-	 * the running algorithm. Range is already enforced by the min/max registered in
-	 * swift_init(); the fs_min_cwnd < fs_max_cwnd ordering invariant is additionally
-	 * guarded on-device in swift_flow_scaled_target (denom <= 0 -> fs_term = 0), so
-	 * a transient bad pair degrades gracefully rather than dividing by zero. */
+	/* The framework does NOT auto-copy: returning OK means "the callback set them".
+	 * Without this loop PPCC writes read back correctly yet never reach the running
+	 * algorithm. Ranges are enforced by the min/max registered in swift_init(); a bad
+	 * fs_min/fs_max pair is additionally guarded in swift_flow_scaled_target. */
 	for (uint32_t i = 0; i < param_num; i++)
 		params[param_id_base + i] = new_param_values[i];
 

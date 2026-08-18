@@ -24,19 +24,10 @@
 
 /*
  * swift_cx8_params_dump: emit the Swift-CX8 PPCC parameter/counter contract as JSON.
- *
- * incast-bench invokes this on the sender host to learn the wire-format contract
- * (algo ID, parameter indices, units, defaults, min/max, counter indices) at session
- * startup. Keeping this a one-shot dumper that #includes the same swift_cx8_params.h the
- * DPA registers from avoids drift between the DPA's compiled-in contract and the
- * orchestrator's encoder.
- *
- * The contract is deliberately identical to Swift's apart from the algo ID (0xBFFA vs
- * 0xBFFC), so the same index map drives either build; this dumper exists so the ID a
- * session reads always comes from the tree that is actually loaded.
- *
- * No DOCA dependencies -- pure stdlib, can be cross-compiled or run on either the
- * BlueField host or the user's Mac.
+ * The orchestrator runs this at session startup; #including the same swift_cx8_params.h
+ * the DPA registers from keeps its encoder in sync with the device. The contract is
+ * identical to Swift's apart from the algo ID (0xBFFA vs 0xBFFC).
+ * No DOCA dependencies -- pure stdlib.
  */
 
 #include <stdint.h>

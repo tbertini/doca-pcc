@@ -24,51 +24,21 @@
  */
 
 /*
- * Swift-CX8: delay-based, window AIMD congestion control, actuated as a real window
- *
- * Implementation of the RP (Reaction Point) algorithm from:
+ * Swift-CX8: delay-based, window-AIMD congestion control, actuated as a credit window.
  * Kumar et al., "Swift: Delay is Simple and Effective for Congestion Control in the
- * Datacenter", SIGCOMM 2020 (DOI 10.1145/3387514.3406591).
+ * Datacenter", SIGCOMM 2020 -- Algorithm 1 (§3.2) with the flow-scaled target (§3.5).
  *
- * Reference: Algorithm 1 (§3.2) and target-delay scaling (§3.5).
+ * READ THIS FIRST: this variant assumes doca_pcc_dev_results_t.credits /
+ * .reload_credits reach the hardware. On every DOCA 2.10 chip they do NOT
+ * (libdoca_pcc_dev.a's glue reads only rate and rtt_req; confirmed by SwCC, USENIX
+ * ATC 2025, §3.4), and because this variant pins the rate limiter open whenever
+ * cwnd >= 1 packet, it degenerates to an UNCONTROLLED SENDER on current silicon. It
+ * is a paper-faithful reference, not a benchmark target -- for measurements use
+ * device/rp/swift/. See README.md.
  *
- * ============================ READ THIS FIRST ============================
- * This variant exists to be as close to the paper as the DOCA PCC model allows UNDER
- * THE ASSUMPTION that doca_pcc_dev_results_t.credits / .reload_credits actually reach
- * the hardware. On every DOCA 2.10 chip they do NOT: disassembly of libdoca_pcc_dev.a
- * shows the post-algorithm glue loading only results->rate (offset 0) and
- * results->rtt_req (offset 4), plus probe_type_slot (offset 8) on ConnectX-8; offsets
- * 12 and 16 (credits, reload_credits) are never read. Third-party confirmation: Huang
- * et al., "SwCC", USENIX ATC 2025, §3.4 -- "PCC only allows developers to adjust
- * per-flow rates and cannot support credit-based or window-based CCAs".
- *
- * Consequence: on BlueField-3 the credit writes below are silent no-ops, and because
- * this variant deliberately opens the rate limiter (rate = MAX_RATE) whenever
- * cwnd >= 1 packet -- letting the window, not the limiter, govern -- it degenerates to
- * an UNCONTROLLED SENDER on current silicon. It is a reference implementation and a
- * thesis artefact, NOT a benchmark target. For measurements on this hardware use
- * device/rp/swift/, which maps the same cwnd onto the rate limiter via the BDP
- * identity. See README.md.
- * =========================================================================
- *
- * Swift is a simplification of TIMELY: instead of reacting to the RTT *gradient*, it
- * runs AIMD on a congestion *window* (cwnd, in fractional packets) against an
- * *absolute*, flow-scaled target delay. Two things make this variant more faithful to
- * Algorithm 1 than device/rp/swift/:
- *   1. The window is actuated AS a window (results->credits), not converted to a rate.
- *      The rate limiter is opened wide and transmission is ACK-clocked, which is what
- *      the paper assumes. Below one packet the window cannot be expressed in credits,
- *      so the FXP20 rate takes over and implements the paper's
- *      pacing_delay = rtt/cwnd regime (Algorithm 1 lines 29-32).
- *   2. AIMD runs per ACK event with the paper's (ai/cwnd)*num_acked increase, instead
- *      of one +ai step per RTT-probe event.
- *
- * What remains deviant, unavoidably: the delay signal still comes from explicit RTT
- * probes (responder-reflected t2/t4, sender decomposes), so it refreshes once per probe
- * round-trip rather than on every ACK, and the ACK handler regulates on the most recent
- * probe sample. v1 is also FABRIC-ONLY: one window (fcwnd) driven by the fabric RTT.
- * The endpoint window (ecwnd, paper §3.3) is deferred (see FIXMEs); ecwnd/endpoint
- * state in the context is reserved but unused.
+ * vs device/rp/swift/: AIMD runs per ACK with the paper's (ai/cwnd)*num_acked
+ * increase, and the window is actuated as a window (credits). The delay signal still
+ * comes from explicit RTT probes; v1 is fabric-only (ecwnd reserved).
  */
 
 #include <doca_pcc_dev.h>
@@ -83,9 +53,7 @@
 
 #pragma clang diagnostic ignored "-Wunused-parameter"
 
-/* Per-event trace emission, gated by SWIFT_CX8_TRACE_ENABLED(param) (see swift_cx8.h):
- * compiled in unconditionally, emitted only when the trace_on PPCC param is set at
- * runtime (or always under -DSWIFT_CX8_DEBUG). The flush is gated too. */
+/* Trace emission, gated at runtime by the trace_on PPCC param (see swift_cx8.h). */
 #define SWIFT_CX8_TRACE(param, fmt_id, a1, a2, a3, a4, a5) \
 	do { \
 		if (SWIFT_CX8_TRACE_ENABLED(param)) \
@@ -102,10 +70,9 @@
 #define SWIFT_CX8_ABORT_TIME_NS (300000)
 
 /*
- * Calculate wrap around in case of 32-bit timestamp overflow.
- * Local static copy to avoid a duplicate-symbol clash with the ALWAYS_INLINE
- * diff_with_wrap32 in pcc_common_dev.h under -flto (it doesn't survive LTO when pulled
- * into two translation units). Mirrors TIMELY's timely_diff_with_wrap32.
+ * 32-bit wrap-safe timestamp difference. Local static copy: the ALWAYS_INLINE
+ * diff_with_wrap32 in pcc_common_dev.h duplicate-symbol clashes under -flto when
+ * pulled into two translation units.
  */
 static inline uint32_t swift_cx8_diff_with_wrap32(uint32_t greater_num, uint32_t smaller_num)
 {
@@ -114,10 +81,8 @@ static inline uint32_t swift_cx8_diff_with_wrap32(uint32_t greater_num, uint32_t
 	return greater_num - smaller_num;
 }
 
-/* Param/counter indices and default/min/max values come from swift_cx8_params.h (the PPCC
- * contract; single source of truth). Description strings are kept const volatile to
- * prevent dead-code elimination by LTO (they are read out-of-band by the host, never
- * dereferenced on-device, so without volatile the contract strings vanish). */
+/* Contract descriptor strings. const volatile prevents LTO dead-code elimination:
+ * they are read out-of-band by the host, never dereferenced on-device. */
 const volatile char swift_cx8_desc[] = "Swift-CX8 v1.0 credit-window (Kumar et al. SIGCOMM 2020)";
 static const volatile char swift_cx8_p_base_target_desc[]   = "BASE_TARGET_NS, base fabric target delay (ns)";
 static const volatile char swift_cx8_p_fs_range_desc[]      = "FS_RANGE_NS, max additional target for small flows (ns)";
@@ -165,9 +130,8 @@ void swift_cx8_init(uint32_t algo_idx)
 
 	doca_pcc_dev_algo_init_metadata(algo_idx, &algo_def, SWIFT_CX8_NUM_PARAMS, SWIFT_CX8_NUM_COUNTERS);
 
-	/* Register every parameter from the contract table. min/max/def come from
-	 * swift_cx8_params[]; permissions=1 (updatable). Passing the table's min (not a
-	 * hardcoded 1) lets hop_scale and trace_on accept a write of 0. */
+	/* Register from the contract table. Passing the table's min (not a hardcoded 1)
+	 * lets hop_scale and trace_on accept a write of 0. */
 #define SWIFT_CX8_REG_PARAM(idx, desc) \
 	doca_pcc_dev_algo_init_param(algo_idx, (idx), swift_cx8_params[(idx)].def, swift_cx8_params[(idx)].max, \
 				     swift_cx8_params[(idx)].min, 1, sizeof(desc), (uint64_t)(desc))
@@ -214,21 +178,9 @@ void swift_cx8_init(uint32_t algo_idx)
 }
 
 /*
- * Reciprocal square root in FXP16: returns (1/sqrt(x)) * 2^16 for x given in FXP16.
- *
- * Uses the identity 1/sqrt(x) = 2^(-0.5 * log2(x)) via the DPA's FXP16 log2/pow2
- * intrinsics (no float, no sqrt on the DPA). This is the single most precision-sensitive
- * numeric piece; it underpins the flow-scaled target (paper §3.5).
- *
- * Hand-check: x=0.5pkt(32768)->1.414(92682); x=1pkt(65536)->1.0(65536);
- *             x=16pkt(1048576)->0.25(16384); x=0.001pkt(66)->~31.6(~2.07e6).
- *
- * Validated on silicon 2026-08-17 (BF3, DOCA 2.10) via the device/rp/swift/ build, which
- * runs this same routine on the same intrinsics: the traced fs_term (format 17) matches
- * the ideal float curve within 19 ns of fs_range = 15 us (0.13%) over invsqrt inputs
- * 0.1-1024 pkt, including sub-unity fractional cwnd -- so the precision and sign
- * behaviour of __dpa_fxp_log2/__dpa_fxp_pow2 holds over that domain. If a future input
- * range misbehaves, fall back to a Newton step or a cwnd-bucketed LUT.
+ * Reciprocal square root in FXP16: (1/sqrt(x)) * 2^16, via the identity
+ * 1/sqrt(x) = 2^(-0.5*log2(x)) on the DPA's FXP16 log2/pow2 intrinsics (no float, no
+ * sqrt on the DPA). Validated on silicon: within 0.13% of fs_range over 0.1-1024 pkt.
  */
 static inline uint32_t swift_cx8_recip_sqrt_fxp16(uint32_t x_fxp16)
 {
@@ -240,19 +192,12 @@ static inline uint32_t swift_cx8_recip_sqrt_fxp16(uint32_t x_fxp16)
 }
 
 /*
- * Flow-scaled target delay (paper §3.5, Table 2):
+ * Flow-scaled target delay (paper §3.5):
  *   t = base_target + num_hops*hop_scale + max(0, min(alpha/sqrt(fcwnd) + beta, fs_range))
- * with alpha = fs_range / (1/sqrt(fs_min_cwnd) - 1/sqrt(fs_max_cwnd)),
- *      beta  = -alpha / sqrt(fs_max_cwnd).
- *
- * Since beta = -alpha*invsqrt(fs_max), the scaled term collapses to a clean linear
- * interpolation of fs_range over the 1/sqrt(cwnd) axis between the two knees -- no
- * explicit alpha/beta (and no division of fs_range by a tiny denominator):
+ * Since beta = -alpha*invsqrt(fs_max), the scaled term collapses to a linear
+ * interpolation of fs_range over the 1/sqrt(cwnd) axis between the knees:
  *   fs_term = fs_range * (invsqrt(cwnd) - invsqrt(fs_max)) / (invsqrt(fs_min) - invsqrt(fs_max))
- * clamped to [0, fs_range]. cwnd<=fs_min -> fs_range; cwnd>=fs_max -> 0.
- *
- * BF3 note: doca_pcc_dev_get_ttl_hoplimit() returns 0, so num_hops is a fixed param and
- * hop_scale defaults to 0 (per-hop term inert). See swift_cx8_algo_params.h.
+ * clamped to [0, fs_range].
  */
 static inline uint32_t swift_cx8_flow_scaled_target(uint32_t *param, uint32_t cwnd_fxp16, uint32_t *counter)
 {
@@ -292,20 +237,10 @@ static inline uint32_t swift_cx8_flow_scaled_target(uint32_t *param, uint32_t cw
 }
 
 /*
- * Pacing denominator for the cwnd->rate mapping (ns): the last usable fabric RTT
- * sample, clamped to [min_rtt, SWIFT_CX8_PACING_RTT_MAX_NS].
- *
- * This is the paper's pacing law rate = cwnd/rtt (Algorithm 1 lines 29-32): as the
- * fabric RTT inflates the same cwnd maps to a lower rate, holding
- * inflight ~= rate * rtt = cwnd (Little's law) -- the self-adjusting property of a
- * real window, which a constant denominator loses (it admits
- * inflight ~= cwnd * rtt_live/min_rtt under load; see the README for the measured
- * A/B against the constant-min_rtt mapping that settled this).
- *
- * The min_rtt floor: min_rtt is by definition the no-load RTT, so a smaller sample is
- * measurement noise, not headroom. The 100 ms cap only guards the uint64 arithmetic in
- * swift_cx8_compute_bdp_fxp16 (see SWIFT_CX8_PACING_RTT_MAX_NS); no real sample gets near it.
- * No sample yet (== 0, zero-filled ctxt) also falls back to min_rtt.
+ * Pacing denominator (ns): the last usable fabric RTT sample, clamped to
+ * [min_rtt, SWIFT_CX8_PACING_RTT_MAX_NS]. Only consulted below one packet, where the
+ * rate limiter implements the paper's pacing regime (Algorithm 1 lines 29-32).
+ * No sample yet (zero-filled ctxt) falls back to min_rtt.
  */
 static inline uint32_t swift_cx8_pacing_rtt_ns(uint32_t *param, const cc_ctxt_swift_cx8_t *ccctx)
 {
@@ -320,12 +255,9 @@ static inline uint32_t swift_cx8_pacing_rtt_ns(uint32_t *param, const cc_ctxt_sw
 }
 
 /*
- * Map cwnd (FXP16 packets) to the FXP20 rate fraction via the BDP identity at the given
- * RTT (the pacing denominator, see swift_cx8_pacing_rtt_ns):
- *   BDP_pkts   = line_rate_mbps * rtt_ns / (mss_bytes * 8000)   [since 1e6*1e-9=1e-3]
- *   bdp_fxp16  = line_rate_mbps * rtt_ns * 2^16 / (mss_bytes * 8000)
- *   rate_fxp20 = cwnd_fxp16 * 2^20 / bdp_fxp16
- * cwnd==BDP -> MAX_RATE; cwnd<1 -> deep sub-line pacing (Algorithm 1 pacing regime).
+ * BDP in FXP16 packets at the given RTT:
+ *   bdp_fxp16 = line_rate_mbps * rtt_ns * 2^16 / (mss_bytes * 8000)   [1e6*1e-9 = 1e-3]
+ * The caller maps rate_fxp20 = cwnd_fxp16 * 2^20 / bdp_fxp16.
  */
 static inline uint32_t swift_cx8_compute_bdp_fxp16(uint32_t *param, uint32_t rtt_ns)
 {
@@ -336,9 +268,7 @@ static inline uint32_t swift_cx8_compute_bdp_fxp16(uint32_t *param, uint32_t rtt
 	return (uint32_t)(num / den);
 }
 
-/*
- * Clamp the actuated rate to [min_rate, MAX_RATE], reporting which bound (if any) hit.
- */
+/* Clamp the actuated rate to [min_rate, MAX_RATE], reporting which bound hit. */
 static inline uint32_t swift_cx8_clamp_rate(uint32_t rate, uint32_t min_rate,
 					uint32_t *clamp_min_flag, uint32_t *clamp_max_flag)
 {
@@ -358,9 +288,7 @@ static inline uint32_t swift_cx8_clamp_rate(uint32_t rate, uint32_t min_rate,
 	return rate;
 }
 
-/*
- * Convert cwnd -> clamped FXP20 rate at the given pacing RTT, recording clamp counters.
- */
+/* Convert cwnd -> clamped FXP20 rate at the given pacing RTT, recording clamp counters. */
 static inline uint32_t swift_cx8_cwnd_to_rate(uint32_t *param, uint32_t *counter, uint32_t cwnd_fxp16,
 					  uint32_t rtt_ns)
 {
@@ -384,34 +312,16 @@ static inline uint32_t swift_cx8_cwnd_to_rate(uint32_t *param, uint32_t *counter
 }
 
 /*
- * Actuate fcwnd AS A WINDOW. Every handler calls this as its last step, so every exit
- * path leaves results fully written.
- *
- * cwnd >= 1 packet: the window is expressed in credits and the rate limiter is opened
- *   to MAX_RATE. This is the paper's model -- transmission is ACK-clocked and the window
- *   alone bounds the bytes in flight, so nothing needs a rate computation at all.
- * cwnd <  1 packet: a credit window cannot express a fraction of a packet. The paper
- *   handles exactly this case by switching to pacing (Algorithm 1 lines 29-32:
- *   pacing_delay = rtt/cwnd), so we floor the window at one packet and let the FXP20
- *   rate limiter space that packet out -- which is what swift_cx8_cwnd_to_rate computes,
- *   dividing by the last measured fabric RTT.
- *
- * FIXME (assumption 1 -- credit UNIT). results->credits is assumed to count whole
- * packets, matching cwnd's unit. It could equally be bytes or MTUs; doca_pcc_dev.h:75-76
- * documents the field with a single line and no unit, there is no getter/setter helper,
- * no reference application sets it, and the BlueField-3 little-endian result struct has
- * no backing field to inspect. If the unit turns out to be bytes, multiply by
- * param[SWIFT_CX8_P_MSS_BYTES] here and nowhere else.
- *
- * FIXME (assumption 2 -- reload_credits SEMANTICS). Set equal to credits, i.e. read as
- * "the value the credit bucket refills to". The rival reading is an edge-triggered
- * "reload now" command, which would be 0 or 1 rather than a quantity. Nothing
- * distinguishes them: neither field appears in any DOCA documentation beyond the header
- * one-liners, in any public code, or in any NVIDIA sample. Unresolvable without silicon
- * that honours the fields.
- *
- * NB: rtt_req is deliberately NOT set here. The probe state machine owns it, and each
- * handler sets it for itself.
+ * Actuate fcwnd AS A WINDOW. Every handler calls this last, so every exit path leaves
+ * results fully written. cwnd >= 1 packet: express the window in credits and pin the
+ * rate limiter open (ACK-clocked, the paper's model). cwnd < 1 packet: credits cannot
+ * express a fraction, so floor at one packet and let the FXP20 rate implement the
+ * paper's pacing_delay = rtt/cwnd regime.
+ * FIXME: credits is assumed to count whole packets; the header documents no unit. If
+ * it is bytes, multiply by mss_bytes here and nowhere else.
+ * FIXME: reload_credits is read as "the value the bucket refills to" and set equal to
+ * credits; nothing distinguishes this from an edge-triggered "reload now" command.
+ * rtt_req is deliberately not set here -- the probe state machine owns it.
  */
 static inline void swift_cx8_actuate(uint32_t *param, uint32_t *counter,
 				     cc_ctxt_swift_cx8_t *ccctx,
@@ -435,9 +345,7 @@ static inline void swift_cx8_actuate(uint32_t *param, uint32_t *counter,
 	results->reload_credits = credits;
 }
 
-/* Saturating 64->32 narrowing add, used by the additive-increase paths. The max_cwnd
- * clamp that follows every call makes the saturation bound itself uncritical; it exists
- * so a pathological num_acked cannot wrap cwnd to a small value. */
+/* Saturating 64->32 add: a pathological num_acked must not wrap cwnd to a small value. */
 static inline uint32_t swift_cx8_sat_add32(uint32_t base, uint64_t add)
 {
 	uint64_t sum = (uint64_t)base + add;
@@ -448,9 +356,8 @@ static inline uint32_t swift_cx8_sat_add32(uint32_t base, uint64_t add)
 }
 
 /*
- * Compute target/delay in FXP16 for the MD branch, clamped to (0, FXP16_ONE).
- * Mirrors TIMELY's t_high_over_rtt idiom. Only called when delay >= target, so the
- * ratio is in (0, 1]; we return FXP16_ONE when delay <= target (no decrease).
+ * target/delay in FXP16 for the MD branch, clamped to (0, FXP16_ONE); returns
+ * FXP16_ONE when delay <= target (no decrease).
  */
 static inline uint32_t swift_cx8_target_over_delay_fxp16(uint32_t target, uint32_t delay)
 {
@@ -471,12 +378,7 @@ static inline uint32_t swift_cx8_clamp_cwnd(uint32_t cwnd_fxp16, uint32_t min_cw
 	return cwnd_fxp16;
 }
 
-/*
- * Handle new flow initialization.
- * Start cwnd at init_cwnd (~BDP), actuate it as a credit window, and request the first
- * RTT probe so the ACK handler has a delay sample to regulate on. Paper §3.2: the
- * initial cwnd has little effect.
- */
+/* New flow: start cwnd at init_cwnd, actuate as a credit window, request the first probe. */
 static inline void swift_cx8_handle_new_flow(doca_pcc_dev_event_t *event,
 					 uint32_t *param,
 					 uint32_t *counter,
@@ -511,13 +413,9 @@ static inline void swift_cx8_handle_new_flow(doca_pcc_dev_event_t *event,
 }
 
 /*
- * Handle TX event: maintain the RTT-probe abort/retry state machine (ported verbatim
- * from rtt_template / TIMELY). Swift does not change cwnd on TX. Without this machine a
- * single dropped RTT response stalls the flow forever.
- *
- * DOCA mapping: the paper assumes the NIC produces RTT measurements directly from ACK
- * timestamps; here we explicitly request probes via results->rtt_req. Model mapping, not
- * a paper deviation.
+ * TX event: maintain the RTT-probe abort/retry state machine (ported from
+ * rtt_template). Swift does not change cwnd on TX; without this machine a single
+ * dropped RTT response stalls the flow forever.
  */
 static inline void swift_cx8_handle_tx(doca_pcc_dev_event_t *event,
 				   uint32_t *param,
@@ -552,35 +450,21 @@ static inline void swift_cx8_handle_tx(doca_pcc_dev_event_t *event,
 		}
 	}
 
-	/* Pass-through actuation: cwnd is unchanged, but every event must still write a
-	 * complete results struct. counter == NULL on purpose -- the rate-clamp counters
-	 * describe control decisions, and TX events are far too frequent to let them
-	 * dominate the counter. */
+	/* Pass-through actuation: cwnd unchanged, but every event must write a complete
+	 * results struct. counter == NULL: TX events are too frequent for clamp counters. */
 	swift_cx8_actuate(param, NULL, ccctx, results);
 	results->rtt_req = rtt_req;
 }
 
 /*
- * Handle RTT event = REFRESH THE DELAY SAMPLE, then re-arm the probe.
- *
- * Unlike device/rp/swift/, this variant does NOT run Algorithm 1 here. The paper's
- * control loop is per-ACK ("On Receiving ACK", Algorithm 1 lines 4-28) and that is where
- * it lives (swift_cx8_handle_ack); a probe response is a measurement, not a control
- * event. So this handler only extracts the fabric delay, stores it as the sample the ACK
- * handler regulates on, and asks for the next probe. cwnd is untouched here, and no
- * format 16/17 decision lines are emitted.
- *
- * delay = fabric_rtt, where:
- *   total_rtt     = arrival_ts - req_send_ts        (local-clock duration, t6 - t1)
- *   np_turnaround = resp_send_ts - req_recv_ts       (remote-clock duration, t4 - t2)
- *   fabric_rtt    = total_rtt - np_turnaround        (NIC-to-NIC, queue-aware)
- * Both terms are durations (each within one clock), so this is sync-free. np_turnaround
- * is the paper's "remote-queuing" (§3.1 Measuring Delays), reflected by the responder
- * and subtracted by the sender (§3.3). A response that does not carry it is dropped --
- * the paper defines no fallback and neither do we (see the drop path below). NO
- * serialization is subtracted: per the design decision (and matching TIMELY) it is
- * folded into base_target. The residual local NIC-Rx delay (paper t6 - t5; BF3 exposes
- * no t5) stays in fabric_rtt -- endpoint signal, deferred to the ecwnd window (phase 2).
+ * RTT event: refresh the delay sample, then re-arm the probe. The control loop is
+ * per-ACK (Algorithm 1 "On Receiving ACK") and lives in swift_cx8_handle_ack; a probe
+ * response is a measurement, not a control event.
+ *   total_rtt     = arrival_ts - req_send_ts       (local clock, t6 - t1)
+ *   np_turnaround = resp_send_ts - req_recv_ts     (remote clock, t4 - t2)
+ *   fabric_rtt    = total_rtt - np_turnaround      (sync-free: both are durations)
+ * Serialization is folded into base_target; the residual local NIC-Rx delay (paper
+ * t6 - t5; BF3 exposes no t5) stays in the signal.
  */
 static inline void swift_cx8_handle_rtt(doca_pcc_dev_event_t *event,
 				    uint32_t *param,
@@ -590,8 +474,7 @@ static inline void swift_cx8_handle_rtt(doca_pcc_dev_event_t *event,
 {
 	uint32_t probe_in_flight = ccctx->probe_in_flight;
 
-	/* Drop spurious RTT events not matching a probe we are waiting on (e.g. from an
-	 * aborted probe). Mirrors rtt_template / TIMELY. */
+	/* Drop spurious RTT events not matching a probe we are waiting on. */
 	if (unlikely((probe_in_flight == 0) && (ccctx->tx_since_probe_req == 0))) {
 		swift_cx8_actuate(param, NULL, ccctx, results);
 		results->rtt_req = 0;
@@ -609,37 +492,24 @@ static inline void swift_cx8_handle_rtt(doca_pcc_dev_event_t *event,
 	uint32_t total_rtt = swift_cx8_diff_with_wrap32(arrival, req_send);
 	uint32_t np_turnaround = 0;
 
-	/* Packed tsflow (ts half = arrival/t6) for the format-19 line this handler emits --
-	 * see SWIFT_CX8_TRACE_TSFLOW. Computed ahead of the drop-path check so the line
-	 * carries it even for a dropped sample. The decision lines (16/17) come from the ACK
-	 * handler now and carry their own tsflow. */
 	uint64_t tsflow = SWIFT_CX8_TRACE_TSFLOW(arrival, doca_pcc_dev_get_flowtag(event));
 
-	/* Raw probe timestamps (format 19): "did the responder stamp t2/t4?". Emitted for
-	 * dropped samples too -- it is the diagnostic that explains the drops. populated:
-	 * bit0 = t2 nonzero, bit1 = t4 nonzero; 3 = usable sample. t6/arrival is folded into
-	 * tsflow instead of passed as its own field. */
+	/* Raw probe timestamps (format 19), emitted for dropped samples too.
+	 * populated: bit0 = t2 nonzero, bit1 = t4 nonzero; 3 = usable sample. */
 	SWIFT_CX8_TRACE(param, SWIFT_CX8_TRACE_FMT_RTT_TS, tsflow, req_send, req_recv, resp_send,
 		    (uint64_t)(req_recv != 0) | ((uint64_t)(resp_send != 0) << 1));
 
 	if (resp_send != 0 && req_recv != 0)
 		np_turnaround = swift_cx8_diff_with_wrap32(resp_send, req_recv);
 
-	/* Paper §3.1 (Measuring Delays): the responder reflects its Rx->Tx time (t4 - t2,
-	 * "remote-queuing") on every ACK and the sender subtracts it from the end-to-end
-	 * RTT; the paper defines NO fallback for endpoints that do not report it. An
-	 * unstamped (t2/t4 zero) or physically inconsistent (turnaround >= total RTT)
-	 * response is therefore not a delay sample: drop it, count it, keep probing. cwnd
-	 * stays untouched, and if no sample is EVER usable the ACK handler keeps parking on
-	 * last_fabric_rtt == 0, so a non-stamping responder (e.g. a ConnectX-5 reflecting
-	 * probes without timestamps) leaves Swift visibly inert -- AI/MD counters frozen,
-	 * RTT_DROPPED_UNSTAMPED climbing -- instead of silently regulating on total RTT. */
+	/* Paper §3.1 defines no fallback for endpoints that do not reflect t4 - t2. An
+	 * unstamped or inconsistent (turnaround >= total RTT) response is not a delay
+	 * sample: dropped, counted, cwnd untouched, next probe re-armed. With no usable
+	 * sample the ACK handler stays parked on last_fabric_rtt == 0, so a non-stamping
+	 * responder leaves Swift visibly inert. */
 	if (unlikely(resp_send == 0 || req_recv == 0 || np_turnaround >= total_rtt)) {
 		if (counter != NULL)
 			counter[SWIFT_CX8_C_RTT_DROPPED_UNSTAMPED]++;
-		/* Fully inert otherwise: not a delay sample, and not loss-counter
-		 * progress either -- data ACKs own the retx_cnt reset (Algorithm 1
-		 * line 5, swift_cx8_handle_ack). Just re-arm the next probe. */
 		swift_cx8_actuate(param, counter, ccctx, results);
 		results->rtt_req = 1;
 		ccctx->tx_since_probe_req = 1;
@@ -647,17 +517,13 @@ static inline void swift_cx8_handle_rtt(doca_pcc_dev_event_t *event,
 		return;
 	}
 
-	uint32_t fabric_rtt = total_rtt - np_turnaround; /* paper §3.3: RTT minus the endpoint term */
+	uint32_t fabric_rtt = total_rtt - np_turnaround;
 
-	/* Usable sample: this is the delay the ACK handler compares against the target
-	 * until the next probe lands, and the pacing denominator once cwnd drops below one
-	 * packet. The drop path above never reaches here, so an unstamped responder leaves
-	 * the last good sample (or "no sample yet") in place. */
+	/* The delay the ACK handler regulates on until the next probe lands, and the
+	 * pacing denominator below one packet. */
 	ccctx->last_fabric_rtt = fabric_rtt;
 
-	/* === Algorithm 1 line 5: "On Receiving ACK: retransmit_cnt <- 0" ===
-	 * Data ACKs reset this in swift_cx8_handle_ack; a usable RTT measurement is
-	 * equally forward progress, so it resets here too. */
+	/* Algorithm 1 line 5: a usable RTT sample is forward progress, like a data ACK. */
 	ccctx->retx_cnt = 0;
 
 	/* No window change: actuate the window we already have, and re-arm the probe. */
@@ -669,21 +535,12 @@ static inline void swift_cx8_handle_rtt(doca_pcc_dev_event_t *event,
 }
 
 /*
- * Handle NACK event = the loss / retransmit signal (paper §3.6, Algorithm 1 "On
- * Retransmit Timeout"). retx_cnt++; on reaching the threshold, collapse cwnd to
- * min_cwnd; otherwise apply the maximum multiplicative cut (1 - max_mdf), once per RTT.
- *
- * FIXME: every NACK is folded into the conservative RTO path (retx_cnt++ toward the
- * collapse threshold). MEASURED 2026-07-06: ev_subtype IS populated -- ramp NACKs
- * arrive as OOS (=2; doca_pcc_dev_nack_event_sub_type_enum: 1=RNR, 2=OOS,
- * 3=DUP_READ) -- so the paper's split is implementable: OOS/DUP_READ are
- * SACK/fast-recovery-class (Algorithm 1 lines 22-25: retx_cnt<-0, single MD), while
- * RNR is receiver-app backpressure, arguably not congestion at all. The enum has NO
- * timeout subtype: a true RTO retransmits from firmware without a received NACK
- * packet, so it may never surface here -- which reframes what the retx_reset
- * threshold actually guards. Unimplemented pending a design decision. Data ACKs
- * (swift_cx8_handle_ack) and usable RTT samples reset retx_cnt, so isolated NACKs decay
- * rather than accumulate to a reset.
+ * NACK event = the loss signal (Algorithm 1 "On Retransmit Timeout"): retx_cnt++;
+ * at the threshold collapse cwnd to min_cwnd, otherwise apply the maximum
+ * multiplicative cut (1 - max_mdf), once per RTT.
+ * FIXME: every NACK folds into the conservative RTO path. ev_subtype is populated
+ * (measured: ramp NACKs arrive as OOS), so the paper's fast-recovery/RTO split is
+ * implementable; unimplemented pending a design decision.
  */
 static inline void swift_cx8_handle_nack(doca_pcc_dev_event_t *event,
 				     uint32_t *param,
@@ -725,12 +582,8 @@ static inline void swift_cx8_handle_nack(doca_pcc_dev_event_t *event,
 	swift_cx8_actuate(param, counter, ccctx, results);
 	results->rtt_req = 0;
 
-	/* Always emitted (not gated by trace_on): NACKs are rare (~2 per run at ramp on
-	 * this fabric), a loss event is always worth a line, and ev_subtype is being
-	 * surveyed to learn whether firmware distinguishes NACK causes (see FIXME above --
-	 * it decides whether the fast-recovery/RTO split is implementable). retx_reset packs
-	 * retx_cnt into bits[31:1] and the reset flag into bit0 (see SWIFT_CX8_TRACE_TSFLOW /
-	 * README) to fit tsflow into the same five doca_pcc_dev_trace_5 arg slots. */
+	/* Always emitted (ungated): loss is rare and always worth a line. The third
+	 * field packs retx_cnt into bits[31:1] and the reset flag into bit0. */
 	doca_pcc_dev_trace_5(SWIFT_CX8_TRACE_FMT_LOSS,
 			     SWIFT_CX8_TRACE_TSFLOW(now, doca_pcc_dev_get_flowtag(event)),
 			     doca_pcc_dev_get_ev_attr(event).ev_subtype,
@@ -739,17 +592,10 @@ static inline void swift_cx8_handle_nack(doca_pcc_dev_event_t *event,
 }
 
 /*
- * num_acked (Algorithm 1's argument to the AI step): how many packets this ACK event
- * acknowledged.
- *
- * The RoCE ACK carries a PSN, so the natural estimate is the wrap-safe difference from
- * the previous ACK's PSN. Two things can spoil that: the very first ACK on a flow has no
- * predecessor, and a reordered or stale PSN can produce an absurd delta. Both fall back
- * to the event's own num_coalesced count, and the result is capped at roughly two windows
- * (floor 256) so a bad sample cannot inject an enormous increase.
- *
- * Ported from smartt_reps_psn_delta (device/rp/smartt_reps/algo/smartt_reps.c), minus its
- * anomaly counter -- swift_cx8 keeps the swift counter table unchanged.
+ * num_acked: wrap-safe PSN delta from the previous ACK. The first ACK on a flow and
+ * absurd deltas (reordered/stale PSN) fall back to the event's num_coalesced; the
+ * result is capped at ~two windows (floor 256) so a bad sample cannot inject an
+ * enormous increase. Ported from smartt_reps_psn_delta.
  */
 static inline uint32_t swift_cx8_psn_delta(cc_ctxt_swift_cx8_t *ccctx, uint32_t psn, uint32_t ncoal)
 {
@@ -776,18 +622,11 @@ static inline uint32_t swift_cx8_psn_delta(cc_ctxt_swift_cx8_t *ccctx, uint32_t 
 }
 
 /*
- * Handle ACK event -- THE MAIN HANDLER (paper Algorithm 1 "On Receiving ACK", lines
- * 4-28, with the flow-scaled target of §3.5).
- *
- * This is the placement the paper describes and the main gain of swift_cx8 over
- * device/rp/swift/, which runs the same control law once per RTT-probe event instead.
- * ACKs arrive continuously (roughly 5-packet coalescing at line rate on this fabric), so
- * the window now moves at ACK granularity and the additive increase is spread across the
- * window exactly as Algorithm 1 spreads it: each ACK contributes (ai/cwnd)*num_acked, so
- * a full window of ACKs adds ai in total.
- *
- * The delay it regulates on is still the last RTT-probe sample, because BlueField-3
- * gives no per-ACK delay. That is the one signal-side deviation that survives here.
+ * ACK event -- the main handler (Algorithm 1 "On Receiving ACK", lines 4-28, with the
+ * flow-scaled target §3.5). The per-ACK placement is the main gain over
+ * device/rp/swift/: each ACK contributes (ai/cwnd)*num_acked, so a window of ACKs
+ * adds ai in total. The delay it regulates on is still the last RTT-probe sample
+ * (BF3 gives no per-ACK delay).
  */
 static inline void swift_cx8_handle_ack(doca_pcc_dev_event_t *event,
 				    uint32_t *param,
@@ -809,10 +648,8 @@ static inline void swift_cx8_handle_ack(doca_pcc_dev_event_t *event,
 	uint32_t num_acked = swift_cx8_psn_delta(ccctx, psn, ncoal);
 	uint32_t delay = ccctx->last_fabric_rtt;
 
-	/* No usable probe sample yet (or every sample so far was dropped for missing
-	 * responder stamps): there is nothing to compare against the target, so do not
-	 * regulate. Holding the window is the honest response to a missing signal -- the
-	 * alternative, treating "unknown" as "uncongested", would ramp blindly. */
+	/* No usable probe sample yet: nothing to compare against the target, so hold
+	 * the window rather than ramp blindly. */
 	if (unlikely(delay == 0)) {
 		swift_cx8_actuate(param, counter, ccctx, results);
 		results->rtt_req = 0;
@@ -830,11 +667,8 @@ static inline void swift_cx8_handle_ack(doca_pcc_dev_event_t *event,
 	uint32_t cwnd_prev = cwnd;
 
 	/* === Algorithm 1 line 3: can_decrease = (now - t_last_decrease >= rtt) ===
-	 * Unlike the probe-driven variant, this guard is now load-bearing: many ACKs arrive
-	 * within one RTT and without it every one of them would cut the window, turning a
-	 * single congestion signal into a collapse. The period is the fabric RTT (the only
-	 * RTT this handler has); it is slightly shorter than the full round trip, which
-	 * makes the guard marginally permissive rather than marginally strict. */
+	 * Load-bearing here: many ACKs arrive within one RTT, and without the guard each
+	 * would cut the window. The period is the fabric RTT (the only RTT available). */
 	uint32_t since_dec = swift_cx8_diff_with_wrap32(now, ccctx->t_last_decrease);
 	uint32_t can_decrease = (since_dec >= delay);
 
@@ -848,17 +682,13 @@ static inline void swift_cx8_handle_ack(doca_pcc_dev_event_t *event,
 		if (counter != NULL)
 			counter[SWIFT_CX8_C_DELAY_LT_TARGET]++;
 		if (cwnd >= SWIFT_CX8_CWND_ONE_FXP16) {
-			/* cwnd += (ai/cwnd) * num_acked. ai/cwnd is a ratio of two FXP16
-			 * quantities, so it needs a re-scale: (ai << 16) / cwnd puts it back
-			 * in FXP16 packets. Spreading ai across the window this way is what
-			 * makes one window of ACKs add exactly ai. */
+			/* cwnd += (ai/cwnd) * num_acked; (ai << 16) / cwnd re-scales the
+			 * FXP16/FXP16 ratio back to FXP16 packets. */
 			uint64_t ai_over_cwnd = ((uint64_t)ai << 16) / cwnd;
 
 			cwnd = swift_cx8_sat_add32(cwnd, ai_over_cwnd * num_acked);
 		} else {
-			/* Below one packet the window is not spread over multiple packets, so
-			 * the paper adds the full ai per acknowledged packet (Algorithm 1
-			 * line 10). */
+			/* Below one packet the paper adds the full ai per acked packet (line 10). */
 			cwnd = swift_cx8_sat_add32(cwnd, (uint64_t)ai * num_acked);
 		}
 		branch = SWIFT_CX8_BRANCH_AI;
@@ -890,8 +720,7 @@ static inline void swift_cx8_handle_ack(doca_pcc_dev_event_t *event,
 	}
 
 	/* === Algorithm 1 line 26: clamp(min_cwnd, cwnd, max_cwnd) ===
-	 * The clamp bit reports the WINDOW hitting a bound, not the rate: with the limiter
-	 * pinned open above one packet, min_cwnd/max_cwnd are the only guards left. */
+	 * The clamp bit reports the WINDOW hitting a bound, not the rate. */
 	uint32_t cwnd_unclamped = cwnd;
 
 	cwnd = swift_cx8_clamp_cwnd(cwnd, min_cwnd, max_cwnd);
@@ -914,13 +743,9 @@ static inline void swift_cx8_handle_ack(doca_pcc_dev_event_t *event,
 	swift_cx8_actuate(param, counter, ccctx, results);
 	results->rtt_req = 0;
 
-	/* Trace volume: an AI line per ACK would melt the tracer at line rate (ACKs coalesce
-	 * only ~5 packets), so the steady-state increase is sampled 1-in-64 by PSN. Decrease
-	 * decisions are rare and individually interesting, so they are never sampled out.
-	 *
-	 * Field remap vs device/rp/swift/: format 16's third field carries num_acked here,
-	 * not np_turnaround (no probe decomposition happens on an ACK). The host prints it
-	 * under the label np_turn= -- see the trace table in README.md. */
+	/* Steady-state AI lines are sampled 1-in-64 by PSN (a line per ACK would melt the
+	 * tracer); decreases are never sampled out. FIELD REMAP: format 16's third field
+	 * carries num_acked here; the shared host format string labels it np_turn=. */
 	if ((branch & 0x0F) != SWIFT_CX8_BRANCH_AI || (psn & 63) == 0) {
 		uint64_t tsflow = SWIFT_CX8_TRACE_ENABLED(param) ?
 				  SWIFT_CX8_TRACE_TSFLOW(now, doca_pcc_dev_get_flowtag(event)) : 0;
@@ -934,11 +759,7 @@ static inline void swift_cx8_handle_ack(doca_pcc_dev_event_t *event,
 	}
 }
 
-/*
- * Handle CNP event. Swift is delay-based and does not react to ECN (paper §3.7 isolates
- * traffic via QoS, not CNP). Re-actuate the unchanged window; the next ACK adjusts cwnd
- * from the measured delay.
- */
+/* CNP event: Swift is delay-based and does not react to ECN; re-actuate the window. */
 static inline void swift_cx8_handle_cnp(doca_pcc_dev_event_t *event,
 				    uint32_t *param,
 				    cc_ctxt_swift_cx8_t *ccctx,
@@ -985,9 +806,7 @@ doca_pcc_dev_error_t swift_cx8_set_algo_params(uint32_t param_id_base,
 					   const uint32_t *new_param_values,
 					   uint32_t *params)
 {
-	/* Reject writes that would run off the end of the param array. param_id_base
-	 * and param_num are bounded individually AND together: param_id_base+param_num
-	 * must stay within SWIFT_CX8_NUM_PARAMS, otherwise the copy below writes OOB. */
+	/* Reject writes that would run off the end of the param array. */
 	if ((param_id_base >= SWIFT_CX8_NUM_PARAMS) ||
 	    (param_num > SWIFT_CX8_NUM_PARAMS) ||
 	    (param_id_base + param_num > SWIFT_CX8_NUM_PARAMS))
@@ -996,15 +815,10 @@ doca_pcc_dev_error_t swift_cx8_set_algo_params(uint32_t param_id_base,
 	if ((new_param_values == NULL) || (params == NULL))
 		return DOCA_PCC_DEV_STATUS_FAIL;
 
-	/* Commit the validated values into the live param array. The framework does
-	 * NOT auto-copy: per the doca_pcc_dev_user_set_algo_params contract, returning
-	 * OK means "the callback set them" (FAIL means "nothing changed"). Without this
-	 * loop, the array returned by doca_pcc_dev_get_algo_params() keeps the init-time
-	 * defaults, so PPCC writes read back correctly (register image) yet never reach
-	 * the running algorithm. Range is already enforced by the min/max registered in
-	 * swift_cx8_init(); the fs_min_cwnd < fs_max_cwnd ordering invariant is additionally
-	 * guarded on-device in swift_cx8_flow_scaled_target (denom <= 0 -> fs_term = 0), so
-	 * a transient bad pair degrades gracefully rather than dividing by zero. */
+	/* The framework does NOT auto-copy: returning OK means "the callback set them".
+	 * Without this loop PPCC writes read back correctly yet never reach the running
+	 * algorithm. Ranges are enforced by the min/max registered in swift_cx8_init(); a
+	 * bad fs_min/fs_max pair is additionally guarded in swift_cx8_flow_scaled_target. */
 	for (uint32_t i = 0; i < param_num; i++)
 		params[param_id_base + i] = new_param_values[i];
 
