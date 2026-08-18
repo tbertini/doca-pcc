@@ -28,56 +28,25 @@
 #include <stdint.h>
 
 /*
- * Single source of truth for Swift's PPCC parameter and counter contract.
+ * Single source of truth for Swift's PPCC parameter and counter contract. Included by
+ * swift.c (DPA registration) and swift_params_dump.c (host JSON dump for incast-bench).
  *
- * Included by:
- *   - swift.c (DPA): swift_init() registers params/counters from swift_params[].
- *   - swift_params_dump.c (host): emits JSON for incast-bench's parameter encoder.
+ * Wire encodings (consistent with the timely/dcqcn contracts):
+ *   time -> ns (uint32); cwnd -> FXP16 packets (1<<16 = 1.0); ratios/gains -> FXP16;
+ *   rate -> FXP20 (1<<20 = 100% line rate).
+ * Human-unit conversion is the orchestrator's job, not the device's.
  *
- * Swift (Kumar et al., "Swift: Delay is Simple and Effective for Congestion Control
- * in the Datacenter", SIGCOMM 2020, DOI 10.1145/3387514.3406591) is a window-based
- * AIMD controller against an absolute, flow-scaled target delay. We control a
- * congestion window (cwnd, in packets, fractional) per Algorithm 1, and actuate it
- * on BlueField-3 by mapping cwnd -> Tx rate via the BDP identity (see swift.c). BF3
- * has no usable credit/window actuator (doca_pcc_dev_results_t.credits is unbacked),
- * so rate is the actuator; cwnd remains the control variable.
- *
- * Wire encodings (consistent with the timely/dcqcn contracts in this repo):
- *   - time          -> nanoseconds (uint32)
- *   - cwnd          -> FXP16 packets (1<<16 = 1.0 packet; 0.001 pkt = 66)
- *   - ratios/gains  -> FXP16 (1<<16 = 1.0): md_beta, max_mdf, endpoint_ewma
- *   - rate          -> FXP20 (1<<20 = 100% line rate): min_rate
- * Off-host tooling (incast-bench) is responsible for any human-unit -> FXP
- * conversion (e.g. Mbps -> FXP20) using the configured line rate.
- *
- * Defaults are aligned with the compile-time #defines in swift_algo_params.h so that
- * a doca_pcc instance running with no param writes behaves identically to a build
- * with the contract bypassed. The orchestrator overrides these at runtime over the
- * PPCC channel (cmd_type=0xB) when sweeping the parameter space.
- *
- * The flow-scaling coefficients alpha/beta of paper Eq. (§3.5) are DERIVED on-device
- * from fs_range/fs_min_cwnd/fs_max_cwnd and are intentionally NOT exposed as params.
+ * Defaults match the compile-time #defines in swift_algo_params.h. The flow-scaling
+ * coefficients alpha/beta are derived on-device and intentionally not exposed.
  */
 
-/* Swift algorithm ID. Project convention: TIMELY=0xBFFD, DCQCN=0xBFFE,
- * rtt_template/template=0xBFFF. Swift claims the next-lower free slot. */
+/* Project algo-ID registry: rtt_template=0xBFFF, TIMELY=0xBFFD, DCQCN=0xBFFE. */
 #define SWIFT_ALGO_ID  0xBFFC
 
 /*
- * Parameter indices.
- *
- * APPEND-ONLY: external orchestrators (incast-bench) address parameters by index in
- * bulk-set, so never reorder or insert -- only append before TRACE_ON is reassigned.
- * TRACE_ON is kept LAST so indices 0..N-2 stay stable across versions.
- *
- * Grouping: [0..5] target-delay scaling (§3.5); [6..12] AIMD on cwnd (Algorithm 1);
- * [13..16] cwnd->rate actuation (pacing law); [17..18] endpoint window (paper §3.3,
- * phase 2, reserved+inert in v1 so the index map is stable when ecwnd lands);
- * [19] diagnostics.
- *
- * TRACE_ON is a diagnostics-only toggle, NOT a tuning knob: it gates runtime emission
- * of the format 15/16/17/18 device traces (see swift.h). It rides in the param array
- * so it can be flipped at runtime over the existing PPCC channel without rebuilding.
+ * Parameter indices. APPEND-ONLY: orchestrators address params by index, so never
+ * reorder or insert. TRACE_ON is diagnostics-only (runtime trace toggle, see swift.h)
+ * and stays LAST.
  */
 enum swift_param_idx {
 	/* --- target delay scaling (paper §3.5) --- */
@@ -109,19 +78,11 @@ enum swift_param_idx {
 };
 
 /*
- * Counter indices.
- *
- * EVENTS is the total event count. AI and MD count the two Algorithm-1 control
- * branches on RTT events. DELAY_LT/GT_TARGET classify each RTT event's delay vs the
- * flow-scaled target (LT coincides with AI, GT with the MD attempt). The remaining
- * counters instrument the numeric edge cases worth watching: sub-1-packet cwnd,
- * flow-scale saturation, blocked MDs, rate clamps, and the NACK reactions.
- *
- * RTT_DROPPED_UNSTAMPED counts probe responses discarded because the responder did
- * not stamp t2/t4 (or the stamps were inconsistent). The paper defines no fallback
- * for unstamped responses, so neither does the algorithm: a dropped sample changes
- * nothing. A steadily climbing value with AI/MD frozen at 0 means the responder
- * cannot support Swift (see README, "The delay signal").
+ * Counter indices. AI/MD count the two Algorithm-1 branches; DELAY_LT/GT_TARGET
+ * classify each RTT event vs the flow-scaled target; the rest instrument numeric edge
+ * cases. RTT_DROPPED_UNSTAMPED counts probe responses discarded for missing or
+ * inconsistent responder stamps; a dropped sample changes nothing (see README,
+ * "The delay signal").
  */
 enum swift_counter_idx {
 	SWIFT_C_EVENTS             = 0,  /* total events dispatched */
@@ -148,21 +109,9 @@ struct swift_param_desc {
 	uint32_t max;
 };
 
-/* THE contract. Edit only here.
- *
- * Honesty caveat: the Swift paper publishes formula structure and
- * parameter NAMES (Table 2 / §3.5) but NOT a canonical numeric tuning table. The only
- * concrete paper values: min_cwnd = 0.001 pkt (§3.4); base_target ~25 us (stack test)
- * and 50 us fabric / 100 us endpoint (storage test). ai=1, beta~0.8, max_mdf=0.5 are
- * typical/community values, not authoritative. EVERY tuning default below is therefore
- * a starting seed to be swept on hardware; see the FIXME notes in swift_algo_params.h.
- *
- * Critical retune lesson carried from TIMELY: the paper base_target (~25 us) is for
- * Google's fabric; idle fabric RTT on this BF3 setup measured ~3-4 us, so base_target
- * must be set from measurement (~6-10 us start) or the controller never decreases.
- *
- * FXP16 cwnd: 0.001=66, 0.5=32768, 1.0=65536, 16=1048576, 64=4194304.
- */
+/* THE contract -- edit only here. Every tuning default is a seed (see the FIXMEs in
+ * swift_algo_params.h); the paper fixes only min_cwnd = 0.001 pkt.
+ * FXP16 cwnd: 0.001=66, 0.5=32768, 1.0=65536, 16=1048576, 64=4194304. */
 static const struct swift_param_desc swift_params[SWIFT_NUM_PARAMS] = {
 	[SWIFT_P_BASE_TARGET_NS]      = {"base_target_ns",      "ns",        10000,       1,   500000},
 	[SWIFT_P_FS_RANGE_NS]         = {"fs_range_ns",         "ns",        15000,       1,   500000},
@@ -183,8 +132,7 @@ static const struct swift_param_desc swift_params[SWIFT_NUM_PARAMS] = {
 	[SWIFT_P_MIN_RATE_FXP20]      = {"min_rate",            "FXP20",        64,       1,   104858},
 	[SWIFT_P_ENDPOINT_TARGET_NS]  = {"endpoint_target_ns",  "ns",       100000,       1,  2000000},
 	[SWIFT_P_ENDPOINT_EWMA_FXP16] = {"endpoint_ewma",       "FXP16",     32768,       1,    65535},
-	/* Diagnostics-only: gates runtime device-trace emission. def=0 (quiet), range [0,1].
-	 * min MUST be 0 so traces can be turned back off at runtime. */
+	/* min MUST be 0 so traces can be turned back off at runtime. */
 	[SWIFT_P_TRACE_ON]            = {"trace_on",            "bool",          0,       0,        1},
 };
 

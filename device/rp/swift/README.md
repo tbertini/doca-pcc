@@ -315,7 +315,7 @@ rate ← cwnd_to_rate(cwnd, pacing_rtt)     # cwnd/BDP(live RTT); realizes pacin
 #   else (once/RTT) cwnd ·= (1 − max_mdf).
 ```
 
-**AI cadence (FIXME in source):** the paper's AI nets `+ai` per RTT via
+**AI cadence:** the paper's AI nets `+ai` per RTT via
 `(ai/cwnd)·num_acked`. DOCA delivers discrete RTT-probe events (~107 µs apart measured
 on this fabric, ≫ 1 RTT) with
 no `num_acked`, so — matching TIMELY's validated choice on this exact fabric — Swift
@@ -332,8 +332,8 @@ grep -rn "FIXME" device/rp/swift/
 Highlights:
 - **Integer 1/√cwnd:** no longer open — the precision/sign behaviour of
   `__dpa_fxp_log2`/`__dpa_fxp_pow2` for sub-1 inputs and negative exponents was validated
-  on silicon (2026-08-17, see above); the Newton/LUT fallback stays noted in source in case
-  a future input range misbehaves.
+  on silicon (2026-08-17, see above); a Newton step or a cwnd-bucketed LUT remains the
+  fallback if a future input range misbehaves.
 - **Flow-scale constants** (`fs_range`, `fs_min_cwnd`, `fs_max_cwnd`), **`md_beta`,
   `max_mdf`, `max_cwnd`, `retx_reset_threshold`:** paper gives no values — seeded, sweep.
 - **Endpoint window (`ecwnd`, §3.3):** deferred to phase 2 (params reserved, inert).
