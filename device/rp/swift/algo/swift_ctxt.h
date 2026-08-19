@@ -29,25 +29,13 @@
 #include <stdint.h>
 
 /*
- * Swift per-flow context structure (48 bytes).
+ * Swift per-flow context. MUST be exactly 48 bytes: the framework's per-flow slot is
+ * mlnx_cc_algo_ctxt_t { uint32_t data[12]; } (doca_pcc_dev_data_structure_le_bf3.h)
+ * and this struct is cast over it; overrunning corrupts adjacent per-flow state.
  *
- * HARD SIZE CONSTRAINT: the framework's per-flow context slot is
- * mlnx_cc_algo_ctxt_t { uint32_t data[12]; } == 48 bytes (12 dwords) on BlueField-3
- * (doca_pcc_dev_data_structure_le_bf3.h). This struct is cast over that slot, so it
- * MUST be exactly 48 bytes -- TIMELY, DCQCN, and rtt_template are all 48 B. Overrunning
- * it corrupts adjacent per-flow state. Keep the reserved tail sized to hold this at 48.
- *
- * Implements the per-flow state for Swift (Kumar et al., SIGCOMM 2020, Algorithm 1).
- *
- * Control variable: fcwnd (fabric congestion window) in FXP16 packets. Swift uses the
- * INSTANTANEOUS fabric delay each event (paper §3.2: "instantaneous delay as opposed to
- * minimum or low-pass filtered"), so -- unlike TIMELY -- there is NO stored rtt_diff
- * EWMA on the fabric path. cwnd_prev (Algorithm 1 line 2) is a per-event local, not
- * stored. cur_rate is the FXP20 rate the cwnd is actuated to (and the new-flow sentinel:
- * the framework zeroes the context on flow creation, so cur_rate == 0 => new flow).
- *
- * ecwnd / endpoint_delay_ewma are the endpoint-window state (paper §3.3): reserved and
- * UNUSED in v1 (fabric-only); present so the layout is stable when ecwnd lands.
+ * fcwnd (FXP16 packets) is the control variable. Swift regulates on instantaneous
+ * delay (paper §3.2), so no EWMA is stored on the fabric path. The framework zeroes
+ * the context on flow creation, so cur_rate == 0 marks a new flow.
  */
 typedef struct {
 	uint32_t cur_rate;		/* Actuated Tx rate (FXP20); == 0 => new flow sentinel */
@@ -63,9 +51,7 @@ typedef struct {
 	uint16_t abort_cnt;		/* Consecutive abort/retry rounds (exponential backoff) */
 	uint16_t tx_since_probe_req;	/* TX events between rtt_req=1 and RTT_REQ_SENT flag */
 
-	uint32_t last_fabric_rtt;	/* Last usable fabric RTT sample (ns); 0 = none yet. Raw last
-					 * sample (not a filter -- §3.2 instantaneous-delay rationale):
-					 * the pacing denominator for cwnd->rate. */
+	uint32_t last_fabric_rtt;	/* Last usable fabric RTT sample (ns); 0 = none yet; the pacing denominator */
 	uint32_t reserved[3];		/* Pad to 48 bytes total (12 dwords). Do not exceed. */
 } cc_ctxt_swift_t;
 

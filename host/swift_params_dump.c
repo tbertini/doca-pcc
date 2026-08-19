@@ -24,15 +24,9 @@
 
 /*
  * swift_params_dump: emit the Swift PPCC parameter/counter contract as JSON.
- *
- * incast-bench invokes this on the sender host to learn the wire-format contract
- * (algo ID, parameter indices, units, defaults, min/max, counter indices) at session
- * startup. Keeping this a one-shot dumper that #includes the same swift_params.h the
- * DPA registers from avoids drift between the DPA's compiled-in contract and the
- * orchestrator's encoder.
- *
- * No DOCA dependencies -- pure stdlib, can be cross-compiled or run on either the
- * BlueField host or the user's Mac.
+ * The orchestrator runs this at session startup; #including the same swift_params.h
+ * the DPA registers from keeps its encoder in sync with the device.
+ * No DOCA dependencies -- pure stdlib.
  */
 
 #include <stdint.h>

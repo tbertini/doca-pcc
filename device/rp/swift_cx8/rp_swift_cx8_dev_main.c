@@ -31,29 +31,18 @@ void doca_pcc_dev_user_algo(doca_pcc_dev_algo_ctxt_t *algo_ctxt,
 			    const doca_pcc_dev_attr_t *attr,
 			    doca_pcc_dev_results_t *results)
 {
-	/* Param/counter arrays are per (port, slot). The orchestrator pushes params and
-	 * scrapes counters over mlxreg PPCC with local_port=1, which the firmware maps to
-	 * DPA port_num 0 -- confirmed empirically on TIMELY: the set_algo_params callback
-	 * fires with port_num=0. But RoCE traffic on this BF3 (mlx5_0) reaches the algo on
-	 * port_num=1 (format-6 events show port=1). Fetching params/counters for the
-	 * *event* port (1) therefore reads a never-pushed array (defaults) and strands
-	 * counter increments on a port the orchestrator never reads. Pin to the port the
-	 * PPCC channel actually targets (0) so a single-port-per-host deployment sees its
-	 * pushed params and gets its counters scraped. Mirrors the "always slot 0"
-	 * simplification; revisit if a build ever drives multiple ports. */
+	/* PPCC port mapping quirk: mlxreg local_port=1 writes DPA port 0, but mlx5_0
+	 * traffic arrives on DPA port 1. Pin params/counters to the port the PPCC channel
+	 * targets (0), otherwise runtime tuning silently no-ops and counters land on a
+	 * port the orchestrator never reads. Revisit if a build ever drives multiple ports. */
 	const uint32_t SWIFT_CX8_PPCC_PORT = 0;
 	uint32_t *param = doca_pcc_dev_get_algo_params(SWIFT_CX8_PPCC_PORT, 0);
 	uint32_t *counter = doca_pcc_dev_get_counters(SWIFT_CX8_PPCC_PORT, 0);
 
 	swift_cx8_algo(event, param, counter, algo_ctxt, results);
 
-	/* Generic per-event (format 6) trace: compiled in, emitted only when the trace_on
-	 * PPCC param is set at runtime (or always if built -DSWIFT_CX8_DEBUG). See swift_cx8.h.
-	 * ev_attr is decoded here, under the gate: with params pinned to port 0, the
-	 * event's port_num/ev_type are needed only for this trace.
-	 * arg1 is the packed tsflow (SWIFT_CX8_TRACE_TSFLOW: ts_ns high 32 / flow_tag low 32),
-	 * matching every other Swift trace format (15-19); timestamp/flow_tag getters are
-	 * the same doca_pcc_dev_get_timestamp/get_flowtag already used across swift_cx8.c. */
+	/* Generic per-event (format 6) trace, gated by the trace_on PPCC param. arg1 is
+	 * the packed tsflow (ts_ns high 32 / flow_tag low 32), matching formats 15-19. */
 	if (SWIFT_CX8_TRACE_ENABLED(param)) {
 		doca_pcc_dev_event_general_attr_t ev_attr = doca_pcc_dev_get_ev_attr(event);
 		doca_pcc_dev_trace_5(PCC_TRACE_FMT_EVENT,
@@ -71,9 +60,8 @@ void doca_pcc_dev_user_algo(doca_pcc_dev_algo_ctxt_t *algo_ctxt,
  * Main entry point to user algorithm initialization.
  * Called once per process load; inits the Swift algorithm and all ports.
  *
- * Like TIMELY (and unlike DCQCN, which masks ACKs because it relies on CNPs), Swift
- * relies on RTT events (ev_type=DOCA_PCC_DEV_EVNT_RTT) produced by the NP in response to
- * results->rtt_req=1. We do NOT disable any events.
+ * Swift relies on RTT events produced by the NP in response to results->rtt_req=1,
+ * so no event types are disabled.
  *
  * @disable_event_bitmask [out]: event types to mask out (dropped before any algo).
  */
@@ -132,9 +120,8 @@ doca_pcc_dev_error_t doca_pcc_dev_user_set_algo_params(uint32_t port_num,
 			break;
 		}
 		default:
-			/* A PPCC set targeting a slot other than 0 is a misroute, not a
-			 * success. Return FAIL so it surfaces instead of silently no-op'ing
-			 * (contract: OK means "parameters were set"). */
+			/* A PPCC set targeting a slot other than 0 is a misroute: FAIL so it
+			 * surfaces instead of silently no-op'ing. */
 			ret = DOCA_PCC_DEV_STATUS_FAIL;
 			break;
 		}
