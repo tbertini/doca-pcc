@@ -29,17 +29,9 @@
 #include "swift_cx8_params.h"	/* SWIFT_CX8_P_TRACE_ON */
 
 /*
- * Runtime trace gate.
- *
- * Swift's format 15-19 device traces are compiled in unconditionally and gated
- * here, so they can be toggled at runtime via the trace_on PPCC param
- * (param[SWIFT_CX8_P_TRACE_ON]) WITHOUT rebuilding the DPA binary. Default is off.
- *
- * Building with -DSWIFT_CX8_DEBUG forces them on from boot (e.g. to capture the earliest
- * events, before a param write can land), ignoring the param.
- *
- * Cost when off: one well-predicted branch per event. The trace-record write and the
- * buffer flush -- the expensive part -- are skipped.
+ * Runtime trace gate: formats 6, 15-17 and 19 are compiled in and toggled at runtime
+ * via the trace_on PPCC param (default off, no rebuild needed). Format 18 (loss/NACK)
+ * is never gated. Building with -DSWIFT_CX8_DEBUG forces traces on from boot.
  */
 #ifdef SWIFT_CX8_DEBUG
 #define SWIFT_CX8_TRACE_ENABLED(param) (1)
@@ -48,45 +40,22 @@
 #endif
 
 /*
- * Packed tsflow trace argument (trace-format normalization, 2026-07-10).
- *
- * Every Swift trace line (formats 6, 15-19) carries this as its FIRST doca_pcc_dev_trace_5
- * arg -- printed host-side as tsflow=0x%lx -- instead of a separate timestamp and/or
- * flow_tag field at whatever position each format used to put them. Packing:
- *   bits 63:32 = ts_ns   (the uint32_t doca_pcc_dev_get_timestamp() value; wraps ~4.295s)
- *   bits 31:0  = flow_tag (the uint32_t doca_pcc_dev_get_flowtag() value)
- * Same event -> same tsflow: lines emitted for one RTT event (formats 19, 16, 17) carry
- * an identical tsflow, so a reader can join them by value instead of relying on log order.
+ * tsflow: the first trace arg of every Swift format (6, 15-19).
+ *   bits 63:32 = doca_pcc_dev_get_timestamp() (ns, wraps ~4.295 s)
+ *   bits 31:0  = flow_tag
+ * Lines emitted for one event carry an identical tsflow, so a reader joins them by value.
  */
 #define SWIFT_CX8_TRACE_TSFLOW(ts, flow) ((((uint64_t)(uint32_t)(ts)) << 32) | (uint64_t)(uint32_t)(flow))
 
 /*
- * Trace format IDs (emitted when SWIFT_CX8_TRACE_ENABLED(param) is true).
- *
- * Per-event summaries reuse the shared generic format 6 (see rp_swift_cx8_dev_main.c), as
- * TIMELY does. Format IDs 6-14 are owned by the generic/DCQCN/TIMELY traces in the
- * merged trace_message_formats[] table; Swift claims 15-19.
- *
- * The two decision lines are split because doca_pcc_dev_trace_5 carries only five
- * 64-bit args and the per-event decision has more than five fields worth checking by
- * hand: format 16 carries the delay/target side, format 17 the cwnd/rate side. They
- * share the event so a reader joins them by timestamp/order (and, since the tsflow
- * normalization, by identical tsflow value too).
- *
- * WHO EMITS WHAT differs from device/rp/swift/, because the control loop moved to the
- * ACK handler:
- *   19 fires on every probe response (including samples dropped for missing or
- *      inconsistent responder stamps) and now always stands alone.
- *   16/17 fire from the ACK handler, on every decrease decision and on 1-in-64 additive
- *      increases (ACKs are far too frequent to trace one line each).
- *
- * FIELD REMAP: format 16's third field carries num_acked here, not np_turnaround -- an
- * ACK event does not decompose a probe. The shared host format string still labels it
- * np_turn=; see the trace table in README.md.
- *
- * Field lists below are in wire/print order (arg1 tsflow always first; rate last where
- * a format has one). A few fields dropped as host-derivable to make room -- see the
- * per-call comments in swift_cx8.c and the trace-format table in README.md.
+ * Trace format IDs. Format 6 is the shared per-event summary; IDs 6-14 belong to the
+ * generic/DCQCN/TIMELY traces, Swift claims 15-19 (table in README.md).
+ * The decision is split over formats 16 (delay/target side) and 17 (cwnd/rate side)
+ * because a trace line carries only five args; join them by tsflow. Unlike
+ * device/rp/swift/, 16/17 fire from the ACK handler (every decrease, 1-in-64 additive
+ * increases), so format 19 (probe responses, including dropped samples) stands alone.
+ * FIELD REMAP: format 16's third field carries num_acked here, not np_turnaround; the
+ * shared host format string still labels it np_turn=.
  */
 #define SWIFT_CX8_TRACE_FMT_NEW_FLOW   (15)  /* tsflow, init_cwnd, line_mbps, bdp_fxp16, rate */
 #define SWIFT_CX8_TRACE_FMT_RTT_DELAY  (16)  /* tsflow, fabric_rtt, num_acked, target, branch */
