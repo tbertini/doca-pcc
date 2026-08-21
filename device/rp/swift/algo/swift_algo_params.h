@@ -138,12 +138,15 @@
  */
 #define SWIFT_MIN_RATE_FXP20  (1 << 6)
 
-/* ===== Endpoint window (paper §3.3) -- reserved, inert in v1 ===== */
+/* ===== Endpoint window (paper §3.3) -- inert by design, not a deferral ===== */
 
 /*
- * FIXME: the endpoint window (ecwnd) is not implemented in v1 (fabric-only). The two
- * params are registered so the index map stays stable when it lands; the v1 algorithm
- * does not read them.
+ * The endpoint window (ecwnd) cannot be implemented on BF3: the RoCE path never
+ * touches the host, and the only endpoint-side duration the probe reflects (the
+ * firmware turnaround t4 - t2) measured as a fixed ~106 ns while receiver-bound load
+ * moved fabric_rtt 12x (characterized 2026-08-20; see README "The endpoint window
+ * (§3.3): measured dead on BF3"). The two params stay registered so the append-only
+ * index map is stable; the algorithm does not read them.
  */
 #define SWIFT_ENDPOINT_TARGET_NS    (100000)
 #define SWIFT_ENDPOINT_EWMA_FXP16   (32768)  /* 0.5 */

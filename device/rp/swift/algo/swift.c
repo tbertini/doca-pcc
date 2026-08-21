@@ -30,7 +30,10 @@
  *
  * cwnd is the control variable; BF3 has no usable credit actuator, so cwnd is actuated
  * through the FXP20 rate limiter as rate = cwnd/BDP(rtt) (swift_cwnd_to_rate).
- * v1 is fabric-only: the endpoint window (paper §3.3) is reserved but unused.
+ * Fabric-only by design: BF3 exposes no endpoint-delay signal (the RoCE path never
+ * touches the host, and the firmware probe turnaround is a fixed ~106 ns, measured
+ * load-invariant), so the endpoint window (paper §3.3) stays registered but inert.
+ * See README "The endpoint window (§3.3): measured dead on BF3".
  */
 
 #include <doca_pcc_dev.h>
@@ -62,14 +65,16 @@
 #define SWIFT_ABORT_TIME_NS (300000)
 
 /*
- * 32-bit wrap-safe timestamp difference. Local static copy: the ALWAYS_INLINE
- * diff_with_wrap32 in pcc_common_dev.h duplicate-symbol clashes under -flto when
- * pulled into two translation units.
+ * 32-bit wrap-safe timestamp difference. 
+ * uint32_t goes from 0 to UINT32_MAX, if greater_num is smaller than smaller_num
+ * it means that it exceeded this range, so its true value is greater_num + (UINT32_MAX + 1) * number of times it went over
+ * however if it wrapped 10 times the resulting uint32_t would be the same as if it wrapped once only.
+ * We have to add 1 because the step from UINT32_MAX to 0 is UINT32_MAX+1 = 0, however that +1 gets lost.
  */
 static inline uint32_t swift_diff_with_wrap32(uint32_t greater_num, uint32_t smaller_num)
 {
 	if (greater_num < smaller_num)
-		return UINT32_MAX - smaller_num + greater_num + 1;
+		return UINT32_MAX - smaller_num + greater_num + 1;	/* same as (UINT32_MAX + greater_num + 1) - smaller_num */
 	return greater_num - smaller_num;
 }
 
@@ -93,8 +98,8 @@ static const volatile char swift_p_mss_desc[]           = "MSS_BYTES, segment si
 static const volatile char swift_p_min_rtt_desc[]       = "MIN_RTT_NS, base RTT for BDP and once-per-RTT guard (ns)";
 static const volatile char swift_p_line_rate_desc[]     = "LINE_RATE_MBPS, NIC line rate for BDP (Mbps)";
 static const volatile char swift_p_min_rate_desc[]      = "MIN_RATE, rate floor (FXP20 of line rate)";
-static const volatile char swift_p_ep_target_desc[]     = "ENDPOINT_TARGET_NS, endpoint window target (ns); phase 2, inert";
-static const volatile char swift_p_ep_ewma_desc[]       = "ENDPOINT_EWMA, endpoint-delay EWMA weight (FXP16); phase 2, inert";
+static const volatile char swift_p_ep_target_desc[]     = "ENDPOINT_TARGET_NS, endpoint window target (ns); inert, no endpoint signal on BF3";
+static const volatile char swift_p_ep_ewma_desc[]       = "ENDPOINT_EWMA, endpoint-delay EWMA weight (FXP16); inert, no endpoint signal on BF3";
 static const volatile char swift_p_trace_on_desc[]      = "TRACE_ON, runtime trace toggle (0/1); always on if built -DSWIFT_DEBUG";
 static const volatile char swift_c_events_desc[]        = "EVENTS, total events dispatched";
 static const volatile char swift_c_ai_desc[]            = "AI, additive-increase applications";
@@ -250,10 +255,13 @@ static inline uint32_t swift_pacing_rtt_ns(uint32_t *param, const cc_ctxt_swift_
  * BDP in FXP16 packets at the given RTT:
  *   bdp_fxp16 = line_rate_mbps * rtt_ns * 2^16 / (mss_bytes * 8000)   [1e6*1e-9 = 1e-3]
  * The caller maps rate_fxp20 = cwnd_fxp16 * 2^20 / bdp_fxp16.
+ * mss_bytes = a packet's payload size in bytes
  */
 static inline uint32_t swift_compute_bdp_fxp16(uint32_t *param, uint32_t rtt_ns)
 {
 	uint64_t num = (uint64_t)param[SWIFT_P_LINE_RATE_MBPS] * rtt_ns * (1ull << 16);
+
+	/* 8000 = 8*1000, 8 for bytes to bits and 10^3 comes from Mbps->bits/s (10^6) and ns->s (10^-9) */
 	uint64_t den = (uint64_t)param[SWIFT_P_MSS_BYTES] * 8000ull;
 	if (unlikely(den == 0))
 		return 0;
@@ -291,7 +299,7 @@ static inline uint32_t swift_cwnd_to_rate(uint32_t *param, uint32_t *counter, ui
 	if (unlikely(bdp_fxp16 == 0))
 		rate = DOCA_PCC_DEV_MAX_RATE; /* misconfigured params; fail open to line rate */
 	else
-		rate = (uint32_t)(((uint64_t)cwnd_fxp16 << 20) / bdp_fxp16);
+		rate = (uint32_t)(((uint64_t)cwnd_fxp16 << 20) / bdp_fxp16);	/* yields fxp20 number */
 
 	rate = swift_clamp_rate(rate, param[SWIFT_P_MIN_RATE_FXP20], &clamp_min, &clamp_max);
 	if (counter != NULL) {
@@ -309,11 +317,11 @@ static inline uint32_t swift_cwnd_to_rate(uint32_t *param, uint32_t *counter, ui
  */
 static inline uint32_t swift_target_over_delay_fxp16(uint32_t target, uint32_t delay)
 {
-	if (delay == 0 || delay <= target)
+	if (delay <= target)
 		return SWIFT_FXP16_ONE;
-	uint64_t ratio = ((uint64_t)target << 16) / delay;
+	uint64_t ratio = ((uint64_t)target << 16) / delay;	/* divison by zero guarded by previous if */
 	if (ratio >= SWIFT_FXP16_ONE)
-		ratio = SWIFT_FXP16_ONE - 1;
+		ratio = SWIFT_FXP16_ONE - 1;	/* set to largest FXP16 but still below 1 */
 	return (uint32_t)ratio;
 }
 
@@ -340,18 +348,18 @@ static inline void swift_handle_new_flow(doca_pcc_dev_event_t *event,
 
 	ccctx->cur_rate = rate;
 	ccctx->fcwnd = init_cwnd;
-	ccctx->ecwnd = init_cwnd;          /* reserved (phase 2) */
-	ccctx->endpoint_delay_ewma = 0;    /* reserved (phase 2) */
+	ccctx->ecwnd = init_cwnd;
+	ccctx->endpoint_delay_ewma = 0;
 	ccctx->t_last_decrease = timestamp;
 	ccctx->probe_start_ts = timestamp;
 	ccctx->retx_cnt = 0;
 	ccctx->probe_in_flight = 0;
 	ccctx->abort_cnt = 0;
 	ccctx->tx_since_probe_req = 1;
-	ccctx->last_fabric_rtt = 0;        /* no sample yet -> pacing falls back to min_rtt */
+	ccctx->last_fabric_rtt = 0;
 
 	results->rate = rate;
-	results->rtt_req = 1; /* request first RTT probe */
+	results->rtt_req = 1;
 
 	SWIFT_TRACE(param, SWIFT_TRACE_FMT_NEW_FLOW,
 		    SWIFT_TRACE_TSFLOW(timestamp, doca_pcc_dev_get_flowtag(event)), init_cwnd,
@@ -362,8 +370,7 @@ static inline void swift_handle_new_flow(doca_pcc_dev_event_t *event,
 
 /*
  * TX event: maintain the RTT-probe abort/retry state machine (ported from
- * rtt_template). Swift does not change cwnd on TX; without this machine a single
- * dropped RTT response stalls the flow forever.
+ * rtt_template).
  */
 static inline void swift_handle_tx(doca_pcc_dev_event_t *event,
 				   uint32_t *param,
@@ -375,6 +382,9 @@ static inline void swift_handle_tx(doca_pcc_dev_event_t *event,
 	uint32_t timestamp = doca_pcc_dev_get_timestamp(event);
 	doca_pcc_dev_event_general_attr_t ev_attr = doca_pcc_dev_get_ev_attr(event);
 
+	/* check if the event attribute flag has the RTT_REQ_SENT flag set while we don't
+	 * if so, fix variables accordingly
+	*/
 	if (unlikely((ev_attr.flags & DOCA_PCC_DEV_TX_FLAG_RTT_REQ_SENT) && (probe_in_flight == 0))) {
 		ccctx->probe_in_flight = 1;
 		ccctx->tx_since_probe_req = 0;
@@ -465,7 +475,6 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 	uint32_t delay = fabric_rtt;
 	uint32_t now = arrival;
 
-	/* Record as the pacing denominator until the next usable sample. */
 	ccctx->last_fabric_rtt = fabric_rtt;
 
 	uint32_t ai       = param[SWIFT_P_AI_FXP16];
@@ -474,20 +483,15 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 	uint32_t min_cwnd = param[SWIFT_P_MIN_CWND];
 	uint32_t max_cwnd = param[SWIFT_P_MAX_CWND];
 
-	/* Algorithm 1 line 5: a usable RTT sample is forward progress, like a data ACK. */
 	ccctx->retx_cnt = 0;
 
-	/* === Algorithm 1 line 2: cwnd_prev <- cwnd === */
 	uint32_t cwnd = ccctx->fcwnd;
 	uint32_t cwnd_prev = cwnd;
 
-	/* === Algorithm 1 line 3: can_decrease = (now - t_last_decrease >= rtt) ===
-	 * Probe-driven RTT events arrive >= 1 RTT apart, so this is ~always true. */
 	uint32_t since_dec = swift_diff_with_wrap32(now, ccctx->t_last_decrease);
 	uint32_t rtt_guard = (total_rtt != 0) ? total_rtt : param[SWIFT_P_MIN_RTT_NS];
 	uint32_t can_decrease = (since_dec >= rtt_guard);
 
-	/* === Algorithm 1 line 6: target <- TargetDelay() (uses current cwnd) === */
 	uint32_t target = swift_flow_scaled_target(param, cwnd, counter);
 
 	uint32_t branch;
@@ -577,12 +581,9 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 }
 
 /*
- * NACK event = the loss signal (Algorithm 1 "On Retransmit Timeout"): retx_cnt++;
+ * OOS NACK event = the loss signal (Algorithm 1 "On Retransmit Timeout"): retx_cnt++;
  * at the threshold collapse cwnd to min_cwnd, otherwise apply the maximum
  * multiplicative cut (1 - max_mdf), once per RTT.
- * FIXME: every NACK folds into the conservative RTO path. ev_subtype is populated
- * (measured: ramp NACKs arrive as OOS), so the paper's fast-recovery/RTO split is
- * implementable; unimplemented pending a design decision.
  */
 static inline void swift_handle_nack(doca_pcc_dev_event_t *event,
 				     uint32_t *param,
@@ -591,38 +592,45 @@ static inline void swift_handle_nack(doca_pcc_dev_event_t *event,
 				     doca_pcc_dev_results_t *results)
 {
 	uint32_t now = doca_pcc_dev_get_timestamp(event);
-	uint32_t min_cwnd = param[SWIFT_P_MIN_CWND];
-	uint32_t max_cwnd = param[SWIFT_P_MAX_CWND];
-	uint32_t max_mdf  = param[SWIFT_P_MAX_MDF_FXP16];
+	uint32_t subtype = doca_pcc_dev_get_ev_attr(event).ev_subtype;
 	uint32_t cwnd = ccctx->fcwnd;
+	uint32_t rate = ccctx->cur_rate;
+	uint32_t retx_cnt = ccctx->retx_cnt;
 	uint32_t reset = 0;
 
-	uint32_t retx_cnt = ccctx->retx_cnt + 1;
-	ccctx->retx_cnt = retx_cnt;
+	if (subtype == DOCA_PCC_DEV_NACK_EVNT_OOS) {
+		uint32_t min_cwnd = param[SWIFT_P_MIN_CWND];
+		uint32_t max_cwnd = param[SWIFT_P_MAX_CWND];
+		uint32_t max_mdf  = param[SWIFT_P_MAX_MDF_FXP16];
 
-	/* No measured RTT on a NACK; gate the MD with min_rtt as the once-per-RTT period. */
-	uint32_t since_dec = swift_diff_with_wrap32(now, ccctx->t_last_decrease);
-	uint32_t can_decrease = (since_dec >= param[SWIFT_P_MIN_RTT_NS]);
+		retx_cnt++;
+		ccctx->retx_cnt = retx_cnt;
 
-	if (retx_cnt >= param[SWIFT_P_RETX_RESET_THRESH]) {
-		cwnd = min_cwnd;
-		reset = 1;
-		ccctx->t_last_decrease = now;
-		if (counter != NULL)
-			counter[SWIFT_C_NACK_RESET]++;
-	} else if (can_decrease) {
-		uint32_t factor = SWIFT_FXP16_ONE - max_mdf; /* 1 - max_mdf */
-		cwnd = doca_pcc_dev_fxp_mult(factor, cwnd);
-		ccctx->t_last_decrease = now;
-		if (counter != NULL)
-			counter[SWIFT_C_NACK_MD]++;
+		/* No measured RTT on a NACK; gate the MD with min_rtt as the once-per-RTT period. */
+		uint32_t since_dec = swift_diff_with_wrap32(now, ccctx->t_last_decrease);
+		uint32_t can_decrease = (since_dec >= param[SWIFT_P_MIN_RTT_NS]);
+
+		if (retx_cnt >= param[SWIFT_P_RETX_RESET_THRESH]) {
+			cwnd = min_cwnd;
+			reset = 1;
+			ccctx->t_last_decrease = now;
+			if (counter != NULL)
+				counter[SWIFT_C_NACK_RESET]++;
+		} else if (can_decrease) {
+			uint32_t factor = SWIFT_FXP16_ONE - max_mdf; /* 1 - max_mdf */
+			cwnd = doca_pcc_dev_fxp_mult(factor, cwnd);
+			ccctx->t_last_decrease = now;
+			if (counter != NULL)
+				counter[SWIFT_C_NACK_MD]++;
+		}
+
+		cwnd = swift_clamp_cwnd(cwnd, min_cwnd, max_cwnd);
+		ccctx->fcwnd = cwnd;
+
+		rate = swift_cwnd_to_rate(param, counter, cwnd, swift_pacing_rtt_ns(param, ccctx));
+		ccctx->cur_rate = rate;
 	}
 
-	cwnd = swift_clamp_cwnd(cwnd, min_cwnd, max_cwnd);
-	ccctx->fcwnd = cwnd;
-
-	uint32_t rate = swift_cwnd_to_rate(param, counter, cwnd, swift_pacing_rtt_ns(param, ccctx));
-	ccctx->cur_rate = rate;
 	results->rate = rate;
 	results->rtt_req = 0;
 
@@ -630,7 +638,7 @@ static inline void swift_handle_nack(doca_pcc_dev_event_t *event,
 	 * field packs retx_cnt into bits[31:1] and the reset flag into bit0. */
 	doca_pcc_dev_trace_5(SWIFT_TRACE_FMT_LOSS,
 			     SWIFT_TRACE_TSFLOW(now, doca_pcc_dev_get_flowtag(event)),
-			     doca_pcc_dev_get_ev_attr(event).ev_subtype,
+			     subtype,
 			     ((uint64_t)(retx_cnt) << 1) | (reset & 1), cwnd, rate);
 	doca_pcc_dev_trace_flush();
 }
@@ -646,16 +654,6 @@ static inline void swift_handle_ack(doca_pcc_dev_event_t *event,
 				    doca_pcc_dev_results_t *results)
 {
 	ccctx->retx_cnt = 0;
-	results->rate = ccctx->cur_rate;
-	results->rtt_req = 0;
-}
-
-/* CNP event: Swift is delay-based and does not react to ECN; pass the rate through. */
-static inline void swift_handle_cnp(doca_pcc_dev_event_t *event,
-				    uint32_t *param,
-				    cc_ctxt_swift_t *ccctx,
-				    doca_pcc_dev_results_t *results)
-{
 	results->rate = ccctx->cur_rate;
 	results->rtt_req = 0;
 }
@@ -684,8 +682,6 @@ void swift_algo(doca_pcc_dev_event_t *event,
 		swift_handle_tx(event, param, swift_ctx, results);
 	} else if (ev_type == DOCA_PCC_DEV_EVNT_ROCE_NACK) {
 		swift_handle_nack(event, param, counter, swift_ctx, results);
-	} else if (ev_type == DOCA_PCC_DEV_EVNT_ROCE_CNP) {
-		swift_handle_cnp(event, param, swift_ctx, results);
 	} else {
 		results->rate = cur_rate;
 		results->rtt_req = 0;
