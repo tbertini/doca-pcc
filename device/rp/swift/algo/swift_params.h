@@ -69,9 +69,9 @@ enum swift_param_idx {
 	SWIFT_P_MIN_RTT_NS         = 14, /* base RTT for BDP + can_decrease/pacing reference (ns) */
 	SWIFT_P_LINE_RATE_MBPS     = 15, /* NIC line rate for BDP (Mbps) */
 	SWIFT_P_MIN_RATE_FXP20     = 16, /* rate floor / effective incast floor (FXP20) */
-	/* --- endpoint window (paper §3.3); reserved + inert in v1 (fabric-only) --- */
-	SWIFT_P_ENDPOINT_TARGET_NS = 17, /* ecwnd target delay (ns); phase 2 */
-	SWIFT_P_ENDPOINT_EWMA_FXP16 = 18,/* ecwnd endpoint-delay EWMA weight; phase 2 */
+	/* --- endpoint window (paper §3.3); inert, no endpoint signal on BF3 (see README) --- */
+	SWIFT_P_ENDPOINT_TARGET_NS = 17, /* ecwnd target delay (ns); never read */
+	SWIFT_P_ENDPOINT_EWMA_FXP16 = 18,/* ecwnd endpoint-delay EWMA weight; never read */
 	/* --- diagnostics (KEEP LAST) --- */
 	SWIFT_P_TRACE_ON           = 19, /* runtime trace toggle (0/1); not a tuning param */
 	SWIFT_NUM_PARAMS

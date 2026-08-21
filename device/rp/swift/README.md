@@ -183,6 +183,68 @@ absorbed into `base_target`. For fixed-MTU RoCE this is algebraically identical 
 explicit subtraction. A per-segment subtraction would only matter for variable segment
 sizes, for which BF3 exposes no clean per-event byte source (`FIXME` in source).
 
+## The endpoint window (§3.3): measured dead on BF3
+
+Swift regulates `min(fcwnd, ecwnd)`, where `ecwnd` reacts to *endpoint* delay: the
+receiver's NIC-Rx queueing and host processing time (§3.3). Phase 2 of this
+implementation was to drive `ecwnd` from `np_turnaround` (`t4 - t2`), the only
+endpoint-side duration BF3 reflects back to the sender. A characterization run on
+2026-08-20 shows that quantity does not respond to load at all, so `ecwnd` stays
+registered but inert **by design**, not as a deferral.
+
+### Setup
+
+Sender `alveo-u50d-01` running `--rp-swift` (algo_id `0xBFFC`, confirmed via PPCC
+`cmd_type=0x0` before collecting), receiver `alveo-u50d-02` running **no PCC process**
+(BF3 firmware answers the probes), background sender `alveo-u55c-03` also running no
+PCC. 40 s per arm, `ib_write_bw -d mlx5_0 -R -x 3 -F -s 16384`, numbers read from
+format 16 with `trace_on` pushed at runtime.
+
+| Arm | Load | achieved | probes | unstamped | np_turn p50 | np_turn p99 | fabric_rtt p50 | fabric_rtt p99 |
+|---|---|---|---|---|---|---|---|---|
+| A | 1:1, SW-paced 10 Gb/s | 10.00 G | 923 | 0 | 106 | 106 | 3680 | 3712 |
+| B | 1:1, line rate | 97.59 G | 652 | 0 | 106 | 106 | 3694 | 3874 |
+| C | 2:1, receiver-bound | 0.04 G (bg 97.72 G) | 1172 | 0 | 106 | 106 | 44226 | 49032 |
+
+All times in ns. Full `np_turn` spread: A 104 to 230, B 104 to 108, C 104 to 108.
+
+### Result
+
+`np_turnaround` is flat at 106 ns in every arm, and the loaded spread (104 to 108) is
+*narrower* than the idle spread (104 to 230), so there is not even a distribution shift
+to argue about. Across the same runs `fabric_rtt` p50 moves from 3680 ns to 44226 ns, a
+factor of 12: that is the proof that arm C genuinely oversubscribed the receiver port
+and that the load was real. The congestion signal lives entirely in the fabric term.
+
+`np_turnaround` on BF3 is therefore a fixed firmware responder cost of about 106 ns,
+roughly two ticks of the nanosecond timer, generated in the NIC before any
+receiver-side queue exists. It is load-invariant by construction, not by coincidence,
+and it is not a queueing measurement.
+
+### Why there is no second source
+
+The other route, a receiver-side NP application writing real telemetry into the probe
+response, is structurally blocked. `union mlnx_cc_event_spec_attr_t` in
+`doca_pcc_dev_data_structure_le_bf3.h` overlays `rtt_tstamp` (t1, t2, t4) and
+`reserved_at_0[16]`, and `doca_pcc_dev_get_rtt_raw_data()` returns that same array: NP
+user data and the firmware t2/t4 stamps occupy the same 12 bytes. An NP app that
+supplies an endpoint signal destroys the fabric-delay signal in the process, because
+the stock NP handler writes its payload into exactly the t1/t2/t4 slots. There is no
+configuration in which both are available.
+
+### Consequence
+
+`ecwnd` and `endpoint_delay_ewma` stay in `cc_ctxt_swift_t`, and params 17
+(`endpoint_target_ns`) and 18 (`endpoint_ewma`) stay registered so the index map does
+not move, but the algorithm does not read them. Reviving `ecwnd` needs a new endpoint
+signal: a NIC generation that reflects real receiver queue occupancy, or a probe format
+that carries NP data *alongside* the stamps rather than on top of them.
+
+Recorded because arm C surfaced it, and separate from the endpoint question: under an
+uncontrolled 2:1 competitor the Swift flow collapsed to 0.04 Gb/s while the unmanaged
+background flow took 97.72 Gb/s, which is a Swift v1 fairness behaviour against a
+non-responsive peer.
+
 ## Tuning parameters for your fabric
 
 The paper gives formula structure and parameter *names* but **no canonical numeric
@@ -272,10 +334,10 @@ a 19-line with no pair after it marks a drop, not a missing trace.
 
 | ev_type | Name | Meaning |
 |---|---|---|
-| 2 | `CNP` | RoCE CNP: **ignored** (Swift is delay-based; paper §3.7 isolates via QoS) |
+| 2 | `CNP` | RoCE CNP: **masked out** in `user_init` (`disable_event_bitmask`), never reaches the DPA (Swift is delay-based; paper §3.7 isolates via QoS) |
 | 3 | `TX`  | TX burst ended: maintains the RTT-probe abort state machine |
 | 4 | `ACK` | RoCE ACK: resets `retx_cnt` (Algorithm 1 line 5); no window/rate change |
-| 5 | `NACK`| RoCE NACK: the **loss/RTO** signal (format 18) |
+| 5 | `NACK`| RoCE NACK: the OOS subtype is the **loss/RTO** signal; RNR/DUP_READ leave state untouched (format 18 traces all subtypes) |
 | 6 | `RTT` | RTT probe response: **Swift's main signal** (Algorithm 1) |
 
 ### `branch` (format 16; low nibble = Algorithm-1 path, high bits OR-ed in)
@@ -311,8 +373,8 @@ rate ← cwnd_to_rate(cwnd, pacing_rtt)     # cwnd/BDP(live RTT); realizes pacin
 
 # On ACK (Algorithm 1 line 5): retx_cnt ← 0 (data forward progress); no window change
 #   (delay is probe-driven on BF3). Usable RTT samples also reset it; dropped ones don't.
-# On NACK (loss, §3.6): retx_cnt++; if ≥ RETX_RESET_THRESHOLD → cwnd = min_cwnd,
-#   else (once/RTT) cwnd ·= (1 − max_mdf).
+# On OOS NACK (loss, §3.6): retx_cnt++; if ≥ RETX_RESET_THRESHOLD → cwnd = min_cwnd,
+#   else (once/RTT) cwnd ·= (1 − max_mdf). Other NACK subtypes: no-op, return cur_rate.
 ```
 
 **AI cadence:** the paper's AI nets `+ai` per RTT via
@@ -336,14 +398,18 @@ Highlights:
   fallback if a future input range misbehaves.
 - **Flow-scale constants** (`fs_range`, `fs_min_cwnd`, `fs_max_cwnd`), **`md_beta`,
   `max_mdf`, `max_cwnd`, `retx_reset_threshold`:** paper gives no values; seeded, sweep.
-- **Endpoint window (`ecwnd`, §3.3):** deferred to phase 2 (params reserved, inert).
-- **NACK = loss:** every NACK is folded into the conservative RTO path. **Measured
-  2026-07-06: `ev_subtype` is populated**: ramp NACKs are OOS (=2; enum in
-  `doca_pcc_dev.h`: 1=RNR, 2=OOS, 3=DUP_READ), so the fast-recovery split
-  (Algorithm 1 lines 22-25) is implementable: OOS/DUP_READ ≈ SACK-class, RNR ≈
-  receiver backpressure. The enum has no timeout subtype (a true RTO never surfaces
-  as a NACK event), which reframes what the `retx_reset_thresh` collapse guards.
-  Unimplemented pending a design decision.
+- **Endpoint window (`ecwnd`, §3.3):** closed as a negative result, not an open item:
+  the only endpoint signal BF3 exposes (`np_turnaround`) is load-invariant, measured
+  2026-08-20 (see "The endpoint window (§3.3): measured dead on BF3"). Params reserved,
+  inert by design.
+- **OOS NACK = loss:** closed: only OOS NACKs (`ev_subtype` 2; enum in
+  `doca_pcc_dev.h`: 1=RNR, 2=OOS, 3=DUP_READ) enter the conservative RTO path;
+  RNR and DUP_READ report no loss, so the handler leaves the flow state untouched
+  and returns the current rate (format 18 still traces every subtype). Measured
+  2026-07-06: `ev_subtype` is populated, ramp NACKs arrive as OOS. The paper's
+  fast-recovery/RTO split itself remains unbuilt: the enum has no timeout subtype
+  (a true RTO never surfaces as a NACK event), which reframes what the
+  `retx_reset_thresh` collapse guards.
 - **RTO timing (§3.6):** the paper's per-flow EWMA-based retransmission timeout is loss
   *detection*, which is firmware-owned on BF3 (the RP only receives already-detected
   NACK events). Intentionally out of RP scope; only the *reaction* is implemented.
@@ -353,10 +419,6 @@ Highlights:
 ## Hardware / branch context
 
 - Targets BlueField-3 (DPA) at `alveo-u50d-01`. algo_id `0xBFFC`.
-- [`device/rp/swift_cx8/`](../swift_cx8/README.md) is a sibling variant (algo_id `0xBFFA`)
-  that actuates the same cwnd as a real credit window. Credits are unbacked on BF3, so it
-  is a paper-faithful reference implementation, not a benchmark target on this hardware;
-  use this directory for measurements.
 - Independent sibling of the `timely` (`0xBFFD`) and `dcqcn` (`0xBFFE`) branches: no
   shared algorithm code (disjoint `device/rp/*` trees). The build/host glue is additive
   so all three can merge into one runtime-selectable build; trace format IDs 6-14 mirror
@@ -365,3 +427,21 @@ Highlights:
   runtime via `--rp-swift` / `-rp-sw`.
 - One ACTIVE PCC process per BlueField (firmware HA): you cannot run Swift and another
   PCC algorithm actively on the same card simultaneously.
+
+### Where the credit-window variant went
+
+A second variant, Swift-CX8 (algo_id `0xBFFA`), actuated this same cwnd through the
+`results->credits` / `reload_credits` fields as a true credit window instead of
+converting it to a rate. It now lives on its own branch, `swift-cx8` (a snapshot of
+`pre-master` taken at the point of removal), and is no longer part of this tree. The
+reason is scope: the credit fields are dead on every device this DOCA release supports
+(see "Actuating a window on a rate framework" above), so the variant compiles and loads
+but runs as an uncontrolled sender. It can never be benchmarked on this hardware, and
+the thesis does not cover it.
+
+Keeping a non-runnable twin of Swift in the mainline had a real cost: every contract
+change, comment pass, and README edit had to be mirrored into a second nearly identical
+tree, and its presence next to the measurable Swift invited confusion about which
+implementation the measurements refer to. The `swift-cx8` branch preserves the variant
+in full (device tree, README, build and host glue, the `--rp-swift-cx8` flag) in case
+future firmware backs the credit path.

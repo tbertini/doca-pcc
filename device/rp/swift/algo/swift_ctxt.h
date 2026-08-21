@@ -43,8 +43,8 @@ typedef struct {
 	uint32_t t_last_decrease;	/* Timestamp (ns) of last cwnd non-increase; once-per-RTT MD guard */
 	uint32_t probe_start_ts;		/* Timestamp (ns) when RTT_REQ was last sent on a TX event (abort machine) */
 
-	uint32_t ecwnd;			/* Endpoint congestion window, FXP16 pkts; reserved (paper §3.3, phase 2) */
-	uint32_t endpoint_delay_ewma;	/* Smoothed endpoint delay (ns); reserved (paper §3.3, phase 2) */
+	uint32_t ecwnd;			/* Endpoint congestion window (paper §3.3); inert, no endpoint signal on BF3 */
+	uint32_t endpoint_delay_ewma;	/* Smoothed endpoint delay (ns); inert, no endpoint signal on BF3 */
 
 	uint16_t retx_cnt;		/* Consecutive NACK/RTO count (Algorithm 1 "On Retransmit Timeout") */
 	uint16_t probe_in_flight;		/* 1 if a probe was sent and we await its response */

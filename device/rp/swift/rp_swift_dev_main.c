@@ -8,6 +8,8 @@
 
 #define PCC_TRACE_FMT_EVENT (6)
 
+#define DOCA_PCC_DEV_EVNT_ROCE_CNP_MASK (1 << DOCA_PCC_DEV_EVNT_ROCE_CNP)
+
 /*
  * Main entry point of CC algorithm.
  * Dispatches every event to Swift (slot 0 params/counters), regardless of the
@@ -54,8 +56,7 @@ void doca_pcc_dev_user_algo(doca_pcc_dev_algo_ctxt_t *algo_ctxt,
  * Main entry point to user algorithm initialization.
  * Called once per process load; inits the Swift algorithm and all ports.
  *
- * Swift relies on RTT events produced by the NP in response to results->rtt_req=1,
- * so no event types are disabled.
+ * Swift relies on RTT events produced in response to results->rtt_req=1. 
  *
  * @disable_event_bitmask [out]: event types to mask out (dropped before any algo).
  */
@@ -72,8 +73,7 @@ void doca_pcc_dev_user_init(uint32_t *disable_event_bitmask)
 		doca_pcc_dev_trace_5(0, port_num, algo_idx, algo_slot, algo_en, 0);
 	}
 
-	/* Do not mask any event types; Swift needs RTT events to fire. */
-	*disable_event_bitmask = 0;
+	*disable_event_bitmask = DOCA_PCC_DEV_EVNT_ROCE_CNP_MASK;
 #ifdef SWIFT_DEBUG
 	doca_pcc_dev_printf("[SWIFT] %s: init complete, disable_event_bitmask=0x%x\n",
 			    __func__, *disable_event_bitmask);
