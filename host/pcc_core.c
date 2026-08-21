@@ -609,39 +609,6 @@ static doca_error_t rp_swift_callback(void *param, void *config)
 }
 
 /*
- * ARGP Callback - Handle PCC RP Swift-CX8 parameter
- *
- * Swift-CX8 actuates its window through doca_pcc_dev_results_t.credits, which no DOCA
- * 2.10 device honours (see device/rp/swift_cx8/README.md). Selecting it on a BlueField-3
- * therefore loads a sender that never limits itself. It exists as a paper-faithful
- * reference; use --rp-swift for measurements.
- *
- * @param [in]: Input parameter
- * @config [in/out]: Program configuration context
- * @return: DOCA_SUCCESS on success and DOCA_ERROR otherwise
- */
-static doca_error_t rp_swift_cx8_callback(void *param, void *config)
-{
-	struct pcc_config *pcc_cfg = (struct pcc_config *)config;
-	bool rp_swift_cx8 = *((bool *)param);
-
-	if (user_set_app) {
-		PRINT_ERROR("Error: Can not set multiple runtime application.\n");
-		return DOCA_ERROR_INITIALIZATION;
-	}
-
-	if (rp_swift_cx8) {
-		pcc_cfg->app = pcc_rp_swift_cx8_app;
-	}
-	user_set_app = true;
-	PRINT_INFO("Info: Set DOCA PCC RP Swift-CX8 application\n");
-	PRINT_INFO(
-		"Info: Swift-CX8 actuates via results->credits, which this device ignores; it will not limit its own rate. Use --rp-swift to measure.\n");
-
-	return DOCA_SUCCESS;
-}
-
-/*
  * ARGP Callback - Handle PCC RP SMaRTT-REPS parameter
  *
  * @param [in]: Input parameter
@@ -893,7 +860,6 @@ doca_error_t register_pcc_params(void)
 	struct doca_argp_param *rp_timely_param;
 	struct doca_argp_param *rp_dcqcn_param;
 	struct doca_argp_param *rp_swift_param;
-	struct doca_argp_param *rp_swift_cx8_param;
 	struct doca_argp_param *rp_smartt_reps_param;
 	struct doca_argp_param *np_switch_telemetry_param;
 	struct doca_argp_param *threads_list_param;
@@ -1024,25 +990,6 @@ doca_error_t register_pcc_params(void)
 		return result;
 	}
 
-	/* Create and register PCC RP Swift-CX8 parameter */
-	result = doca_argp_param_create(&rp_swift_cx8_param);
-	if (result != DOCA_SUCCESS) {
-		PRINT_ERROR("Error: Failed to create ARGP param: %s\n", doca_error_get_descr(result));
-		return result;
-	}
-	doca_argp_param_set_short_name(rp_swift_cx8_param, "rp-sw8");
-	doca_argp_param_set_long_name(rp_swift_cx8_param, "rp-swift-cx8");
-	doca_argp_param_set_arguments(rp_swift_cx8_param, "<PCC Reaction Point Swift CX8 (credit window)>");
-	doca_argp_param_set_description(
-		rp_swift_cx8_param,
-		"Flag to indicate running as a Reaction Point with the credit-window Swift variant (optional). Follows Algorithm 1 of Kumar et al. SIGCOMM 2020 per acknowledgement and actuates the window through results->credits, which no DOCA 2.10 device honours: on this hardware it runs as an uncontrolled sender and is a reference implementation only. Use --rp-swift to measure. By default the flag is set to false.");
-	doca_argp_param_set_callback(rp_swift_cx8_param, rp_swift_cx8_callback);
-	doca_argp_param_set_type(rp_swift_cx8_param, DOCA_ARGP_TYPE_BOOLEAN);
-	result = doca_argp_register_param(rp_swift_cx8_param);
-	if (result != DOCA_SUCCESS) {
-		PRINT_ERROR("Error: Failed to register program param: %s\n", doca_error_get_descr(result));
-		return result;
-	}
 
 	/* Create and register PCC RP SMaRTT-REPS parameter */
 	result = doca_argp_param_create(&rp_smartt_reps_param);
