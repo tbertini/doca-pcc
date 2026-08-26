@@ -80,24 +80,21 @@
 /*
  * md: Multiplicative Decrease gain (FXP16). Paper §3.2.2 Eq.2:
  *   cwnd -= min( ((rtt-trtt)/rtt) * md * p.size , p.size )   ; then additionally FD
- * §3.2.2 value is 2.0 = 131072.
- *
- * FIXME: §4.2 (timeout/trimming mode -- our NACK path) suggests DOUBLING md to 2-4;
- * sweep 2.0-4.0.
+ * §3.2.2 derives md = 2.0. Default here is 4.0 because the paper recommends doubling md
+ * when using timeouts instead of trimming (§3.3 "QuickAdapt without trimming"), and this
+ * implementation always runs in that mode (NACKs stand in for trimmed packets).
  */
-#define SMARTT_REPS_MD_FXP16  (131072)  /* 2.0 (§3.2.2); sweep 2-4 in NACK mode (§4.2) */
+#define SMARTT_REPS_MD_FXP16  (262144)  /* 4.0 = §3.2.2's 2.0 doubled for timeout mode (§3.3) */
 
 /*
  * fi: Fair Increase gain (FXP16). Paper §3.2.3 Eq.3:
  *   cwnd += (p.size/cwnd) * mtu * fi
- * §3.5 value is 0.25 = 16384.
- *
- * FIXME: §3.5 "Scaling" multiplies fi by γ = bdp/reference_bdp (reference = 100G × 12us).
- * This fabric's BDP is ~1/3 of reference, so a paper-faithful seed would be ~0.083; the
- * device does NOT auto-scale, so this keeps the un-scaled §3.5 value and the sweep
- * explores both regimes.
+ * §3.5 value is 0.25 = 16384, defined for the reference fabric (100 Gbps x 12 us).
+ * The device multiplies fi by γ = bdp/reference_bdp at use time (§3.5 "Scaling",
+ * smartt_reps_gamma_fxp16), so this stays the paper's reference value and the effective
+ * gain tracks base_rtt_ns/line_rate_mbps retunes (γ ~ 1/3 at the current defaults).
  */
-#define SMARTT_REPS_FI_FXP16  (16384)  /* 0.25 (§3.5) */
+#define SMARTT_REPS_FI_FXP16  (16384)  /* 0.25 (§3.5 reference value; γ-scaled on device) */
 
 /*
  * mi: Multiplicative Increase gain (FXP16). Paper §3.2.4 Eq.4:
@@ -105,9 +102,17 @@
  *
  * SENTINEL 0: when mi == 0 the device derives mi = brtt/(trtt-brtt) on the fly
  * (§3.2.4; = 2.0 at trtt = 1.5*brtt). This keeps mi self-consistent with brtt/trtt as
- * those are retuned. Set a nonzero override to pin mi. Same γ-scaling note as fi.
+ * those are retuned. Set a nonzero override to pin mi. Like fi, the resolved mi (param
+ * or derived) is γ-scaled on device per §3.5 "Scaling".
  */
-#define SMARTT_REPS_MI_FXP16  (0)  /* 0 => derive brtt/(trtt-brtt) on device (§3.2.4) */
+#define SMARTT_REPS_MI_FXP16  (0)  /* 0 => derive brtt/(trtt-brtt) on device (§3.2.4); γ-scaled */
+
+/*
+ * reference_bdp for §3.5 "Scaling": γ = bdp/reference_bdp, with reference the BDP of a
+ * 100 Gbps network with 12 us RTT = 150000 bytes. The device multiplies fi and mi by γ;
+ * fd and md are fixed regardless of link speed (§3.5: always react strongly).
+ */
+#define SMARTT_REPS_REF_BDP_BYTES  (150000)  /* 100 Gbps x 12 us (§3.5 "Scaling") */
 
 /*
  * qa_scaling: QuickAdapt target scale (FXP16). Paper §3.3 Algorithm 2:
@@ -183,10 +188,9 @@
 
 /*
  * init_cwnd: new-flow starting window (FXP16 packets).
- * SENTINEL 0: when init_cwnd == 0 the device starts a new flow at bdp_fxp16 (paper:
- * "the initial value of cwnd has little effect").
+ * SENTINEL 0: when init_cwnd == 0 the device starts a new flow at bdp_fxp16.
  */
-#define SMARTT_REPS_INIT_CWND_FXP16  (0)  /* 0 => BDP (paper: init cwnd has little effect) */
+#define SMARTT_REPS_INIT_CWND_FXP16  (0)  /* 0 => BDP */
 
 /* ===== cwnd -> rate actuation (BDP identity) ===== */
 

@@ -106,8 +106,8 @@ static const volatile char smartt_reps_p_base_rtt_desc[]     = "BASE_RTT_NS, no-
 static const volatile char smartt_reps_p_target_rtt_desc[]   = "TARGET_RTT_NS, congestion threshold trtt (ns)";
 static const volatile char smartt_reps_p_fd_desc[]           = "FD, Fair Decrease gain (FXP16)";
 static const volatile char smartt_reps_p_md_desc[]           = "MD, Multiplicative Decrease gain (FXP16)";
-static const volatile char smartt_reps_p_fi_desc[]           = "FI, Fair Increase gain (FXP16)";
-static const volatile char smartt_reps_p_mi_desc[]           = "MI, Multiplicative Increase gain (FXP16); 0=>derive";
+static const volatile char smartt_reps_p_fi_desc[]           = "FI, Fair Increase gain (FXP16); gamma-scaled on device";
+static const volatile char smartt_reps_p_mi_desc[]           = "MI, Multiplicative Increase gain (FXP16); 0=>derive; gamma-scaled on device";
 static const volatile char smartt_reps_p_qa_scaling_desc[]   = "QA_SCALING, QuickAdapt target scale (FXP16)";
 static const volatile char smartt_reps_p_fast_inc_k_desc[]   = "FAST_INC_K, MTUs added per coalesced ACK (FXP16 pkts)";
 static const volatile char smartt_reps_p_fast_inc_thresh_desc[] = "FAST_INC_THRESH, rtt<=brtt*thresh tolerance (FXP16)";
@@ -290,19 +290,43 @@ static inline uint32_t smartt_reps_clamp_cwnd(uint32_t *param, uint32_t cwnd_fxp
 	return cwnd_fxp16;
 }
 
+/*
+ * γ = bdp/reference_bdp (§3.5 "Scaling"): the fi/mi gains are published for a reference
+ * fabric (100 Gbps x 12 us, bdp = 150000 bytes) and are multiplied by γ on other
+ * fabrics so window growth stays proportional to the BDP. fd/md are NOT scaled (§3.5:
+ * always react strongly). bdp_bytes = line_rate_mbps * base_rtt_ns / 8000; saturated
+ * against absurd param combinations.
+ */
+static inline uint32_t smartt_reps_gamma_fxp16(uint32_t *param)
+{
+	uint64_t bdp_bytes = (uint64_t)param[SMARTT_REPS_P_LINE_RATE_MBPS] *
+			     param[SMARTT_REPS_P_BASE_RTT_NS] / 8000ull;
+	uint64_t g = (bdp_bytes << 16) / SMARTT_REPS_REF_BDP_BYTES;
+	return (g > 0xFFFFFFFFull) ? 0xFFFFFFFFu : (uint32_t)g;
+}
+
+/* Resolve the effective fi gain: the param scaled by γ (§3.5 "Scaling"). */
+static inline uint32_t smartt_reps_effective_fi(uint32_t *param)
+{
+	return doca_pcc_dev_fxp_mult(param[SMARTT_REPS_P_FI_FXP16], smartt_reps_gamma_fxp16(param));
+}
+
 /* Resolve the effective mi gain: the param, or (mi==0 sentinel) brtt/(trtt-brtt) derived
- * on device (§3.2.4; = 2.0 at trtt = 1.5*brtt). If trtt <= brtt (misconfig) use 2.0. */
+ * on device (§3.2.4; = 2.0 at trtt = 1.5*brtt; if trtt <= brtt, misconfig, use 2.0),
+ * then scaled by γ (§3.5 "Scaling"). */
 static inline uint32_t smartt_reps_effective_mi(uint32_t *param)
 {
 	uint32_t mi = param[SMARTT_REPS_P_MI_FXP16];
 	uint32_t brtt = param[SMARTT_REPS_P_BASE_RTT_NS];
 	uint32_t trtt = param[SMARTT_REPS_P_TARGET_RTT_NS];
 
-	if (mi != 0)
-		return mi;
-	if (trtt <= brtt)
-		return 2 * SMARTT_REPS_FXP16_ONE; /* 131072 */
-	return (uint32_t)(((uint64_t)brtt << 16) / (trtt - brtt));
+	if (mi == 0) {
+		if (trtt <= brtt)
+			mi = 2 * SMARTT_REPS_FXP16_ONE; /* 131072 */
+		else
+			mi = (uint32_t)(((uint64_t)brtt << 16) / (trtt - brtt));
+	}
+	return doca_pcc_dev_fxp_mult(mi, smartt_reps_gamma_fxp16(param));
 }
 
 /* ===================== ΔPSN acked-packet tracker ===================== */
@@ -350,8 +374,10 @@ static inline uint32_t smartt_reps_psn_delta(cc_ctxt_smartt_reps_t *ctx, uint32_
 
 /*
  * QuickAdapt: called per ACK (and per NACK, with src=2). At most one fire per trtt epoch.
- * On fire: cwnd = max(acked, 1 MTU) * qa_scaling; ignore_target = cwnd (packets, >=1);
- * ignored = 0. Epoch boundary always resets qa_epoch_start/acked (Algorithm 2 line 12).
+ * On fire: cwnd = max(acked, 1 MTU) * qa_scaling; ignore_target = pre-fire cwnd (packets,
+ * >=1: Algorithm 2 line 8's bytes_to_ignore = unacked, and the in-flight bytes at fire
+ * time ~= the old window); ignored = 0. Epoch boundary always resets qa_epoch_start/acked
+ * (Algorithm 2 line 12).
  * Returns 1 if it fired (cwnd changed), 0 otherwise. cwnd is passed/returned by pointer.
  * tsflow is trace-only (SMARTT_REPS_TRACE_TSFLOW(now, flow_tag), precomputed once by the
  * caller): used solely as fmt-21's arg1 below, never read for control decisions.
@@ -367,6 +393,21 @@ static inline uint32_t smartt_reps_quick_adapt(uint32_t *param, uint32_t *counte
 		/* "end != 0": no fire before the first full epoch has been established. */
 		if ((ctx->flags & SMARTT_REPS_FLAG_TRIGGER_QA) &&
 		    (ctx->flags & SMARTT_REPS_FLAG_QA_EPOCH_VALID)) {
+			/* Algorithm 2 line 8: bytes_to_ignore = unacked. The in-flight bytes at
+			 * fire time ~= the window being replaced, so the blackout is derived from
+			 * the PRE-fire cwnd (already clamped <= max_cwnd by the previous event,
+			 * so it never exceeds one window's worth of packets). Deriving it from
+			 * the new post-cut cwnd would end the blackout early and let the device
+			 * react to signals from packets sent under the old window. */
+			uint32_t prev_cwnd = *cwnd_io;
+			uint32_t ignore_target = prev_cwnd >> 16;    /* bytes_to_ignore ~= old cwnd, pkts */
+			if (prev_cwnd & 0xFFFFu)                      /* round up */
+				ignore_target += 1;
+			if (ignore_target < 1)
+				ignore_target = 1;
+			ctx->packets_to_ignore = (ignore_target > 0xFFFFu) ? 0xFFFFu : (uint16_t)ignore_target;
+			ctx->ignored_pkts = 0;
+
 			uint32_t acked = ctx->acked_pkts;
 			uint32_t base = (acked >= 1) ? acked : 1;   /* max(acked, mtu) in packets */
 			/* cwnd = max(acked,mtu)*qa_scaling in FXP16 packets (§3.3). Explicit u64
@@ -377,20 +418,8 @@ static inline uint32_t smartt_reps_quick_adapt(uint32_t *param, uint32_t *counte
 			uint64_t cwnd64 = (((uint64_t)base << 16) *
 					   param[SMARTT_REPS_P_QA_SCALING_FXP16]) >> 16;
 			uint32_t cwnd = (cwnd64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : (uint32_t)cwnd64;
-			/* Clamp BEFORE deriving ignore_target so the blackout length matches the
-			 * actuated window (the caller clamps again; idempotent). Without this,
-			 * acked >> bdp would ignore congestion signals for far longer than one
-			 * window's worth of packets. */
-			cwnd = smartt_reps_clamp_cwnd(param, cwnd);
+			cwnd = smartt_reps_clamp_cwnd(param, cwnd); /* caller clamps again; idempotent */
 			*cwnd_io = cwnd;
-
-			uint32_t ignore_target = cwnd >> 16;         /* bytes_to_ignore ~= cwnd, pkts */
-			if (cwnd & 0xFFFFu)                           /* round up */
-				ignore_target += 1;
-			if (ignore_target < 1)
-				ignore_target = 1;
-			ctx->packets_to_ignore = (ignore_target > 0xFFFFu) ? 0xFFFFu : (uint16_t)ignore_target;
-			ctx->ignored_pkts = 0;
 
 			ctx->flags &= ~SMARTT_REPS_FLAG_TRIGGER_QA;
 			adapted = 1;
@@ -507,7 +536,7 @@ static inline void smartt_reps_apply_md(uint32_t *param, uint32_t *counter,
 }
 
 /*
- * Fair Increase (§3.2.3 Eq.3): cwnd += (size/cwnd) * mtu * fi.
+ * Fair Increase (§3.2.3 Eq.3): cwnd += (size/cwnd) * mtu * fi, with fi γ-scaled (§3.5).
  * mtu == 1.0 == 65536, so (size/cwnd)*mtu = (size<<32)/cwnd in FXP16. Bumps FI counter.
  */
 static inline void smartt_reps_apply_fi(uint32_t *param, uint32_t *counter,
@@ -519,7 +548,7 @@ static inline void smartt_reps_apply_fi(uint32_t *param, uint32_t *counter,
 	 * truncating (final clamp_cwnd bounds the result either way). */
 	uint64_t ratio64 = (cwnd != 0) ? (((uint64_t)size << 32) / cwnd) : 0;
 	uint32_t ratio_mtu = (ratio64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : (uint32_t)ratio64;
-	uint32_t inc_fxp16 = doca_pcc_dev_fxp_mult(ratio_mtu, param[SMARTT_REPS_P_FI_FXP16]);
+	uint32_t inc_fxp16 = doca_pcc_dev_fxp_mult(ratio_mtu, smartt_reps_effective_fi(param));
 	uint64_t cwnd_new = (uint64_t)cwnd + inc_fxp16;
 	*cwnd_io = (cwnd_new > 0xFFFFFFFFull) ? 0xFFFFFFFFu : (uint32_t)cwnd_new;
 
@@ -530,8 +559,8 @@ static inline void smartt_reps_apply_fi(uint32_t *param, uint32_t *counter,
 /*
  * Multiplicative Increase (§3.2.4 Eq.4), then additionally applies FI (§3.2.4 text):
  *   inc = min( ((trtt-rtt)/rtt) * (size/cwnd) * mtu * mi , size MTU ); cwnd += inc; then FI.
- * Requires trtt > rtt (caller's branch), rtt > 0. mi is the effective (possibly derived)
- * gain. Bumps MI counter.
+ * Requires trtt > rtt (caller's branch), rtt > 0. mi is the effective (possibly derived,
+ * γ-scaled) gain. Bumps MI counter.
  */
 static inline void smartt_reps_apply_mi(uint32_t *param, uint32_t *counter,
 					uint32_t *cwnd_io, uint32_t rtt, uint32_t trtt,

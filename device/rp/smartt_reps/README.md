@@ -106,11 +106,14 @@ MD:  dec   = ((u64)(rtt−trtt) << 16) / rtt                        # ratio FXP1
      dec   = fxp_mult(dec, md) · size                             # FXP16 pkts
      cwnd -= min(dec, size << 16)                                 # Eq.2 cap: at most size
      then apply FD as well                                        # §3.2.2 text
-FI:  cwnd += fxp_mult( ((u64)size << 32) / cwnd , fi )            # Eq.3  (size/cwnd)·mtu·fi
+FI:  cwnd += fxp_mult( ((u64)size << 32) / cwnd , fi·γ )          # Eq.3  (size/cwnd)·mtu·fi
 MI:  inc   = ((u64)(trtt−rtt) << 16) / rtt                        # ratio FXP16
-     inc   = min-with (size<<16) of fxp_mult3(inc, (size<<32)/cwnd, mi)   # Eq.4
+     inc   = min-with (size<<16) of fxp_mult3(inc, (size<<32)/cwnd, mi·γ) # Eq.4
      cwnd += inc ; then apply FI as well                          # §3.2.4 text
 ```
+
+`fi` and `mi` (param or derived) are multiplied on device by γ = bdp/reference_bdp
+(§3.5 "Scaling", reference = 150000 bytes = 100 Gbps × 12 µs); `fd`/`md` are not.
 
 All decreases underflow-guard (`dec ≥ cwnd → cwnd = min_cwnd` before clamp). `rtt == 0`
 cannot reach MD/MI ratios (flow init stores `rtt = brtt > 0`).
@@ -134,10 +137,10 @@ adapted = false
 if wrap_diff(now, qa_epoch_start) ≥ trtt:      # "now ≥ end"
     if trigger_qa and qa_epoch_valid:          # "end ≠ 0": no fire before first full epoch
         trigger_qa = false; adapted = true
-        cwnd = sat_u32( (max(acked,1) << 16) · qa_scaling >> 16 )  # max(acked,mtu)·qa_scaling, u64 math
-        cwnd = clamp(cwnd, min_cwnd, max_cwnd_frac·bdp)      # clamp BEFORE ignore_target: blackout = actuated window
-        ignore_target = cwnd >> 16 (round up, ≥1)            # bytes_to_ignore = unacked ≈ cwnd
+        ignore_target = old_cwnd >> 16 (round up, ≥1)  # Alg2 line 8: bytes_to_ignore = unacked ≈ pre-fire cwnd
         ignored = 0
+        cwnd = sat_u32( (max(acked,1) << 16) · qa_scaling >> 16 )  # max(acked,mtu)·qa_scaling, u64 math
+        cwnd = clamp(cwnd, min_cwnd, max_cwnd_frac·bdp)      # caller clamps again; idempotent
         counter[QA_FIRED]++ ; emit fmt21
     qa_epoch_start = now; qa_epoch_valid = 1
     acked = 0                                  # epoch accumulator reset (line 12)
@@ -210,8 +213,8 @@ Params (index = wire index; every default cites a paper section or is a FIXME se
 | 0 | `base_rtt_ns` | ns | 4000 | 500 | 500000 | brtt; measured fabric ≈3.8 µs (NOT paper's 12 µs) |
 | 1 | `target_rtt_ns` | ns | 6000 | 600 | 750000 | trtt = 1.5·brtt (§3.5) |
 | 2 | `fd` | FXP16 | 52429 | 0 | 655360 | 0.8 (§3.5, tuned 100G/4KiB — matches this fabric) |
-| 3 | `md` | FXP16 | 131072 | 0 | 1310720 | 2.0 (§3.2.2); §4.2: double it in timeout/NACK mode → sweep 2–4 |
-| 4 | `fi` | FXP16 | 16384 | 0 | 655360 | 0.25 (§3.5); γ=bdp/ref_bdp scaling note below |
+| 3 | `md` | FXP16 | 262144 | 0 | 1310720 | 4.0 = §3.2.2's 2.0 doubled for timeout mode (§3.3) |
+| 4 | `fi` | FXP16 | 16384 | 0 | 655360 | 0.25 (§3.5 reference value); γ-scaled on device, note below |
 | 5 | `mi` | FXP16 | 0 | 0 | 1310720 | 0 ⇒ derive brtt/(trtt−brtt) on device (§3.2.4; =2.0 at 1.5×) |
 | 6 | `qa_scaling` | FXP16 | 52429 | 1 | 131072 | 0.8 (§3.5) |
 | 7 | `fast_inc_k` | FXP16pkt | 131072 | 0 | 655360 | k = 2 MTU per ACK (§3.5) |
@@ -221,17 +224,18 @@ Params (index = wire index; every default cites a paper section or is a FIXME se
 | 11 | `ecn_cnp_hold_ns` | ns | 10000 | 0 | 10000000 | FIXME: CNP→ECN assertion window; guess ≳1 trtt |
 | 12 | `max_cwnd_frac` | FXP16 | 81920 | 16384 | 655360 | 1.25·BDP cap (§3.5; Alg1 line 36 shows 1.0 — text wins, tunable) |
 | 13 | `min_cwnd` | FXP16pkt | 65536 | 66 | 6553600 | 1 MTU floor (§3.5) |
-| 14 | `init_cwnd` | FXP16pkt | 0 | 0 | 134217728 | 0 ⇒ BDP (paper: initial value has little effect) |
+| 14 | `init_cwnd` | FXP16pkt | 0 | 0 | 134217728 | 0 ⇒ BDP |
 | 15 | `mss_bytes` | bytes | 4096 | 256 | 9000 | segment size for BDP; FIXME verify RoCE MTU in use |
 | 16 | `line_rate_mbps` | Mbps | 100000 | 1000 | 800000 | BDP input |
 | 17 | `min_rate` | FXP20 | 64 | 1 | 104858 | rate floor (repo convention, = timely/swift) |
 | 18 | `trace_on` | bool | 0 | 0 | 1 | diagnostics only — KEEP LAST |
 
 γ note (§3.5 "Scaling"): the paper multiplies `fi`/`mi` by γ = bdp/reference_bdp
-(reference = 100 Gbps × 12 µs). This fabric's BDP is ~⅓ of that (100 G × 3.8 µs), so
-paper-faithful seeds would be fi≈0.083, mi≈0.67. The device does **not** auto-scale;
-defaults keep the un-scaled §3.5 values and the sweep explores both regimes. `fd`/`md`
-are fixed regardless of link speed (paper: always react strongly).
+(reference = 150000 bytes = 100 Gbps × 12 µs). The device applies γ at use time
+(`smartt_reps_gamma_fxp16`, from `line_rate_mbps`/`base_rtt_ns`), so the `fi`/`mi`
+params hold the paper's reference values and the effective gains track the configured
+fabric (γ ≈ ⅓ at the defaults: effective fi ≈ 0.083, mi ≈ 0.67). `fd`/`md` are fixed
+regardless of link speed (paper: always react strongly).
 
 Counters:
 
@@ -338,12 +342,13 @@ like swift/timely; it now carries `tsflow` as arg1 (see BEFORE → AFTER map abo
    still behaves correctly, just with a slow delay input).
 3. **p.ecn is a CNP-hold predicate**, not a per-packet mark bit; WTD's EWMA steps once
    per ACK event, not per packet. α/thresh/hold are the adaptation levers.
-4. **NACK replaces trimming/timeout** as the QuickAdapt trigger; per §4.2 the paper's
-   timeout mode suggests doubling `md` (sweep). No retransmit control from PCC (RoCE
+4. **NACK replaces trimming/timeout** as the QuickAdapt trigger; the paper doubles `md`
+   in timeout mode (§3.3), so the default is 4.0. No retransmit control from PCC (RoCE
    go-back-N does that in hardware); Alg1's `retransmit_packet(p)` is a no-op here.
 5. **acked bytes ≈ ΔPSN × MSS** from `first_sn` deltas (coalesce-group first-to-first
    telescopes correctly); `num_coalesced` fallback on anomalies.
-6. **`bytes_to_ignore = cwnd`** (paper: `unacked`; not exposed on BF3).
+6. **`bytes_to_ignore = pre-fire cwnd`** (paper: `unacked`, not exposed on BF3; the
+   in-flight bytes at fire time ≈ the old window).
 7. **QA/FastIncrease returns still clamp+actuate** (paper's early returns skip line 36's
    clamp; QA/FI values are within sane bounds anyway — safety, no behavioral change).
 8. **cwnd floor on decreases**: underflow-guarded to `min_cwnd` (1 MTU) per §3.5; the
@@ -358,7 +363,9 @@ sweep around the anchor (`incast-bench --sweep smartt-reps-grid1.json`) measured
 97.32 Gb/s on **every** vector — the aggregate is receiver-port-saturated across the
 sane parameter plane, so the paper defaults are the shipped defaults (no retune needed
 for this objective). Per-sender caps only become visible in the aggregate below the
-~48.7 Gb/s fair share on this 2:1 topology.
+~48.7 Gb/s fair share on this 2:1 topology. (This run predates the 2026-08-26
+faithfulness fixes: `md` default 2.0→4.0, on-device γ scaling, pre-fire-cwnd QA
+blackout. Given the flat plane above, no impact on the aggregate is expected.)
 
 Hardware truths established (per-vector PPCC counters, 10 s runs, per sender):
 
