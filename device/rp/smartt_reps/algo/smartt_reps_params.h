@@ -158,16 +158,19 @@ struct smartt_reps_param_desc {
  * several tuning constants are unstated in the paper and are FIXME seeds to sweep:
  * fast_inc_thresh (paper says "close to brtt"), wtd_alpha (§3.6.1 gives no α),
  * ecn_cnp_hold_ns (a BF3-specific CNP->ECN assertion window). mi=0 is a sentinel: the
- * device derives mi = brtt/(trtt-brtt) (= 2.0 at trtt=1.5*brtt, §3.2.4).
+ * device derives mi = brtt/(trtt-brtt) (= 2.0 at trtt=1.5*brtt, §3.2.4). md defaults to
+ * 4.0 (= §3.2.2's 2.0 doubled): the paper recommends doubling md when using timeouts
+ * instead of trimming (§3.3), and NACKs (the timeout surrogate) are the loss signal here.
  *
  * Critical retune lesson carried from TIMELY/Swift: idle fabric RTT on this BF3 setup
  * measured ~3.8 us (NOT the paper's 12 us), so base_rtt_ns=4000 / target_rtt_ns=6000;
  * retune from a no-load fabric_rtt trace (format 23) or the controller never decreases.
  *
  * γ note (§3.5 "Scaling"): the paper scales fi/mi by γ=bdp/reference_bdp
- * (reference = 100 Gbps × 12 µs). This fabric's BDP is ~1/3 of that; the device does
- * NOT auto-scale, so the defaults keep the un-scaled §3.5 values and the sweep explores
- * both regimes. fd/md are fixed regardless of link speed (paper: always react strongly).
+ * (reference = 100 Gbps × 12 µs = 150000 bytes). The device applies γ at use time
+ * (smartt_reps_gamma_fxp16), so the fi/mi values here are the paper's reference values
+ * and the effective gains track base_rtt_ns/line_rate_mbps (γ ~ 1/3 at the defaults).
+ * fd/md are fixed regardless of link speed (paper: always react strongly).
  *
  * FXP16 cwnd: 0.001=66, 0.5=32768, 1.0=65536, 16=1048576, 64=4194304.
  */
@@ -175,7 +178,7 @@ static const struct smartt_reps_param_desc smartt_reps_params[SMARTT_REPS_NUM_PA
 	[SMARTT_REPS_P_BASE_RTT_NS]         = {"base_rtt_ns",      "ns",          4000,     500,    500000},
 	[SMARTT_REPS_P_TARGET_RTT_NS]       = {"target_rtt_ns",    "ns",          6000,     600,    750000},
 	[SMARTT_REPS_P_FD_FXP16]            = {"fd",               "FXP16",      52429,       0,    655360},
-	[SMARTT_REPS_P_MD_FXP16]            = {"md",               "FXP16",     131072,       0,   1310720},
+	[SMARTT_REPS_P_MD_FXP16]            = {"md",               "FXP16",     262144,       0,   1310720},
 	[SMARTT_REPS_P_FI_FXP16]            = {"fi",               "FXP16",      16384,       0,    655360},
 	[SMARTT_REPS_P_MI_FXP16]            = {"mi",               "FXP16",          0,       0,   1310720},
 	[SMARTT_REPS_P_QA_SCALING_FXP16]    = {"qa_scaling",       "FXP16",      52429,       1,    131072},
