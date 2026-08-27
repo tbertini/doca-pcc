@@ -46,6 +46,10 @@
 #define SMARTT_REPS_RATE_MAX      (1 << 20)   /* 100% line rate in FXP20 (== DOCA_PCC_DEV_MAX_RATE) */
 #define SMARTT_REPS_MTU_FXP16     (1 << 16)   /* one MTU/MSS == 1.0 packet (cwnd unit) */
 
+/* Upper clamp on the pacing denominator (ported from Swift's SWIFT_PACING_RTT_MAX_NS):
+ * a garbage RTT sample must not stall the flow near-forever. */
+#define SMARTT_REPS_PACING_RTT_MAX_NS  (100000000)  /* 100 ms */
+
 /* ===== Delay reference (paper §3.5) ===== */
 
 /*

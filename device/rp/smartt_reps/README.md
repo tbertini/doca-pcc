@@ -46,7 +46,7 @@ host/smartt_reps_params_dump.c  no-DOCA-deps contract dumper (JSON for incast-be
 | packet trimming | Not available on this fabric. Paper's own fallback: timeouts (§3.3, §4.2 — "at most ~2 base RTTs" cost, and **double `md`** in timeout mode) | **NACK events** (`DOCA_PCC_DEV_EVNT_ROCE_NACK` = 5) are the loss/severe-congestion trigger → Algorithm 1 lines 28–34 (trimmed/timeout branch) |
 | QuickAdapt `acked` over last trtt | No receiver byte feedback | Per-flow ΔPSN accumulator in ctxt, reset each trtt epoch (Algorithm 2 line 12) |
 | `unacked` → `bytes_to_ignore` | In-flight bytes not exposed to PCC | `bytes_to_ignore ≈ cwnd` (one window), in packets |
-| cwnd actuation | `rate` is the **only** actuator (credits unbacked on BF3) | BDP identity, exactly like swift: `rate_fxp20 = clamp((cwnd_fxp16 << 20)/bdp_fxp16, min_rate, MAX)` with `bdp_fxp16 = line_rate_mbps·base_rtt_ns·2^16/(mss_bytes·8000)` |
+| cwnd actuation | `rate` is the **only** actuator (credits unbacked on BF3) | BDP identity at the **live** pacing RTT, exactly like swift: `rate_fxp20 = clamp((cwnd_fxp16 << 20)/bdp_fxp16(pacing_rtt), min_rate, MAX)` with `bdp_fxp16(rtt) = line_rate_mbps·rtt·2^16/(mss_bytes·8000)` and `pacing_rtt = clamp(last_rtt_ns, brtt, 100 ms)`. The paper's `bdp` (equation denominators, cwnd cap, γ) stays at `brtt`. |
 | `brtt` / `trtt` | Idle fabric RTT on this testbed ≈ **3.8 µs** (timely/swift lesson — not the paper's 12 µs) | `base_rtt_ns` param (seed 4000), `target_rtt_ns` param (seed 6000 = 1.5×, §3.5). Retune from a no-load trace |
 
 **First-consumer warning:** every existing algorithm in this repo masks or ignores ACK
@@ -94,7 +94,8 @@ elif  ! ecn and rtt > trtt:                   FI          # §3.2.3 Eq.3
 elif  ! ecn and rtt ≤ trtt:                   MI (+FI)    # §3.2.4 Eq.4 ("followed by FI")
 else: (ecn but !can_decrease)  counter[WTD_BLOCKED]++     # no window change
 clamp:  cwnd = clamp(cwnd, min_cwnd, fxp_mult(max_cwnd_frac, bdp_fxp16))   # Alg1 line 36 + §3.5
-actuate: rate = clamp((cwnd << 20)/bdp, min_rate, DOCA_PCC_DEV_MAX_RATE); store; results
+actuate: pacing_rtt = clamp(last_rtt_ns, brtt, 100 ms)      # swift's pacing law
+         rate = clamp((cwnd << 20)/bdp(pacing_rtt), min_rate, DOCA_PCC_DEV_MAX_RATE); store; results
 ```
 
 The four window updates in FXP16-packet units (`cwnd` FXP16, `size` integer pkts,
@@ -365,7 +366,10 @@ sane parameter plane, so the paper defaults are the shipped defaults (no retune 
 for this objective). Per-sender caps only become visible in the aggregate below the
 ~48.7 Gb/s fair share on this 2:1 topology. (This run predates the 2026-08-26
 faithfulness fixes: `md` default 2.0→4.0, on-device γ scaling, pre-fire-cwnd QA
-blackout. Given the flat plane above, no impact on the aggregate is expected.)
+blackout. It also predates the 2026-08-27 switch to swift's live-RTT pacing
+denominator; swift's own A/B (see its README) predicts fewer marks and shallower
+queues at near-identical aggregate. Given the flat plane above, no impact on the
+aggregate is expected.)
 
 Hardware truths established (per-vector PPCC counters, 10 s runs, per sender):
 
