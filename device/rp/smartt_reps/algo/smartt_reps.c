@@ -203,17 +203,36 @@ void smartt_reps_init(uint32_t algo_idx)
 /* ===================== BDP / rate helpers (ported from Swift) ===================== */
 
 /*
- * bdp_fxp16 = line_rate_mbps * base_rtt_ns * 2^16 / (mss_bytes * 8000).
- * cwnd == BDP -> MAX_RATE; cwnd < 1 -> deep sub-line pacing. NB SMaRTT uses base_rtt_ns
- * (brtt) as the BDP RTT, whereas Swift used a separate min_rtt param.
+ * bdp_fxp16 = line_rate_mbps * rtt_ns * 2^16 / (mss_bytes * 8000), at the given RTT.
+ * cwnd == BDP -> MAX_RATE; cwnd < 1 -> deep sub-line pacing. Callers pass brtt for the
+ * paper's BDP (equations, cwnd cap, gamma) and the pacing RTT for actuation.
  */
-static inline uint32_t smartt_reps_compute_bdp_fxp16(uint32_t *param)
+static inline uint32_t smartt_reps_compute_bdp_fxp16(uint32_t *param, uint32_t rtt_ns)
 {
-	uint64_t num = (uint64_t)param[SMARTT_REPS_P_LINE_RATE_MBPS] * param[SMARTT_REPS_P_BASE_RTT_NS] * (1ull << 16);
+	uint64_t num = (uint64_t)param[SMARTT_REPS_P_LINE_RATE_MBPS] * rtt_ns * (1ull << 16);
 	uint64_t den = (uint64_t)param[SMARTT_REPS_P_MSS_BYTES] * 8000ull;
 	if (unlikely(den == 0))
 		return 0;
 	return (uint32_t)(num / den);
+}
+
+/*
+ * Pacing denominator (ns): the last stored fabric RTT, clamped to
+ * [brtt, SMARTT_REPS_PACING_RTT_MAX_NS] (ported from Swift's pacing law). Dividing by
+ * the live RTT keeps inflight ~= rate*rtt = cwnd, the defining property of a window;
+ * a constant denominator lets inflight grow to cwnd*rtt/brtt exactly when congestion
+ * builds. last_rtt_ns is initialised to brtt, so a new flow paces at the base RTT.
+ */
+static inline uint32_t smartt_reps_pacing_rtt_ns(uint32_t *param, const cc_ctxt_smartt_reps_t *ctx)
+{
+	uint32_t brtt = param[SMARTT_REPS_P_BASE_RTT_NS];
+	uint32_t rtt = ctx->last_rtt_ns;
+
+	if (rtt <= brtt)
+		return brtt;
+	if (unlikely(rtt > SMARTT_REPS_PACING_RTT_MAX_NS))
+		return SMARTT_REPS_PACING_RTT_MAX_NS;
+	return rtt;
 }
 
 /*
@@ -239,16 +258,17 @@ static inline uint32_t smartt_reps_clamp_rate(uint32_t rate, uint32_t min_rate,
 }
 
 /*
- * Convert cwnd (FXP16 packets) -> clamped FXP20 rate via the BDP identity, recording the
- * clamp counters and (optionally) reporting whether either bound hit so the caller can
- * OR the CLAMPED bit into the trace branch code.
- *   rate_fxp20 = clamp((cwnd_fxp16 << 20) / bdp_fxp16, min_rate, MAX_RATE)
+ * Convert cwnd (FXP16 packets) -> clamped FXP20 rate via the BDP identity at the given
+ * pacing RTT, recording the clamp counters and (optionally) reporting whether either
+ * bound hit so the caller can OR the CLAMPED bit into the trace branch code.
+ *   rate_fxp20 = clamp((cwnd_fxp16 << 20) / bdp_fxp16(rtt_ns), min_rate, MAX_RATE)
  * bdp == 0 (misconfigured params) -> MAX_RATE (fail open to line rate).
  */
 static inline uint32_t smartt_reps_cwnd_to_rate(uint32_t *param, uint32_t *counter,
-						uint32_t cwnd_fxp16, uint32_t *clamped_flag)
+						uint32_t cwnd_fxp16, uint32_t rtt_ns,
+						uint32_t *clamped_flag)
 {
-	uint32_t bdp_fxp16 = smartt_reps_compute_bdp_fxp16(param);
+	uint32_t bdp_fxp16 = smartt_reps_compute_bdp_fxp16(param, rtt_ns);
 	uint32_t rate;
 	uint32_t clamp_min = 0, clamp_max = 0;
 
@@ -278,7 +298,8 @@ static inline uint32_t smartt_reps_cwnd_to_rate(uint32_t *param, uint32_t *count
 static inline uint32_t smartt_reps_clamp_cwnd(uint32_t *param, uint32_t cwnd_fxp16)
 {
 	uint32_t min_cwnd = param[SMARTT_REPS_P_MIN_CWND_FXP16];
-	uint32_t bdp_fxp16 = smartt_reps_compute_bdp_fxp16(param);
+	/* Cap at the base-RTT BDP: the cap must not inflate as congestion raises the RTT. */
+	uint32_t bdp_fxp16 = smartt_reps_compute_bdp_fxp16(param, param[SMARTT_REPS_P_BASE_RTT_NS]);
 	uint32_t cap = doca_pcc_dev_fxp_mult(param[SMARTT_REPS_P_MAX_CWND_FRAC_FXP16], bdp_fxp16);
 
 	if (cap < min_cwnd)
@@ -606,7 +627,7 @@ static inline void smartt_reps_handle_new_flow(doca_pcc_dev_event_t *event,
 	uint64_t tsflow = SMARTT_REPS_TRACE_ENABLED(param) ?
 			  SMARTT_REPS_TRACE_TSFLOW(now, doca_pcc_dev_get_flowtag(event)) : 0;
 	uint32_t init_cwnd = param[SMARTT_REPS_P_INIT_CWND_FXP16];
-	uint32_t bdp = smartt_reps_compute_bdp_fxp16(param);
+	uint32_t bdp = smartt_reps_compute_bdp_fxp16(param, param[SMARTT_REPS_P_BASE_RTT_NS]);
 	uint32_t cwnd = (init_cwnd != 0) ? init_cwnd : bdp;
 	uint32_t clamped = 0;
 	uint32_t rate;
@@ -614,7 +635,8 @@ static inline void smartt_reps_handle_new_flow(doca_pcc_dev_event_t *event,
 	if (cwnd == 0) /* both init_cwnd==0 and bdp==0 (misconfig): fall back to 1 MTU */
 		cwnd = param[SMARTT_REPS_P_MIN_CWND_FXP16];
 
-	rate = smartt_reps_cwnd_to_rate(param, counter, cwnd, &clamped);
+	/* No RTT sample yet: pace at brtt. */
+	rate = smartt_reps_cwnd_to_rate(param, counter, cwnd, param[SMARTT_REPS_P_BASE_RTT_NS], &clamped);
 
 	ctx->cur_rate = rate;
 	ctx->cwnd_fxp16 = cwnd;
@@ -674,7 +696,8 @@ static inline void smartt_reps_handle_ack(doca_pcc_dev_event_t *event,
 
 	uint32_t rtt  = ctx->last_rtt_ns;
 	uint32_t trtt = param[SMARTT_REPS_P_TARGET_RTT_NS];
-	uint32_t bdp  = smartt_reps_compute_bdp_fxp16(param);
+	/* The paper's bdp (equation denominators) stays at the base RTT. */
+	uint32_t bdp  = smartt_reps_compute_bdp_fxp16(param, param[SMARTT_REPS_P_BASE_RTT_NS]);
 
 	/* p.ecn := CNP arrived within the hold window (README signal mapping). */
 	uint32_t ecn = 0;
@@ -766,9 +789,10 @@ static inline void smartt_reps_handle_ack(doca_pcc_dev_event_t *event,
 	cwnd = smartt_reps_clamp_cwnd(param, cwnd);
 	ctx->cwnd_fxp16 = cwnd;
 
-	/* Actuate: cwnd -> FXP20 rate (BDP). */
+	/* Actuate: cwnd -> FXP20 rate via the BDP identity at the live pacing RTT. */
 	uint32_t clamped = 0;
-	uint32_t rate = smartt_reps_cwnd_to_rate(param, counter, cwnd, &clamped);
+	uint32_t rate = smartt_reps_cwnd_to_rate(param, counter, cwnd,
+						 smartt_reps_pacing_rtt_ns(param, ctx), &clamped);
 	if (clamped)
 		branch |= SMARTT_REPS_BRANCH_CLAMPED_BIT;
 	branch |= edge_bits;
@@ -832,7 +856,8 @@ static inline void smartt_reps_handle_nack(doca_pcc_dev_event_t *event,
 	ctx->cwnd_fxp16 = cwnd;
 
 	uint32_t clamped = 0;
-	uint32_t rate = smartt_reps_cwnd_to_rate(param, counter, cwnd, &clamped);
+	uint32_t rate = smartt_reps_cwnd_to_rate(param, counter, cwnd,
+						 smartt_reps_pacing_rtt_ns(param, ctx), &clamped);
 	ctx->cur_rate = rate;
 	results->rate = rate;
 	results->rtt_req = 0;
