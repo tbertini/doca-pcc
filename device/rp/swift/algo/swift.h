@@ -57,7 +57,7 @@
 #define SWIFT_TRACE_FMT_NEW_FLOW   (15)  /* tsflow, init_cwnd, line_mbps, bdp_fxp16, rate */
 #define SWIFT_TRACE_FMT_RTT_DELAY  (16)  /* tsflow, fabric_rtt, np_turnaround, target, branch */
 #define SWIFT_TRACE_FMT_RTT_WINDOW (17)  /* tsflow, cwnd, fs_term, can_decrease, rate */
-#define SWIFT_TRACE_FMT_LOSS       (18)  /* tsflow, ev_subtype, retx_reset, cwnd, rate; always emitted (ungated) */
+#define SWIFT_TRACE_FMT_LOSS       (18)  /* tsflow, ev_subtype, retx_reset, cwnd, rate */
 #define SWIFT_TRACE_FMT_RTT_TS     (19)  /* tsflow (ts half = t6/arrival), req_send, req_recv, resp_send, populated */
 
 /*

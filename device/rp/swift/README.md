@@ -43,9 +43,8 @@ ninja -C /tmp/build
 /tmp/build/pcc/doca_pcc --rp-swift -d mlx5_0 -l 70
 ```
 
-Per-event traces (formats 6, 15-17 and 19) are **compiled in but quiet by default**;
-format 18 (loss/NACK) is always emitted (NACKs are rare and a loss event is always
-worth a line). Turn the rest on at runtime, without a rebuild, by setting the `trace_on` PPCC
+Per-event traces (formats 6 and 15-19) are **compiled in but quiet by default**.
+Turn them on at runtime, without a rebuild, by setting the `trace_on` PPCC
 param to 1 (back to 0 to silence). To force them on from boot (catch the earliest events), build with
 `SWIFT_DEBUG=1`:
 
@@ -321,7 +320,7 @@ addition to log order, a reader can group them by that value.
 | 15 | Swift `new_flow` | `tsflow`; `init_cwnd` (FXP16 pkts); `line_mbps`; `bdp_fxp16`; `rate` (FXP20) |
 | 16 | Swift `rtt` (delay side) | `tsflow`; `fabric_rtt` (ns); `np_turn` (ns); `target` (ns); `branch` (table below) |
 | 17 | Swift `rtt` (window side) | `tsflow`; `cwnd` (FXP16 pkts); `fs_term` (ns, = target − base); `can_decr`; `rate` (FXP20) |
-| 18 | Swift `loss` (NACK), **always emitted**, not gated by `trace_on` (NACKs are rare) | `tsflow`; `ev_subtype` (1=RNR, 2=OOS, 3=DUP_READ; measured: ramp NACKs are OOS=2); `retx_reset` (bits 31:1 = `retx_cnt`, bit0 = `reset`, 1 = collapsed to min_cwnd); `cwnd` (FXP16); `rate` (FXP20) |
+| 18 | Swift `loss` (NACK) | `tsflow`; `ev_subtype` (1=RNR, 2=OOS, 3=DUP_READ; measured: ramp NACKs are OOS=2); `retx_reset` (bits 31:1 = `retx_cnt`, bit0 = `reset`, 1 = collapsed to min_cwnd); `cwnd` (FXP16); `rate` (FXP20) |
 | 19 | Swift `rtt` raw timestamps | `tsflow` (ts half = `t6`/arrival); `t1_req_send`, `t2_req_recv`, `t4_resp_send` (raw ns, wrapping u32); `populated` (bit0 = t2≠0, bit1 = t4≠0; **3 = receiver stamped both**, else the sample is **dropped** and only `rtt_dropped_unstamped` moves) |
 
 Formats 16 and 17 are two halves of one RTT decision (split because `trace_5` carries
@@ -372,7 +371,8 @@ if cwnd ≤ cwnd_prev: t_last_decrease ← now
 rate ← cwnd_to_rate(cwnd, pacing_rtt)     # cwnd/BDP(live RTT); realizes pacing for cwnd<1
 
 # On ACK (Algorithm 1 line 5): retx_cnt ← 0 (data forward progress); no window change
-#   (delay is probe-driven on BF3). Usable RTT samples also reset it; dropped ones don't.
+#   (delay is probe-driven on BF3). RTT samples do NOT reset it: a returning probe
+#   proves only that the probe survived, not that data was delivered.
 # On OOS NACK (loss, §3.6): retx_cnt++; if ≥ RETX_RESET_THRESHOLD → cwnd = min_cwnd,
 #   else (once/RTT) cwnd ·= (1 − max_mdf). Other NACK subtypes: no-op, return cur_rate.
 ```

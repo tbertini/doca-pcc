@@ -81,20 +81,20 @@
 
 /*
  * ai: additive increment (FXP16 packets), applied once per RTT event.
- * FIXME: paper does not give a concrete value; 1 pkt = 2^16 is used.
+ * 1 pkt, from the Bolt artifact's Swift baseline (Arslan et al., NSDI 2023).
  */
 #define SWIFT_AI_FXP16  (65536)
 
 /*
  * md_beta: multiplicative-decrease gain (FXP16), paper Algorithm 1 line 14.
- * FIXME: paper does not give a concrete value; 0.8 = 52429 is used.
+ * 0.8, from the Bolt artifact's Swift baseline (Arslan et al., NSDI 2023).
  */
 #define SWIFT_MD_BETA_FXP16  (52429)
 
 /*
  * max_mdf: floor on the MD multiplier (FXP16); also the cut applied on loss
  * (paper §3.6).
- * FIXME: paper names max_mdf but gives no value; 0.5 = 32768 is used.
+ * 0.5, from the Bolt artifact's Swift baseline (Arslan et al., NSDI 2023).
  */
 #define SWIFT_MAX_MDF_FXP16  (32768)
 
