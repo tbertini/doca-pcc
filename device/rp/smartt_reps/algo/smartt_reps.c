@@ -354,12 +354,12 @@ static inline uint32_t smartt_reps_effective_mi(uint32_t *param)
 
 /*
  * Resolve the packet count acked/delivered since the last ACK/NACK event from the ΔPSN of
- * first_sn, with the num_coalesced fallback. Updates the ctxt PSN state. Bumps the
+ * first_sn, with the num_coalesced fallback, and update the ctxt PSN state. Bumps the
  * psn_anomaly counter on an implausible delta (Δ > max(2*cwnd_pkts + 2, 256)) and falls
  * back to num_coalesced (README signal mapping + Alg1 deviation 5).
  */
-static inline uint32_t smartt_reps_psn_delta(cc_ctxt_smartt_reps_t *ctx, uint32_t *counter,
-					     uint32_t psn, uint32_t ncoal)
+static inline uint32_t smartt_reps_track_acked_pkts(cc_ctxt_smartt_reps_t *ctx, uint32_t *counter,
+						    uint32_t psn, uint32_t num_coalesced)
 {
 	uint32_t delta;
 	uint32_t cwnd_pkts = ctx->cwnd_fxp16 >> 16;
@@ -371,18 +371,18 @@ static inline uint32_t smartt_reps_psn_delta(cc_ctxt_smartt_reps_t *ctx, uint32_
 	if (ctx->flags & SMARTT_REPS_FLAG_PSN_VALID) {
 		delta = smartt_reps_diff_with_wrap32(psn, ctx->last_ack_psn);
 		if (delta > cap) {
-			delta = ncoal;
+			delta = num_coalesced;
 			if (counter != NULL)
 				counter[SMARTT_REPS_C_PSN_ANOMALY]++;
 		}
 	} else {
-		delta = ncoal;
+		delta = num_coalesced;
 	}
 
-	/* Bound the ncoal fallback by the same sanity cap: ncoal is a raw 16-bit field, and
-	 * an unbounded size feeds every downstream size-proportional term (FI's
-	 * (size<<32)/cwnd in particular). With size <= 2*cwnd_pkts+2 those terms stay in
-	 * range by construction. */
+	/* Bound the num_coalesced fallback by the same sanity cap: it is a raw 16-bit field,
+	 * and an unbounded packet count feeds every downstream acked-proportional term (FI's
+	 * (pkts_acked<<32)/cwnd in particular). With pkts_acked <= 2*cwnd_pkts+2 those terms
+	 * stay in range by construction. */
 	if (delta > cap)
 		delta = cap;
 
@@ -430,13 +430,14 @@ static inline uint32_t smartt_reps_quick_adapt(uint32_t *param, uint32_t *counte
 			ctx->ignored_pkts = 0;
 
 			uint32_t acked = ctx->acked_pkts;
-			uint32_t base = (acked >= 1) ? acked : 1;   /* max(acked, mtu) in packets */
+			uint32_t qa_floor_pkts = (acked >= 1) ? acked : 1; /* max(acked, mtu) in packets */
 			/* cwnd = max(acked,mtu)*qa_scaling in FXP16 packets (§3.3). Explicit u64
 			 * with saturation: fxp_mult TRUNCATES its u32 result, and
-			 * (base<<16)*qa_scaling exceeds u32 for acked > 32768 with qa_scaling >
-			 * 1.0 -- both within the registered param bounds (adversarial-review
-			 * finding: acked=32768, qa=2.0 truncated to 0 => floor collapse). */
-			uint64_t cwnd64 = (((uint64_t)base << 16) *
+			 * (qa_floor_pkts<<16)*qa_scaling exceeds u32 for acked > 32768 with
+			 * qa_scaling > 1.0 -- both within the registered param bounds
+			 * (adversarial-review finding: acked=32768, qa=2.0 truncated to 0 =>
+			 * floor collapse). */
+			uint64_t cwnd64 = (((uint64_t)qa_floor_pkts << 16) *
 					   param[SMARTT_REPS_P_QA_SCALING_FXP16]) >> 16;
 			uint32_t cwnd = (cwnd64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : (uint32_t)cwnd64;
 			cwnd = smartt_reps_clamp_cwnd(param, cwnd); /* caller clamps again; idempotent */
@@ -463,14 +464,14 @@ static inline uint32_t smartt_reps_quick_adapt(uint32_t *param, uint32_t *counte
 /*
  * FastIncrease: engages when rtt <= brtt*fast_inc_thresh and !ecn. While active (or once
  * the byte counter exceeds cwnd), adds fast_inc_k MTUs per coalesced ACK arrival
- * (scaled by ncoal, deviation 9). Returns 1 if it fired (cwnd changed), 0 otherwise.
+ * (scaled by num_coalesced, deviation 9). Returns 1 if it fired (cwnd changed), 0 otherwise.
  * cwnd passed/returned by pointer. When !engaged, resets the counter and fi_active.
  * tsflow is trace-only (SMARTT_REPS_TRACE_TSFLOW(now, flow_tag), precomputed once by the
  * caller): used solely as fmt-22's arg1 below, never read for control decisions.
  */
 static inline uint32_t smartt_reps_fast_increase(uint32_t *param, uint32_t *counter,
 						 cc_ctxt_smartt_reps_t *ctx, uint32_t rtt,
-						 uint32_t ecn, uint32_t size, uint32_t ncoal,
+						 uint32_t ecn, uint32_t pkts_acked, uint32_t num_coalesced,
 						 uint32_t *cwnd_io, uint64_t tsflow)
 {
 	uint32_t brtt = param[SMARTT_REPS_P_BASE_RTT_NS];
@@ -478,10 +479,10 @@ static inline uint32_t smartt_reps_fast_increase(uint32_t *param, uint32_t *coun
 	uint32_t rtt_bound = doca_pcc_dev_fxp_mult(brtt, thresh); /* brtt * fast_inc_thresh */
 
 	if ((rtt <= rtt_bound) && !ecn) {
-		ctx->fast_inc_count = smartt_reps_sat_add16(ctx->fast_inc_count, size);
+		ctx->fast_inc_count = smartt_reps_sat_add16(ctx->fast_inc_count, pkts_acked);
 		uint32_t count_fxp16 = (uint32_t)ctx->fast_inc_count << 16;
 		if ((count_fxp16 > *cwnd_io) || (ctx->flags & SMARTT_REPS_FLAG_FI_ACTIVE)) {
-			uint64_t inc = (uint64_t)param[SMARTT_REPS_P_FAST_INC_K_FXP16] * ncoal; /* k MTUs/ACK */
+			uint64_t inc = (uint64_t)param[SMARTT_REPS_P_FAST_INC_K_FXP16] * num_coalesced; /* k MTUs/ACK */
 			uint64_t cwnd = (uint64_t)*cwnd_io + inc;
 			*cwnd_io = (cwnd > 0xFFFFFFFFull) ? 0xFFFFFFFFu : (uint32_t)cwnd;
 			ctx->flags |= SMARTT_REPS_FLAG_FI_ACTIVE;
@@ -491,7 +492,7 @@ static inline uint32_t smartt_reps_fast_increase(uint32_t *param, uint32_t *coun
 			 * is uint16_t, so "(x & 0xFFFF) << 16" done in promoted-int arithmetic would
 			 * shift into the sign bit (UB) -- widen to uint64_t first, same bit pattern. */
 			SMARTT_REPS_TRACE(param, SMARTT_REPS_TRACE_FMT_FASTINC, tsflow,
-					  (((uint64_t)(ctx->fast_inc_count & 0xFFFF) << 16) | (ncoal & 0xFFFF)),
+					  (((uint64_t)(ctx->fast_inc_count & 0xFFFF) << 16) | (num_coalesced & 0xFFFF)),
 					  rtt, *cwnd_io, ctx->cur_rate);
 			return 1;
 		}
@@ -510,13 +511,13 @@ static inline uint32_t smartt_reps_fast_increase(uint32_t *param, uint32_t *coun
  * Underflow-guarded: if the decrement >= cwnd, collapse to min_cwnd. Bumps FD counter.
  */
 static inline void smartt_reps_apply_fd(uint32_t *param, uint32_t *counter,
-					uint32_t *cwnd_io, uint32_t bdp, uint32_t size)
+					uint32_t *cwnd_io, uint32_t bdp, uint32_t pkts_acked)
 {
 	uint32_t cwnd = *cwnd_io;
-	/* (cwnd/bdp)*fd in FXP16, then * size (integer packets). */
+	/* (cwnd/bdp)*fd in FXP16, then * pkts_acked (integer packets). */
 	uint32_t cwnd_over_bdp = (bdp != 0) ? (uint32_t)(((uint64_t)cwnd << 16) / bdp) : 0;
 	uint32_t term_fxp16 = doca_pcc_dev_fxp_mult(cwnd_over_bdp, param[SMARTT_REPS_P_FD_FXP16]);
-	uint64_t dec = (uint64_t)term_fxp16 * size;
+	uint64_t dec = (uint64_t)term_fxp16 * pkts_acked;
 
 	if (dec >= cwnd)
 		*cwnd_io = param[SMARTT_REPS_P_MIN_CWND_FXP16];
@@ -534,13 +535,13 @@ static inline void smartt_reps_apply_fd(uint32_t *param, uint32_t *counter,
  */
 static inline void smartt_reps_apply_md(uint32_t *param, uint32_t *counter,
 					uint32_t *cwnd_io, uint32_t rtt, uint32_t trtt,
-					uint32_t bdp, uint32_t size)
+					uint32_t bdp, uint32_t pkts_acked)
 {
 	uint32_t cwnd = *cwnd_io;
 	uint32_t ratio = (rtt != 0) ? (uint32_t)((((uint64_t)(rtt - trtt)) << 16) / rtt) : 0; /* (rtt-trtt)/rtt FXP16 */
 	uint32_t md_term = doca_pcc_dev_fxp_mult(ratio, param[SMARTT_REPS_P_MD_FXP16]);        /* * md */
-	uint64_t dec = (uint64_t)md_term * size;                                               /* FXP16 pkts */
-	uint64_t cap = (uint64_t)size << 16;                                                   /* at most size */
+	uint64_t dec = (uint64_t)md_term * pkts_acked;                                         /* FXP16 pkts */
+	uint64_t cap = (uint64_t)pkts_acked << 16;                                             /* at most pkts_acked */
 	if (dec > cap)
 		dec = cap;
 
@@ -553,7 +554,7 @@ static inline void smartt_reps_apply_md(uint32_t *param, uint32_t *counter,
 		counter[SMARTT_REPS_C_MD]++;
 
 	/* §3.2.2: MD additionally applies FD. */
-	smartt_reps_apply_fd(param, counter, cwnd_io, bdp, size);
+	smartt_reps_apply_fd(param, counter, cwnd_io, bdp, pkts_acked);
 }
 
 /*
@@ -561,15 +562,16 @@ static inline void smartt_reps_apply_md(uint32_t *param, uint32_t *counter,
  * mtu == 1.0 == 65536, so (size/cwnd)*mtu = (size<<32)/cwnd in FXP16. Bumps FI counter.
  */
 static inline void smartt_reps_apply_fi(uint32_t *param, uint32_t *counter,
-					uint32_t *cwnd_io, uint32_t size)
+					uint32_t *cwnd_io, uint32_t pkts_acked)
 {
 	uint32_t cwnd = *cwnd_io;
 	/* (size/cwnd)*mtu in FXP16, saturated: with min_cwnd configured sub-MTU (registered
 	 * floor 66 = 0.001 pkt) the quotient can exceed u32; saturate instead of silently
 	 * truncating (final clamp_cwnd bounds the result either way). */
-	uint64_t ratio64 = (cwnd != 0) ? (((uint64_t)size << 32) / cwnd) : 0;
-	uint32_t ratio_mtu = (ratio64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : (uint32_t)ratio64;
-	uint32_t inc_fxp16 = doca_pcc_dev_fxp_mult(ratio_mtu, smartt_reps_effective_fi(param));
+	uint64_t acked_over_cwnd_mtu64 = (cwnd != 0) ? (((uint64_t)pkts_acked << 32) / cwnd) : 0;
+	uint32_t acked_over_cwnd_mtu = (acked_over_cwnd_mtu64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu :
+				       (uint32_t)acked_over_cwnd_mtu64;
+	uint32_t inc_fxp16 = doca_pcc_dev_fxp_mult(acked_over_cwnd_mtu, smartt_reps_effective_fi(param));
 	uint64_t cwnd_new = (uint64_t)cwnd + inc_fxp16;
 	*cwnd_io = (cwnd_new > 0xFFFFFFFFull) ? 0xFFFFFFFFu : (uint32_t)cwnd_new;
 
@@ -585,19 +587,19 @@ static inline void smartt_reps_apply_fi(uint32_t *param, uint32_t *counter,
  */
 static inline void smartt_reps_apply_mi(uint32_t *param, uint32_t *counter,
 					uint32_t *cwnd_io, uint32_t rtt, uint32_t trtt,
-					uint32_t mi, uint32_t size)
+					uint32_t mi, uint32_t pkts_acked)
 {
 	uint32_t cwnd = *cwnd_io;
 	uint32_t ratio = (rtt != 0) ? (uint32_t)((((uint64_t)(trtt - rtt)) << 16) / rtt) : 0; /* (trtt-rtt)/rtt FXP16 */
 	/* (size/cwnd)*mtu in FXP16, saturated (same sub-MTU min_cwnd rationale as apply_fi;
 	 * Eq.4's min(.., size) cap bounds the final increment regardless). */
-	uint64_t socm64 = (cwnd != 0) ? (((uint64_t)size << 32) / cwnd) : 0;
-	uint32_t size_over_cwnd_mtu = (socm64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : (uint32_t)socm64;
-	/* fxp_mult3(ratio, size_over_cwnd_mtu, mi): chain two FXP16 multiplies. */
-	uint32_t t = doca_pcc_dev_fxp_mult(ratio, size_over_cwnd_mtu);
-	uint32_t inc_fxp16 = doca_pcc_dev_fxp_mult(t, mi);
+	uint64_t acked_over_cwnd_mtu64 = (cwnd != 0) ? (((uint64_t)pkts_acked << 32) / cwnd) : 0;
+	uint32_t acked_over_cwnd_mtu = (acked_over_cwnd_mtu64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu :
+				       (uint32_t)acked_over_cwnd_mtu64;
+	/* ratio * acked_over_cwnd_mtu * mi: chain two FXP16 multiplies. */
+	uint32_t inc_fxp16 = doca_pcc_dev_fxp_mult(doca_pcc_dev_fxp_mult(ratio, acked_over_cwnd_mtu), mi);
 	uint64_t inc = inc_fxp16;
-	uint64_t cap = (uint64_t)size << 16; /* at most size */
+	uint64_t cap = (uint64_t)pkts_acked << 16; /* at most pkts_acked */
 	if (inc > cap)
 		inc = cap;
 	uint64_t cwnd_new = (uint64_t)cwnd + inc;
@@ -607,7 +609,7 @@ static inline void smartt_reps_apply_mi(uint32_t *param, uint32_t *counter,
 		counter[SMARTT_REPS_C_MI]++;
 
 	/* §3.2.4: MI is followed by FI. */
-	smartt_reps_apply_fi(param, counter, cwnd_io, size);
+	smartt_reps_apply_fi(param, counter, cwnd_io, pkts_acked);
 }
 
 /* ===================== event handlers ===================== */
@@ -688,11 +690,11 @@ static inline void smartt_reps_handle_ack(doca_pcc_dev_event_t *event,
 			  SMARTT_REPS_TRACE_TSFLOW(now, doca_pcc_dev_get_flowtag(event)) : 0;
 	uint32_t psn = doca_pcc_dev_get_roce_ack_first_sn(event);
 	doca_pcc_dev_ack_nack_cnp_extra_t extra = doca_pcc_dev_get_ack_nack_cnp_extra(event);
-	uint32_t ncoal = extra.num_coalesced;
-	if (ncoal == 0)
-		ncoal = 1; /* treat 0 as 1 */
+	uint32_t num_coalesced = extra.num_coalesced;
+	if (num_coalesced == 0)
+		num_coalesced = 1; /* treat 0 as 1 */
 
-	uint32_t size = smartt_reps_psn_delta(ctx, counter, psn, ncoal);
+	uint32_t pkts_acked = smartt_reps_track_acked_pkts(ctx, counter, psn, num_coalesced);
 
 	uint32_t rtt  = ctx->last_rtt_ns;
 	uint32_t trtt = param[SMARTT_REPS_P_TARGET_RTT_NS];
@@ -707,14 +709,15 @@ static inline void smartt_reps_handle_ack(doca_pcc_dev_event_t *event,
 	}
 
 	/* Alg1 lines 4-5: accumulate acked (QA epoch) and ignored (post-QA blackout). */
-	ctx->acked_pkts = smartt_reps_sat_add16(ctx->acked_pkts, size);
-	ctx->ignored_pkts = smartt_reps_sat_add16(ctx->ignored_pkts, size);
+	ctx->acked_pkts = smartt_reps_sat_add16(ctx->acked_pkts, pkts_acked);
+	ctx->ignored_pkts = smartt_reps_sat_add16(ctx->ignored_pkts, pkts_acked);
 
 	/* Raw ACK-signal trace (fmt 23): answers "do ACK events arrive, and is ΔPSN sane?".
 	 * event_sn (doca_pcc_dev_get_sn) is no longer sampled -- dropped from the format,
 	 * see README (sn ~= first_sn + delta, derivable from the ΔPSN reported here anyway). */
 	SMARTT_REPS_TRACE(param, SMARTT_REPS_TRACE_FMT_SIG, tsflow, psn,
-			  ((uint64_t)((size & 0xFFFF) << 16) | (ncoal & 0xFFFF)), ctx->avg_wtd_fxp16, 0);
+			  ((uint64_t)((pkts_acked & 0xFFFF) << 16) | (num_coalesced & 0xFFFF)),
+			  ctx->avg_wtd_fxp16, 0);
 
 	/* Alg1 lines 8-10: post-QuickAdapt blackout (§3.3). While still ignoring the last
 	 * window's in-flight bytes, swallow the ACK and leave the rate unchanged. */
@@ -744,38 +747,40 @@ static inline void smartt_reps_handle_ack(doca_pcc_dev_event_t *event,
 
 	uint32_t cwnd = ctx->cwnd_fxp16;
 	uint32_t branch;
-	uint32_t edge_bits = (ecn ? SMARTT_REPS_BRANCH_ECN_BIT : 0) |
-			     (can_decrease ? SMARTT_REPS_BRANCH_CAN_DEC_BIT : 0);
+	uint32_t trace_bits = (ecn ? SMARTT_REPS_BRANCH_ECN_BIT : 0) |
+			      (can_decrease ? SMARTT_REPS_BRANCH_CAN_DEC_BIT : 0);
 
 	/* Alg1: QuickAdapt (always called) then FastIncrease (always called) -- the README
-	 * control-law block evaluates BOTH before the "if adp or finc: goto clamp" test.
+	 * control-law block evaluates BOTH before the "if qa_fired or fastinc_fired: goto
+	 * clamp" test.
 	 * fast_increase must run every ACK so its fast_inc_count/fi_active state machine
 	 * stays consistent even when QA also fired. If either fires, skip the four cases and
 	 * go straight to clamp+actuate (deviation 7). Both mutate cwnd through the pointer,
 	 * so when both fire FI stacks on the QA-reset cwnd (paper Algorithm 1 order). The
 	 * fmt20 branch code reports QA_ADAPTED in preference to FASTINC (QA is the
 	 * more-significant severe-congestion response). */
-	uint32_t adp = smartt_reps_quick_adapt(param, counter, ctx, now, &cwnd, 1 /* src=ack */, tsflow);
-	uint32_t finc = smartt_reps_fast_increase(param, counter, ctx, rtt, ecn, size, ncoal, &cwnd, tsflow);
+	uint32_t qa_fired = smartt_reps_quick_adapt(param, counter, ctx, now, &cwnd, 1 /* src=ack */, tsflow);
+	uint32_t fastinc_fired = smartt_reps_fast_increase(param, counter, ctx, rtt, ecn, pkts_acked,
+							   num_coalesced, &cwnd, tsflow);
 
-	if (adp) {
+	if (qa_fired) {
 		branch = SMARTT_REPS_BRANCH_QA_ADAPTED;
-	} else if (finc) {
+	} else if (fastinc_fired) {
 		branch = SMARTT_REPS_BRANCH_FASTINC;
 	} else {
 		/* --- four-case control loop (§3.2) --- */
 		if (ecn && (rtt <= trtt) && can_decrease) {
-			smartt_reps_apply_fd(param, counter, &cwnd, bdp, size);   /* §3.2.1 */
+			smartt_reps_apply_fd(param, counter, &cwnd, bdp, pkts_acked);   /* §3.2.1 */
 			branch = SMARTT_REPS_BRANCH_FD;
 		} else if (ecn && (rtt > trtt) && can_decrease) {
-			smartt_reps_apply_md(param, counter, &cwnd, rtt, trtt, bdp, size); /* §3.2.2 (MD+FD) */
+			smartt_reps_apply_md(param, counter, &cwnd, rtt, trtt, bdp, pkts_acked); /* §3.2.2 (MD+FD) */
 			branch = SMARTT_REPS_BRANCH_MD;
 		} else if (!ecn && (rtt > trtt)) {
-			smartt_reps_apply_fi(param, counter, &cwnd, size);        /* §3.2.3 */
+			smartt_reps_apply_fi(param, counter, &cwnd, pkts_acked);        /* §3.2.3 */
 			branch = SMARTT_REPS_BRANCH_FI;
 		} else if (!ecn && (rtt <= trtt)) {
 			uint32_t mi = smartt_reps_effective_mi(param);
-			smartt_reps_apply_mi(param, counter, &cwnd, rtt, trtt, mi, size); /* §3.2.4 (MI+FI) */
+			smartt_reps_apply_mi(param, counter, &cwnd, rtt, trtt, mi, pkts_acked); /* §3.2.4 (MI+FI) */
 			branch = SMARTT_REPS_BRANCH_MI;
 		} else {
 			/* ecn && !can_decrease: WTD blocked the decrease -- no window change. */
@@ -795,7 +800,7 @@ static inline void smartt_reps_handle_ack(doca_pcc_dev_event_t *event,
 						 smartt_reps_pacing_rtt_ns(param, ctx), &clamped);
 	if (clamped)
 		branch |= SMARTT_REPS_BRANCH_CLAMPED_BIT;
-	branch |= edge_bits;
+	branch |= trace_bits;
 
 	ctx->cur_rate = rate;
 	results->rate = rate;
@@ -828,13 +833,13 @@ static inline void smartt_reps_handle_nack(doca_pcc_dev_event_t *event,
 			  SMARTT_REPS_TRACE_TSFLOW(now, doca_pcc_dev_get_flowtag(event)) : 0;
 	uint32_t psn = doca_pcc_dev_get_roce_ack_first_sn(event);
 	doca_pcc_dev_ack_nack_cnp_extra_t extra = doca_pcc_dev_get_ack_nack_cnp_extra(event);
-	uint32_t ncoal = extra.num_coalesced;
-	if (ncoal == 0)
-		ncoal = 1;
+	uint32_t num_coalesced = extra.num_coalesced;
+	if (num_coalesced == 0)
+		num_coalesced = 1;
 
-	uint32_t delta = smartt_reps_psn_delta(ctx, counter, psn, ncoal);
-	ctx->acked_pkts = smartt_reps_sat_add16(ctx->acked_pkts, delta);
-	ctx->ignored_pkts = smartt_reps_sat_add16(ctx->ignored_pkts, delta);
+	uint32_t pkts_acked = smartt_reps_track_acked_pkts(ctx, counter, psn, num_coalesced);
+	ctx->acked_pkts = smartt_reps_sat_add16(ctx->acked_pkts, pkts_acked);
+	ctx->ignored_pkts = smartt_reps_sat_add16(ctx->ignored_pkts, pkts_acked);
 
 	/* line 29: cwnd -= 1 MTU (one lost packet's p.size); underflow-guard to min_cwnd. */
 	uint32_t cwnd = ctx->cwnd_fxp16;

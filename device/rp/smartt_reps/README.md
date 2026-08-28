@@ -75,19 +75,20 @@ accumulators.
 
 ## Control law (Algorithm 1, §3.2–3.6.1 — implementation contract)
 
-Per **ACK event** (`DOCA_PCC_DEV_EVNT_ROCE_ACK` = 4), with `size` = ΔPSN packets,
-`ncoal` = `num_coalesced`, `rtt` = stored fabric_rtt, `ecn` = CNP-hold predicate:
+Per **ACK event** (`DOCA_PCC_DEV_EVNT_ROCE_ACK` = 4), with `pkts_acked` = ΔPSN packets
+(the paper's `p.size`), `num_coalesced` = the HW coalescing count, `rtt` = stored
+fabric_rtt, `ecn` = CNP-hold predicate:
 
 ```
-acked  += size   (sat16)          # Alg1 line 4
-ignored += size  (sat16)          # Alg1 line 5   (bytes_ignored, in pkts)
+acked  += pkts_acked  (sat16)     # Alg1 line 4
+ignored += pkts_acked (sat16)     # Alg1 line 5   (bytes_ignored, in pkts)
 if ignored < ignore_target:       # Alg1 lines 8-10: post-QuickAdapt blackout (§3.3)
     counter[ACKS_IGNORED]++ ; emit fmt20(branch=BLACKOUT) ; return (rate unchanged)
 avg_wtd = α·(ecn?1:0) + (1−α)·avg_wtd          # WTD §3.6.1, once per ACK event
 can_decrease = (avg_wtd ≥ wtd_thresh)          # thresh=0 disables WTD gating
-adp  = quick_adapt(now)           # Alg2 (below) — always called, may fire
-finc = fast_increase(size,ncoal)  # Alg3 (below) — always called, may add k·mtu·ncoal
-if adp or finc: goto clamp        # Alg1 lines 15-17 (deviation: we still clamp+actuate)
+qa_fired      = quick_adapt(now)                          # Alg2 (below) — always called, may fire
+fastinc_fired = fast_increase(pkts_acked,num_coalesced)   # Alg3 (below) — always called, may add k·mtu·num_coalesced
+if qa_fired or fastinc_fired: goto clamp   # Alg1 lines 15-17 (deviation: we still clamp+actuate)
 if      ecn and rtt ≤ trtt and can_decrease:  FD          # §3.2.1 Eq.1
 elif    ecn and rtt > trtt and can_decrease:  MD (+FD)    # §3.2.2 Eq.2 ("additionally applies FD")
 elif  ! ecn and rtt > trtt:                   FI          # §3.2.3 Eq.3
@@ -153,9 +154,9 @@ fast_inc_thresh)`:
 
 ```
 if rtt ≤ brtt·fast_inc_thresh and !ecn:
-    count += size (sat16)
+    count += pkts_acked (sat16)
     if (count << 16) > cwnd or fi_active:
-        cwnd += (u64)fast_inc_k · ncoal        # k MTUs per coalesced ACK arrival
+        cwnd += (u64)fast_inc_k · num_coalesced   # k MTUs per coalesced ACK arrival
         fi_active = true; counter[FAST_INC]++ ; emit fmt22 ; return true
     return false                               # still accumulating: four cases run
 else: count = 0; fi_active = false; return false
@@ -310,7 +311,7 @@ in the merged `trace_message_formats[]` table host-side).
 |---|---|---|---|
 | 22 | `cnt_ncoal` | `[31:16]` | `fast_inc_count` — uint16 saturating FastIncrease byte/packet counter |
 | 22 | `cnt_ncoal` | `[15:0]` | `ncoal` — `num_coalesced` (16-bit HW field) |
-| 23 | `delta_ncoal` | `[31:16]` | `delta_pkts` — the ΔPSN-derived acked-packet count for this event (the old `size` local) |
+| 23 | `delta_ncoal` | `[31:16]` | `delta_pkts` — the ΔPSN-derived acked-packet count for this event (the `pkts_acked` local) |
 | 23 | `delta_ncoal` | `[15:0]` | `ncoal` — `num_coalesced` |
 | 24 | `ign_qa` | `[31:1]` | `ignored_pkts` — bytes-ignored-in-packets since the last QuickAdapt fire |
 | 24 | `ign_qa` | `[0]` | `trigger_qa` — 0/1, NACK-armed "fire QuickAdapt at next epoch boundary" flag |
