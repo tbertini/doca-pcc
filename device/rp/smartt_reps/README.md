@@ -357,7 +357,7 @@ like swift/timely; it now carries `tsflow` as arg1 (see BEFORE → AFTER map abo
    paper's pacer-below-1-MTU option is not implemented (incast degree here is 2).
 9. **FastIncrease "per ACK"** scaled by `num_coalesced` (one event may carry many ACKs).
 
-## Hardware validation (2026-07-05, alveo-u50d-01/02 → alveo-u55c-03, 2:1 incast)
+## Hardware validation (2026-07-05, sgs-bluefield-01/02 → hacc-u55c-03, 2:1 incast)
 
 Baseline with the compiled-in (paper-default) vector: **97.32 Gb/s aggregate** over
 10 s; two 20 s confirmation runs: **97.31 / 97.32 Gb/s**. A 13-vector single-axis PPCC

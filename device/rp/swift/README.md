@@ -157,7 +157,7 @@ neither does this implementation: if `t2`/`t4` are missing (0) or inconsistent
 non-stamping responder therefore leaves Swift *visibly inert* (rate pinned at its
 initial value, `ai`/`md` counters frozen at 0, the drop counter climbing at probe
 cadence) rather than silently regulating on total RTT including the remote turnaround.
-Measured on this testbed (2026-07-06): a ConnectX-5 Ex responder (`alveo-u55c-03`)
+Measured on this testbed (2026-07-06): a ConnectX-5 Ex responder (`hacc-u55c-03`)
 reflects probes but **never stamps** (95/95 probes arrived `populated=0` in format 19),
 so Swift against that receiver exercises exactly this drop path by design.
 
@@ -165,7 +165,7 @@ Responder support matrix (measured 2026-07-08; NVIDIA publishes none; the DOCA P
 guide only states that for CCMAD, "responses are handled by the remote node's hardware"
 when no NP process is set, and that non-CCMAD probe formats always require a remote NP
 process):
-- **BlueField-3** (`alveo-u50d-02`): stamps t2/t4 on every probe, in NIC firmware, with
+- **BlueField-3** (`sgs-bluefield-02`): stamps t2/t4 on every probe, in NIC firmware, with
   **no PCC process running at all**; no NP app needed for RP-side Swift.
 - **ConnectX-6** (MT4123 `[15b3:101b]`, fw 20.31.1014, `alveo-v80-01`): stamps **only
   when idle**: 14/15 `populated=3` on a broken/idle flow (`np_turn` ≈ 370 ns, fabric
@@ -174,7 +174,7 @@ process):
   bandwidth frozen at the 2-NACK ratchet plateau (≈34.1 Gb/s): Swift designed-inert,
   exactly as against CX-5. **Not viable as a Swift responder**: the signal disappears
   precisely when congestion exists. (Untested lever: newer CX-6 firmware.)
-- **ConnectX-5 Ex** (`alveo-u55c-03`): never stamps (above).
+- **ConnectX-5 Ex** (`hacc-u55c-03`): never stamps (above).
 
 **Serialization** is *not* subtracted: per the design decision (and matching TIMELY,
 which subtracts none and folds everything into its empirically-retuned thresholds) it is
@@ -193,9 +193,9 @@ registered but inert **by design**, not as a deferral.
 
 ### Setup
 
-Sender `alveo-u50d-01` running `--rp-swift` (algo_id `0xBFFC`, confirmed via PPCC
-`cmd_type=0x0` before collecting), receiver `alveo-u50d-02` running **no PCC process**
-(BF3 firmware answers the probes), background sender `alveo-u55c-03` also running no
+Sender `sgs-bluefield-01` running `--rp-swift` (algo_id `0xBFFC`, confirmed via PPCC
+`cmd_type=0x0` before collecting), receiver `sgs-bluefield-02` running **no PCC process**
+(BF3 firmware answers the probes), background sender `hacc-u55c-03` also running no
 PCC. 40 s per arm, `ib_write_bw -d mlx5_0 -R -x 3 -F -s 16384`, numbers read from
 format 16 with `trace_on` pushed at runtime.
 
@@ -418,7 +418,7 @@ Highlights:
 
 ## Hardware / branch context
 
-- Targets BlueField-3 (DPA) at `alveo-u50d-01`. algo_id `0xBFFC`.
+- Targets BlueField-3 (DPA) at `sgs-bluefield-01`. algo_id `0xBFFC`.
 - Independent sibling of the `timely` (`0xBFFD`) and `dcqcn` (`0xBFFE`) branches: no
   shared algorithm code (disjoint `device/rp/*` trees). The build/host glue is additive
   so all three can merge into one runtime-selectable build; trace format IDs 6-14 mirror

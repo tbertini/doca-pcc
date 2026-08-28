@@ -29,7 +29,7 @@ These are version-controlled here (single source of truth) but need to be
 copied to each BlueField host to run. From a machine with SSH access:
 
 ```bash
-for H in alveo-u50d-01 alveo-u50d-02; do
+for H in sgs-bluefield-01 sgs-bluefield-02; do
     scp tools/timely-prettify.sh tools/mlxreg-pretty.py tbertini@$H:~/
 done
 ```
