@@ -10,7 +10,7 @@ Each algorithm's `device/rp/<algo>/README.md` is the authoritative doc for that 
 
 ## Environment and deployment — read first
 
-- **Nothing in this checkout compiles on this Mac.** `dpacc`, the DOCA SDK, and the hardware live on the BlueField-3 host `alveo-u50d-01` under `/opt/mellanox/doca/applications`. Code flow: edit here → commit → push to `github.com/tbertini/doca-pcc` → pull and build on the BF3 side.
+- **Nothing in this checkout compiles on this Mac.** `dpacc`, the DOCA SDK, and the hardware live on the BlueField-3 host `sgs-bluefield-01` under `/opt/mellanox/doca/applications`. Code flow: edit here → commit → push to `github.com/tbertini/doca-pcc` → pull and build on the BF3 side.
 - This repo is the `pcc` subtree of a full DOCA 3.x tree. DOCA API headers for reference (e.g. `doca_pcc_dev*.h`, `doca_pcc_dev_data_structure_le_bf3.h`) are at `~/Desktop/doca/include/` — grep there to answer "does the DPA API expose X?".
 - The Mac-side benchmark orchestrator (`incast-bench`) lives at `~/Desktop/incast-bench` and talks to the running algorithm via the PPCC register interface (see below).
 

@@ -104,7 +104,7 @@ recompiling.
 
 ### Measured throughput tuning (2-sender incast, 2026-08-10)
 
-Two BlueField-3 senders (`u50d-01`, `u50d-02`) → one CX-5 receiver (`u55c-03`),
+Two BlueField-3 senders (`bluefield-01`, `bluefield-02`) → one CX-5 receiver (`u55c-03`),
 30 s `ib_write_bw`, aggregate sender bandwidth, PPCC overrides only (no rebuild
 between points). Defaults give ~50 Gb/s here with σ ≈ 3 Gb/s over four runs, so
 differences under ~6 Gb/s are not separable from run-to-run noise.
@@ -393,7 +393,7 @@ Highlights:
 
 ## Hardware / branch context
 
-- Tested on BlueField-3 (DPA) at `alveo-u50d-01`.
+- Tested on BlueField-3 (DPA) at `sgs-bluefield-01`.
 - Independent sibling of the `dcqcn` branch — no shared algorithm code, but the build/host glue is structured so both can coexist when merged (format IDs 7–10 are reserved for DCQCN's debug traces, 11–14 for TIMELY's).
 - The default app in `host/pcc.c` is **unchanged from main** — TIMELY is selected at runtime via `--rp-timely` / `-rp-tm`.
 - On a PFC + ECN fabric the NIC's DCQCN co-fires alongside TIMELY: you will see
