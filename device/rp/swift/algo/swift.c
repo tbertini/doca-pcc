@@ -177,7 +177,7 @@ void swift_init(uint32_t algo_idx)
 /*
  * Reciprocal square root in FXP16: (1/sqrt(x)) * 2^16, via the identity
  * 1/sqrt(x) = 2^(-0.5*log2(x)) on the DPA's FXP16 log2/pow2 intrinsics (no float, no
- * sqrt on the DPA). Validated on silicon: within 0.13% of fs_range over 0.1-1024 pkt.
+ * sqrt on the DPA).
  */
 static inline uint32_t swift_recip_sqrt_fxp16(uint32_t x_fxp16)
 {
@@ -483,8 +483,6 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 	uint32_t min_cwnd = param[SWIFT_P_MIN_CWND];
 	uint32_t max_cwnd = param[SWIFT_P_MAX_CWND];
 
-	ccctx->retx_cnt = 0;
-
 	uint32_t cwnd = ccctx->fcwnd;
 	uint32_t cwnd_prev = cwnd;
 
@@ -634,13 +632,12 @@ static inline void swift_handle_nack(doca_pcc_dev_event_t *event,
 	results->rate = rate;
 	results->rtt_req = 0;
 
-	/* Always emitted (ungated): loss is rare and always worth a line. The third
-	 * field packs retx_cnt into bits[31:1] and the reset flag into bit0. */
-	doca_pcc_dev_trace_5(SWIFT_TRACE_FMT_LOSS,
-			     SWIFT_TRACE_TSFLOW(now, doca_pcc_dev_get_flowtag(event)),
-			     subtype,
-			     ((uint64_t)(retx_cnt) << 1) | (reset & 1), cwnd, rate);
-	doca_pcc_dev_trace_flush();
+	/* The third field packs retx_cnt into bits[31:1] and the reset flag into bit0. */
+	SWIFT_TRACE(param, SWIFT_TRACE_FMT_LOSS,
+		    SWIFT_TRACE_TSFLOW(now, doca_pcc_dev_get_flowtag(event)),
+		    subtype,
+		    ((uint64_t)(retx_cnt) << 1) | (reset & 1), cwnd, rate);
+	SWIFT_TRACE_FLUSH(param);
 }
 
 /*
