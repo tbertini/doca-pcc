@@ -971,14 +971,16 @@ static inline void smartt_reps_handle_tx(doca_pcc_dev_event_t *event,
 			probe_out_time_ns = 0;
 			ctx->tx_since_probe_req += 1;
 		}
-		if (unlikely((probe_out_time_ns > ((uint32_t)SMARTT_REPS_ABORT_TIME_NS << ctx->abort_cnt)) ||
+		/* Cap the backoff exponent at use too, not only at growth: in the multi
+		 * app a live algo switch can hand this flow another algorithm's context
+		 * bytes as abort_cnt, so the stored value itself can exceed 31 (UB shift).
+		 * 12 caps the abort threshold at ~1.2 s. */
+		uint32_t abort_threshold = (uint32_t)SMARTT_REPS_ABORT_TIME_NS
+					   << ((ctx->abort_cnt < 12) ? ctx->abort_cnt : 12);
+		if (unlikely((probe_out_time_ns > abort_threshold) ||
 			     (ctx->tx_since_probe_req > 2))) {
 			rtt_req = 1;
-			/* Cap the backoff exponent: 300000 << 14 wraps u32 and << 32 is UB
-			 * (latent in the swift/timely originals; abort_cnt only ever grows).
-			 * 12 caps the abort threshold at ~1.2 s. */
-			if ((probe_out_time_ns > ((uint32_t)SMARTT_REPS_ABORT_TIME_NS << ctx->abort_cnt)) &&
-			    (ctx->abort_cnt < 12))
+			if ((probe_out_time_ns > abort_threshold) && (ctx->abort_cnt < 12))
 				ctx->abort_cnt += 1;
 			ctx->tx_since_probe_req = 1;
 		}
