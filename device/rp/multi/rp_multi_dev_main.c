@@ -13,7 +13,7 @@
 /* Shared per-event summary trace (see pcc_core.c trace_message_formats[]). Defined
  * here, not pulled from one of the four single apps: this file never includes any
  * rp_<algo>_dev_main.c (they all define the doca_pcc_dev_user_* entry points this
- * file defines), and none of the four algo/*.h headers define it either. */
+ * file defines), and none of the four algo headers define it either. */
 #define PCC_TRACE_FMT_EVENT (6)
 
 /* Mux param-change trace (device/rp/multi/README.md): old_select, new_select,
