@@ -39,7 +39,12 @@ table is append-only like every other PPCC contract.
 The four algorithm cores are compiled in unchanged from
 `device/rp/{dcqcn,timely,swift,smartt_reps}/algo/*.c`; only their per-app
 `rp_*_dev_main.c` files are excluded (they define the same `doca_pcc_dev_user_*`
-entry points this file defines). All exported algo symbols are prefixed
+entry points this file defines). One shared safety fix was applied to the
+timely/swift/smartt cores on this branch (adversarial-review finding): the
+RTT-probe abort backoff exponent is clamped to 12 at the shift site, because a
+live algo switch can hand a flow another algorithm's context bytes as
+`abort_cnt` and a shift >= 32 is undefined behavior. Behavior in single-app
+operation is unchanged below ~1.2 s abort thresholds. All exported algo symbols are prefixed
 (`dcqcn_*`, `timely_*`, `swift_*`, `smartt_reps_*`); verified no collisions.
 
 ### `doca_pcc_dev_user_init`
@@ -101,7 +106,8 @@ Trace format 25 (appended to the host table in `pcc_core.c`, append-only):
 Per-flow context (48 bytes) is NOT translated on switch. All four context structs
 begin with `uint32_t cur_rate` (FXP20) at offset 0, and all four treat
 `cur_rate == 0` as the new-flow sentinel. So after a switch the new algorithm
-inherits a valid live rate and misreads the remaining 44 bytes as its own state
+inherits a valid live rate and misreads the remaining context bytes (up to 44;
+TIMELY's struct is 40 bytes total) as its own state
 for the events until it has overwritten them ("one-event glitch"). This is
 accepted and documented; flows converge within a few events.
 
