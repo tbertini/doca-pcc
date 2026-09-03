@@ -49,8 +49,9 @@ entry points this file defines). All exported algo symbols are prefixed
    `multi_mux_init` mirrors `dcqcn_init` (dcqcn.c:114) with algo_id 0xBFFA,
    1 param, 1 counter, desc "multi-algo mux v1.0".
 2. For every port and every slot 0..4:
-   `doca_pcc_dev_init_algo_slot(port, slot, slot, DOCA_PCC_DEV_ALGO_EN);`
-   (same enable constant the single apps use), then the same format-0 init trace
+   `doca_pcc_dev_init_algo_slot(port, slot, slot, algo_en);` with a local
+   `uint32_t algo_en = 1;` (the same pattern all four single apps use; no named
+   enable constant exists in the DOCA headers), then the same format-0 init trace
    the single apps emit.
 3. `*disable_event_bitmask = 0` - the union of the four algorithms' needs.
    SMaRTT consumes ACK events and masks nothing; therefore nothing can be masked.
