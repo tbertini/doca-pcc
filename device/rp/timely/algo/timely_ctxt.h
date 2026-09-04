@@ -27,7 +27,7 @@
 #define TIMELY_CTXT_H_
 
 /*
- * TIMELY per-flow context structure (48 bytes).
+ * TIMELY per-flow context structure (40 bytes, within the 48-byte slot).
  *
  * Implements the per-flow state required by the TIMELY algorithm (see timely.c).
  *
@@ -60,7 +60,7 @@ typedef struct {
 	uint16_t abort_cnt;		/* Number of consecutive abort/retry rounds */
 	uint16_t tx_since_probe_req;	/* Counts TX events between rtt_req=1 and RTT_REQ_SENT flag */
 	uint16_t reserved1;		/* Padding */
-	uint32_t reserved[3];		/* Reserved for future use, pad to 48 bytes total */
+	uint32_t reserved[3];		/* Reserved for future use (struct totals 40 bytes, within the 48-byte cap) */
 } cc_ctxt_timely_t;
 
 #endif /* TIMELY_CTXT_H_ */

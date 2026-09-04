@@ -143,6 +143,40 @@ then
         if [ ${AMALGAMATION_BUILD_MODE} = "true" ]; then
                 APP_INC_LIST="${APP_INC_LIST} -I${DOCA_PCC_DIR}/device/include/rp -I${DOCA_PCC_DIR}/device/adb_gen/"
         fi
+elif [ ${PCC_APP_NAME} = "pcc_rp_multi_app" ]
+then
+        DOCA_PCC_DEV_LIB_NAME="doca_pcc_dev"
+        PCC_DEV_RP_MULTI_DIR=${PCC_APP_DEVICE_SRC_DIR}/rp/multi
+        PCC_DEV_RP_DCQCN_DIR=${PCC_APP_DEVICE_SRC_DIR}/rp/dcqcn
+        PCC_DEV_RP_TIMELY_DIR=${PCC_APP_DEVICE_SRC_DIR}/rp/timely
+        PCC_DEV_RP_SWIFT_DIR=${PCC_APP_DEVICE_SRC_DIR}/rp/swift
+        PCC_DEV_RP_SMARTT_REPS_DIR=${PCC_APP_DEVICE_SRC_DIR}/rp/smartt_reps
+        # Only device/rp/multi's own sources (rp_multi_dev_main.c). The four algos'
+        # rp_*_dev_main.c files are excluded on purpose: they define the same
+        # doca_pcc_dev_user_* entry points rp_multi_dev_main.c defines, so only their
+        # algo/*.c cores (below) are compiled in.
+        PCC_APP_DEVICE_SRCS=`ls ${PCC_DEV_RP_MULTI_DIR}/*.c`
+        PCC_APP_DEVICE_ALGO_SRCS=`ls ${PCC_DEV_RP_DCQCN_DIR}/algo/*.c ${PCC_DEV_RP_TIMELY_DIR}/algo/*.c ${PCC_DEV_RP_SWIFT_DIR}/algo/*.c ${PCC_DEV_RP_SMARTT_REPS_DIR}/algo/*.c`
+        PCC_DEVICE_SRC_FILES="${PCC_APP_DEVICE_SRCS} ${PCC_APP_DEVICE_ALGO_SRCS}"
+        APP_INC_LIST="${DOCA_INC_LIST} -I${PCC_DEV_RP_MULTI_DIR} -I${PCC_DEV_RP_DCQCN_DIR}/algo -I${PCC_DEV_RP_TIMELY_DIR}/algo -I${PCC_DEV_RP_SWIFT_DIR}/algo -I${PCC_DEV_RP_SMARTT_REPS_DIR}/algo"
+        # Device tracing: honor each of the four algorithms' own debug flag exactly as
+        # its single-algo block does, so a multi build can force any subset of formats
+        # 6-24 on from boot.
+        if [ "${DCQCN_DEBUG:-0}" = "1" ]; then
+                DCQCN_DEBUG_FLAG="-DDCQCN_DEBUG"
+        fi
+        if [ "${TIMELY_DEBUG:-0}" = "1" ]; then
+                TIMELY_DEBUG_FLAG="-DTIMELY_DEBUG"
+        fi
+        if [ "${SWIFT_DEBUG:-0}" = "1" ]; then
+                SWIFT_DEBUG_FLAG="-DSWIFT_DEBUG"
+        fi
+        if [ "${SMARTT_REPS_DEBUG:-0}" = "1" ]; then
+                SMARTT_REPS_DEBUG_FLAG="-DSMARTT_REPS_DEBUG"
+        fi
+        if [ ${AMALGAMATION_BUILD_MODE} = "true" ]; then
+                APP_INC_LIST="${APP_INC_LIST} -I${DOCA_PCC_DIR}/device/include/rp -I${DOCA_PCC_DIR}/device/adb_gen/"
+        fi
 elif [ ${PCC_APP_NAME} = "pcc_np_nic_telemetry_app" ]
 then
         DOCA_PCC_DEV_LIB_NAME="doca_pcc_np_dev"
