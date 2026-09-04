@@ -399,10 +399,16 @@ static inline void swift_handle_tx(doca_pcc_dev_event_t *event,
 			probe_out_time_ns = 0;
 			ccctx->tx_since_probe_req += 1;
 		}
-		if (unlikely((probe_out_time_ns > ((uint32_t)SWIFT_ABORT_TIME_NS << ccctx->abort_cnt)) ||
+		/* Clamp the backoff exponent at use and at growth: a shift >= 32 is UB,
+		 * and in the multi app a live algo switch can hand this flow another
+		 * algorithm's context bytes as abort_cnt (up to 65535).
+		 * 12 caps the abort threshold at ~1.2 s. */
+		uint32_t abort_threshold = (uint32_t)SWIFT_ABORT_TIME_NS
+					   << ((ccctx->abort_cnt < 12) ? ccctx->abort_cnt : 12);
+		if (unlikely((probe_out_time_ns > abort_threshold) ||
 			     (ccctx->tx_since_probe_req > 2))) {
 			rtt_req = 1;
-			if (probe_out_time_ns > ((uint32_t)SWIFT_ABORT_TIME_NS << ccctx->abort_cnt))
+			if ((probe_out_time_ns > abort_threshold) && (ccctx->abort_cnt < 12))
 				ccctx->abort_cnt += 1;
 			ccctx->tx_since_probe_req = 1;
 		}

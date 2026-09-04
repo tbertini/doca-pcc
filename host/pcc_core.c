@@ -86,6 +86,9 @@ static char *trace_message_formats[] = {
 	"format 22 - smartt fastinc: tsflow=0x%lx cnt_ncoal=0x%lx rtt=%lu cwnd=%lu rate=%lu\n",
 	"format 23 - smartt sig: tsflow=0x%lx first_sn=%lu delta_ncoal=0x%lx avg_wtd=%lu\n",
 	"format 24 - smartt loss: tsflow=0x%lx first_sn=%lu ign_qa=0x%lx cwnd=%lu rate=%lu\n",
+	/* Format ID 25 owned by the multi-algo mux (pcc_rp_multi_app); emitted on every
+	 * accepted PPCC write to algo_slot 4 (algo_select), old and new value. */
+	"format 25 - multi mux: old_select=%lu new_select=%lu port=%lu slot=%lu. end %u\n",
 	NULL};
 
 /* Default PCC RP threads */
@@ -635,6 +638,32 @@ static doca_error_t rp_smartt_reps_callback(void *param, void *config)
 }
 
 /*
+ * ARGP Callback - Handle PCC RP Multi-algorithm parameter
+ *
+ * @param [in]: Input parameter
+ * @config [in/out]: Program configuration context
+ * @return: DOCA_SUCCESS on success and DOCA_ERROR otherwise
+ */
+static doca_error_t rp_multi_callback(void *param, void *config)
+{
+	struct pcc_config *pcc_cfg = (struct pcc_config *)config;
+	bool rp_multi = *((bool *)param);
+
+	if (user_set_app) {
+		PRINT_ERROR("Error: Can not set multiple runtime application.\n");
+		return DOCA_ERROR_INITIALIZATION;
+	}
+
+	if (rp_multi) {
+		pcc_cfg->app = pcc_rp_multi_app;
+	}
+	user_set_app = true;
+	PRINT_INFO("Info: Set DOCA PCC RP Multi-algorithm application\n");
+
+	return DOCA_SUCCESS;
+}
+
+/*
  * ARGP Callback - Handle PCC NP Switch Telemetry parameter
  *
  * @param [in]: Input parameter
@@ -861,6 +890,7 @@ doca_error_t register_pcc_params(void)
 	struct doca_argp_param *rp_dcqcn_param;
 	struct doca_argp_param *rp_swift_param;
 	struct doca_argp_param *rp_smartt_reps_param;
+	struct doca_argp_param *rp_multi_param;
 	struct doca_argp_param *np_switch_telemetry_param;
 	struct doca_argp_param *threads_list_param;
 	struct doca_argp_param *wait_time_param;
@@ -1006,6 +1036,26 @@ doca_error_t register_pcc_params(void)
 	doca_argp_param_set_callback(rp_smartt_reps_param, rp_smartt_reps_callback);
 	doca_argp_param_set_type(rp_smartt_reps_param, DOCA_ARGP_TYPE_BOOLEAN);
 	result = doca_argp_register_param(rp_smartt_reps_param);
+	if (result != DOCA_SUCCESS) {
+		PRINT_ERROR("Error: Failed to register program param: %s\n", doca_error_get_descr(result));
+		return result;
+	}
+
+	/* Create and register PCC RP Multi-algorithm parameter */
+	result = doca_argp_param_create(&rp_multi_param);
+	if (result != DOCA_SUCCESS) {
+		PRINT_ERROR("Error: Failed to create ARGP param: %s\n", doca_error_get_descr(result));
+		return result;
+	}
+	doca_argp_param_set_short_name(rp_multi_param, "rp-mt");
+	doca_argp_param_set_long_name(rp_multi_param, "rp-multi");
+	doca_argp_param_set_arguments(rp_multi_param, "<PCC Reaction Point Multi-algorithm>");
+	doca_argp_param_set_description(
+		rp_multi_param,
+		"Flag to indicate running as a Reaction Point with all four algorithms (DCQCN, TIMELY, Swift, SMaRTT) loaded in one DPA binary, switchable at runtime with no rebuild via the mux's algo_select PPCC param on algo_slot 4 (0=DCQCN 1=TIMELY 2=Swift 3=SMaRTT). By default the flag is set to false.");
+	doca_argp_param_set_callback(rp_multi_param, rp_multi_callback);
+	doca_argp_param_set_type(rp_multi_param, DOCA_ARGP_TYPE_BOOLEAN);
+	result = doca_argp_register_param(rp_multi_param);
 	if (result != DOCA_SUCCESS) {
 		PRINT_ERROR("Error: Failed to register program param: %s\n", doca_error_get_descr(result));
 		return result;
