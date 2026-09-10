@@ -348,7 +348,8 @@ doca_error_t pcc_init(struct pcc_config *cfg, struct pcc_resources *resources)
 	}
 
 	/* Set DOCA PCC trace message formats */
-	PRINT_DEBUG("[pcc_core.c:pcc_init] registering %d trace format strings\n", 11);
+	PRINT_DEBUG("[pcc_core.c:pcc_init] registering %d trace format strings\n",
+		    (int)(sizeof(trace_message_formats) / sizeof(trace_message_formats[0]) - 1));
 	for (int i = 0; trace_message_formats[i] != NULL; i++)
 		PRINT_DEBUG("[pcc_core.c:pcc_init]   format[%d]: %.60s...\n", i, trace_message_formats[i]);
 	result = doca_pcc_set_trace_message(resources->doca_pcc, trace_message_formats);
