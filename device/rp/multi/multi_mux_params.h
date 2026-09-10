@@ -30,31 +30,19 @@
 /*
  * Single source of truth for the multi-algo mux's PPCC parameter and counter contract.
  *
- * Included by:
- *   - rp_multi_dev_main.c (DPA): multi_mux_init() registers the param/counter from
- *     multi_mux_params[].
- *
  * The mux is a fifth algorithm slot (algo_idx/algo_slot 4, alongside DCQCN=0,
  * TIMELY=1, Swift=2, SMaRTT=3) that carries no congestion-control logic of its own.
  * Its single parameter, algo_select, picks which of the four real algorithms
  * doca_pcc_dev_user_algo() dispatches every event to, at runtime, with no rebuild.
- * See device/rp/multi/README.md for the frozen registry this header must not deviate
- * from.
  *
  * Wire encoding: algo_select is a plain integer (uint32), range [0,3].
  */
 
-/* Multi-algo mux ID. Project convention: TIMELY=0xBFFD, DCQCN=0xBFFE, SWIFT=0xBFFC,
- * SMaRTT=0xBFFB, multi mux=0xBFFA, rtt_template/template=0xBFFF. Verified against
- * README.md's frozen registry. */
+/* Multi-algo mux ID. Project registry: DCQCN=0xBFFE, TIMELY=0xBFFD, Swift=0xBFFC,
+ * SMaRTT=0xBFFB, multi mux=0xBFFA, rtt_template=0xBFFF. */
 #define MULTI_MUX_ALGO_ID 0xBFFA
 
-/*
- * Parameter indices.
- *
- * APPEND-ONLY like every other PPCC contract in this repo, even though v1 ships with
- * a single entry.
- */
+/* Parameter indices. Append-only: orchestrators address parameters by index. */
 typedef enum {
 	/* Selects the active algorithm slot: 0=DCQCN 1=TIMELY 2=Swift 3=SMaRTT */
 	MULTI_MUX_PARAM_ALGO_SELECT = 0,
@@ -62,9 +50,8 @@ typedef enum {
 } multi_mux_params_t;
 
 /*
- * Counter indices. One placeholder counter, never written: the mux itself does no
- * per-event work to count, and the real per-event counts live in each of the four
- * algorithms' own contracts (their own slot's counters).
+ * Counter indices. The single counter is a never-written placeholder; per-event
+ * counts live in each algorithm's own slot.
  */
 typedef enum {
 	MULTI_MUX_COUNTER_RESERVED0 = 0,
@@ -79,7 +66,7 @@ struct multi_mux_param_desc {
 	uint32_t max;
 };
 
-/* THE contract. Edit only here. */
+/* Parameter descriptor table: name, unit, default, min, max. */
 static const struct multi_mux_param_desc multi_mux_params[MULTI_MUX_PARAM_NUM] = {
 	[MULTI_MUX_PARAM_ALGO_SELECT] = {"algo_select", "index", 0, 0, 3},
 };

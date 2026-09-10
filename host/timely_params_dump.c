@@ -23,15 +23,12 @@
  */
 
 /*
- * timely_params_dump: emit the TIMELY PPCC parameter/counter contract as JSON.
- *
- * incast-bench invokes this on the sender host to learn the wire-format contract
- * (algo ID, parameter indices, units, defaults, min/max, counter indices) at
- * session startup. Keeping this as a one-shot dumper avoids drift between the
- * DPA's compiled-in contract and the orchestrator's encoder.
- *
- * No DOCA dependencies — pure stdlib, can be cross-compiled or run on either
- * the BlueField host or the user's Mac.
+ * timely_params_dump: emit the TIMELY PPCC parameter and counter contract
+ * (algo ID, parameter indices, units, defaults, min/max, counter indices) as
+ * JSON on stdout, for the benchmark orchestrator to read at session startup.
+ * It includes the same timely_params.h the DPA program registers from, so the
+ * emitted contract cannot drift from the device.
+ * No DOCA dependencies: pure stdlib.
  */
 
 #include <stdint.h>
@@ -39,6 +36,11 @@
 
 #include "timely_params.h"
 
+/*
+ * Print the TIMELY PPCC contract as a JSON object on stdout
+ *
+ * @return: 0 on success
+ */
 int main(void)
 {
 	printf("{\n");

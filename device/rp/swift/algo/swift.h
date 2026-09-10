@@ -23,15 +23,22 @@
  *
  */
 
+/*
+ * Public interface of the Swift RP algorithm: entry points, the runtime trace gate and
+ * the trace wire format.
+ * Kumar et al., "Swift: Delay is Simple and Effective for Congestion Control in the
+ * Datacenter", SIGCOMM 2020.
+ */
+
 #ifndef SWIFT_H
 #define SWIFT_H
 
 #include "swift_params.h"	/* SWIFT_P_TRACE_ON */
 
 /*
- * Runtime trace gate: formats 6, 15-17 and 19 are compiled in and toggled at runtime
- * via the trace_on PPCC param (default off, no rebuild needed). Format 18 (loss/NACK)
- * is never gated. Building with -DSWIFT_DEBUG forces traces on from boot.
+ * Runtime trace gate: the Swift trace formats are compiled in and toggled at runtime by
+ * the trace_on PPCC param (default off). Building with -DSWIFT_DEBUG forces traces on
+ * from boot.
  */
 #ifdef SWIFT_DEBUG
 #define SWIFT_TRACE_ENABLED(param) (1)
@@ -48,8 +55,7 @@
 #define SWIFT_TRACE_TSFLOW(ts, flow) ((((uint64_t)(uint32_t)(ts)) << 32) | (uint64_t)(uint32_t)(flow))
 
 /*
- * Trace format IDs. Format 6 is the shared per-event summary; IDs 6-14 belong to the
- * generic/DCQCN/TIMELY traces, Swift claims 15-19 (table in README.md).
+ * Trace format IDs. Format 6 is the shared per-event summary; 15-19 are Swift's.
  * The RTT decision is split over formats 16 (delay/target side) and 17 (cwnd/rate
  * side) because a trace line carries only five args; join them by tsflow. Format 19
  * fires for every probe response, including dropped samples, so it may stand alone.
@@ -78,7 +84,7 @@
  * Kumar et al. SIGCOMM 2020) and the FXP20 rate it actuates to.
  *
  * @event [in]: A pointer to an event data structure to be passed to extractor functions
- * @param [in]: A pointer to the array of PPCC parameters (see swift_params.h)
+ * @param [in]: A pointer to the array of PPCC parameters
  * @counter [in/out]: A pointer to the array of PPCC counters (incremented by algo)
  * @algo_ctxt [in/out]: A pointer to the per-flow context retrieved by libpcc.
  * @results [out]: A pointer to the result struct to update rate in HW.

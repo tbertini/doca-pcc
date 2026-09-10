@@ -123,11 +123,8 @@ doca_pcc_test = executable(DOCA_PREFIX + APP_NAME,
 	install: install_apps
 )
 
-# Standalone host-side tool: emits the TIMELY PPCC parameter/counter contract as JSON
-# on stdout. incast-bench invokes this on the sender host at session startup to learn
-# the wire-format contract (algo ID, parameter indices, units, defaults, counter
-# indices), avoiding contract drift between the DPA's compiled-in values and the
-# orchestrator's encoder. No DOCA dependencies.
+# Standalone host-side tool: emits the TIMELY PPCC contract (algo ID, parameter and
+# counter indices, units, defaults) as JSON on stdout. No DOCA dependencies.
 timely_params_dump = executable('timely_params_dump',
 	files(['host/timely_params_dump.c']),
 	c_args : base_c_args,
@@ -136,11 +133,8 @@ timely_params_dump = executable('timely_params_dump',
 	install: install_apps
 )
 
-# Standalone host-side tool: emits the DCQCN PPCC parameter/counter contract as JSON on
-# stdout. incast-bench invokes this on the sender host at session startup to learn the
-# wire-format contract (algo ID, parameter indices, units, defaults, counter indices),
-# avoiding contract drift between the DPA's compiled-in values and the orchestrator's
-# encoder. No DOCA dependencies.
+# Standalone host-side tool: emits the DCQCN PPCC contract (algo ID, parameter and
+# counter indices, units, defaults) as JSON on stdout. No DOCA dependencies.
 dcqcn_params_dump = executable('dcqcn_params_dump',
 	files(['host/dcqcn_params_dump.c']),
 	c_args : base_c_args,
@@ -149,11 +143,8 @@ dcqcn_params_dump = executable('dcqcn_params_dump',
 	install: install_apps
 )
 
-# Standalone host-side tool: emits the Swift PPCC parameter/counter contract as JSON on
-# stdout. incast-bench invokes this on the sender host at session startup to learn the
-# wire-format contract (algo ID, parameter indices, units, defaults, counter indices),
-# avoiding contract drift between the DPA's compiled-in values and the orchestrator's
-# encoder. No DOCA dependencies.
+# Standalone host-side tool: emits the Swift PPCC contract (algo ID, parameter and
+# counter indices, units, defaults) as JSON on stdout. No DOCA dependencies.
 swift_params_dump = executable('swift_params_dump',
 	files(['host/swift_params_dump.c']),
 	c_args : base_c_args,
@@ -162,11 +153,8 @@ swift_params_dump = executable('swift_params_dump',
 	install: install_apps
 )
 
-# Standalone host-side tool: emits the SMaRTT-REPS PPCC parameter/counter contract as
-# JSON on stdout. incast-bench invokes this on the sender host at session startup to
-# learn the wire-format contract (algo ID, parameter indices, units, defaults, counter
-# indices), avoiding contract drift between the DPA's compiled-in values and the
-# orchestrator's encoder. No DOCA dependencies.
+# Standalone host-side tool: emits the SMaRTT-REPS PPCC contract (algo ID, parameter
+# and counter indices, units, defaults) as JSON on stdout. No DOCA dependencies.
 smartt_reps_params_dump = executable('smartt_reps_params_dump',
 	files(['host/smartt_reps_params_dump.c']),
 	c_args : base_c_args,

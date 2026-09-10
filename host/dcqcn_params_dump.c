@@ -23,16 +23,12 @@
  */
 
 /*
- * dcqcn_params_dump: emit the DCQCN PPCC parameter/counter contract as JSON.
- *
- * incast-bench invokes this on the sender host to learn the wire-format contract
- * (algo ID, parameter indices, units, defaults, min/max, counter indices) at session
- * startup. Keeping this a one-shot dumper that #includes the same dcqcn_params.h the
- * DPA registers from avoids drift between the DPA's compiled-in contract and the
- * orchestrator's encoder.
- *
- * No DOCA dependencies -- pure stdlib, can be cross-compiled or run on either the
- * BlueField host or the user's Mac.
+ * dcqcn_params_dump: emit the DCQCN PPCC parameter and counter contract
+ * (algo ID, parameter indices, units, defaults, min/max, counter indices) as
+ * JSON on stdout, for the benchmark orchestrator to read at session startup.
+ * It includes the same dcqcn_params.h the DPA program registers from, so the
+ * emitted contract cannot drift from the device.
+ * No DOCA dependencies: pure stdlib.
  */
 
 #include <stdint.h>
@@ -40,6 +36,11 @@
 
 #include "dcqcn_params.h"
 
+/*
+ * Print the DCQCN PPCC contract as a JSON object on stdout
+ *
+ * @return: 0 on success
+ */
 int main(void)
 {
 	printf("{\n");

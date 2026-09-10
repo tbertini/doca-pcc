@@ -23,24 +23,23 @@
  *
  */
 
+/*
+ * TIMELY RP algorithm: public API and device-trace encodings.
+ *
+ * Mittal et al., "TIMELY: RTT-based Congestion Control for the Datacenter",
+ * SIGCOMM 2015.
+ */
+
 #ifndef TIMELY_H
 #define TIMELY_H
 
 #include "timely_params.h"	/* TIMELY_P_TRACE_ON */
 
 /*
- * Runtime trace gate.
- *
- * TIMELY's format 6/11/12/14 device traces are compiled in unconditionally and
- * gated here, so they can be toggled at runtime via the trace_on PPCC param
- * (param[TIMELY_P_TRACE_ON]) WITHOUT rebuilding the DPA binary. Default is off.
- *
- * Building with -DTIMELY_DEBUG forces them on from boot (e.g. to capture the
- * earliest events, before a param write can land), ignoring the param.
- *
- * Cost when off: one well-predicted branch per event. The trace-record write and
- * the buffer flush -- the expensive part -- are skipped, so an untoggled build is
- * cheaper on the hot path than the old always-emitting TIMELY_DEBUG build.
+ * Runtime trace gate. The format 6/11/12/14 device traces are compiled in
+ * unconditionally and emitted only when the trace_on PPCC param is non-zero, so
+ * they can be toggled without rebuilding the DPA binary. Default is off.
+ * Building with -DTIMELY_DEBUG forces them on from boot and ignores the param.
  */
 #ifdef TIMELY_DEBUG
 #define TIMELY_TRACE_ENABLED(param) (1)
@@ -49,11 +48,10 @@
 #endif
 
 /*
- * Pack an event's device timestamp (ns, 32-bit) and flow_tag (32-bit) into the
- * single uint64_t that is arg1 of every TIMELY trace line (formats 6/11/12/14),
- * printed as tsflow=0x%lx: bits 63:32 = ts, bits 31:0 = flow_tag. The ts half is
- * doca_pcc_dev_get_timestamp(event) and wraps every ~4.295 s (2^32 ns); a parser
- * correlating events across a wrap boundary must unwrap it itself.
+ * arg1 of every TIMELY trace line (formats 6/11/12/14), printed as tsflow=0x%lx:
+ * bits 63:32 = event timestamp (ns), bits 31:0 = flow_tag. The timestamp half
+ * wraps every ~4.295 s (2^32 ns), so a parser correlating events across a wrap
+ * boundary must unwrap it itself.
  */
 #define TIMELY_TRACE_TSFLOW(ts, flow) ((((uint64_t)(uint32_t)(ts)) << 32) | (uint64_t)(uint32_t)(flow))
 
@@ -61,7 +59,7 @@
  * Entry point to TIMELY user algorithm
  * This function starts the algorithm code of a single event for the TIMELY algorithm.
  * It calculates the new rate parameters based on flow context data and event info.
- * (Algorithm 1, §4.3; full citation in timely.c.)
+ * (Algorithm 1, paper Section 4.3.)
  *
  * @event [in]: A pointer to an event data structure to be passed to extractor functions
  * @param [in]: A pointer to an array of parameters that are used to control algo behavior (see PPCC access register)

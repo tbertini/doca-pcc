@@ -29,27 +29,25 @@
 
 /*
  * Single source of truth for Swift's PPCC parameter and counter contract. Included by
- * swift.c (DPA registration) and swift_params_dump.c (host JSON dump for incast-bench).
+ * swift.c (DPA registration) and swift_params_dump.c (host-side JSON dump).
+ * Kumar et al., "Swift: Delay is Simple and Effective for Congestion Control in the
+ * Datacenter", SIGCOMM 2020.
  *
- * Wire encodings (consistent with the timely/dcqcn contracts):
- *   time -> ns (uint32); cwnd -> FXP16 packets (1<<16 = 1.0); ratios/gains -> FXP16;
- *   rate -> FXP20 (1<<20 = 100% line rate).
- * Human-unit conversion is the orchestrator's job, not the device's.
- *
- * Defaults match the compile-time #defines in swift_algo_params.h. The flow-scaling
- * coefficients alpha/beta are derived on-device and intentionally not exposed.
+ * Wire encodings: time -> ns (uint32); cwnd -> FXP16 packets (1<<16 = 1.0);
+ * ratios/gains -> FXP16; rate -> FXP20 (1<<20 = 100% line rate). Human-unit conversion
+ * is the orchestrator's job, not the device's. The flow-scaling coefficients alpha/beta
+ * are derived on-device and intentionally not exposed.
  */
 
-/* Project algo-ID registry: rtt_template=0xBFFF, TIMELY=0xBFFD, DCQCN=0xBFFE. */
+/* Algorithm identifier registered with the PCC framework. */
 #define SWIFT_ALGO_ID  0xBFFC
 
 /*
  * Parameter indices. APPEND-ONLY: orchestrators address params by index, so never
- * reorder or insert. TRACE_ON is diagnostics-only (runtime trace toggle, see swift.h)
- * and stays LAST.
+ * reorder or insert. TRACE_ON is diagnostics-only (runtime trace toggle) and stays LAST.
  */
 enum swift_param_idx {
-	/* --- target delay scaling (paper §3.5) --- */
+	/* --- target delay scaling (paper Section 3.5) --- */
 	SWIFT_P_BASE_TARGET_NS     = 0,  /* base fabric target; absorbs serialization/propagation/fixed delay */
 	SWIFT_P_FS_RANGE_NS        = 1,  /* fs_range: max additional target for small flows */
 	SWIFT_P_FS_MIN_CWND        = 2,  /* fs_min_cwnd: low knee, cwnd<=this -> fs_term=fs_range (FXP16 pkts) */
@@ -60,16 +58,16 @@ enum swift_param_idx {
 	SWIFT_P_AI_FXP16           = 6,  /* ai: additive increment per RTT event (FXP16 pkts) */
 	SWIFT_P_MD_BETA_FXP16      = 7,  /* beta: MD gain on (delay-target)/delay */
 	SWIFT_P_MAX_MDF_FXP16      = 8,  /* max_mdf: max multiplicative decrease per event / on loss */
-	SWIFT_P_MIN_CWND           = 9,  /* min_cwnd floor (FXP16 pkts); paper §3.4 = 0.001 pkt = 66 */
+	SWIFT_P_MIN_CWND           = 9,  /* min_cwnd floor (FXP16 pkts); paper Section 3.4 = 0.001 pkt = 66 */
 	SWIFT_P_MAX_CWND           = 10, /* max_cwnd ceiling (FXP16 pkts), near/above BDP */
 	SWIFT_P_INIT_CWND          = 11, /* new-flow starting window (FXP16 pkts) */
-	SWIFT_P_RETX_RESET_THRESH  = 12, /* consecutive NACKs -> cwnd=min_cwnd (paper §3.6) */
+	SWIFT_P_RETX_RESET_THRESH  = 12, /* consecutive NACKs -> cwnd=min_cwnd (paper Section 3.6) */
 	/* --- cwnd -> rate actuation (BDP identity) --- */
 	SWIFT_P_MSS_BYTES          = 13, /* segment size for BDP (bytes) */
 	SWIFT_P_MIN_RTT_NS         = 14, /* base RTT for BDP + can_decrease/pacing reference (ns) */
 	SWIFT_P_LINE_RATE_MBPS     = 15, /* NIC line rate for BDP (Mbps) */
 	SWIFT_P_MIN_RATE_FXP20     = 16, /* rate floor / effective incast floor (FXP20) */
-	/* --- endpoint window (paper §3.3); inert, no endpoint signal on BF3 (see README) --- */
+	/* --- endpoint window (paper Section 3.3); inert, no endpoint signal on BF3 --- */
 	SWIFT_P_ENDPOINT_TARGET_NS = 17, /* ecwnd target delay (ns); never read */
 	SWIFT_P_ENDPOINT_EWMA_FXP16 = 18,/* ecwnd endpoint-delay EWMA weight; never read */
 	/* --- diagnostics (KEEP LAST) --- */
@@ -79,10 +77,10 @@ enum swift_param_idx {
 
 /*
  * Counter indices. AI/MD count the two Algorithm-1 branches; DELAY_LT/GT_TARGET
- * classify each RTT event vs the flow-scaled target; the rest instrument numeric edge
- * cases. RTT_DROPPED_UNSTAMPED counts probe responses discarded for missing or
- * inconsistent responder stamps; a dropped sample changes nothing (see README,
- * "The delay signal").
+ * classify each RTT event against the flow-scaled target; the rest instrument numeric
+ * edge cases. RTT_DROPPED_UNSTAMPED counts probe responses discarded for missing or
+ * inconsistent responder stamps; a dropped sample leaves cwnd/rate untouched and re-arms
+ * the next probe.
  */
 enum swift_counter_idx {
 	SWIFT_C_EVENTS             = 0,  /* total events dispatched */
@@ -109,9 +107,8 @@ struct swift_param_desc {
 	uint32_t max;
 };
 
-/* THE contract -- edit only here. Every tuning default is a seed (see the FIXMEs in
- * swift_algo_params.h); the paper fixes only min_cwnd = 0.001 pkt.
- * FXP16 cwnd: 0.001=66, 0.5=32768, 1.0=65536, 16=1048576, 64=4194304. */
+/* The parameter contract: name, unit, default, min, max. Edit only here.
+ * FXP16 cwnd reference: 0.001=66, 0.5=32768, 1.0=65536, 16=1048576, 64=4194304. */
 static const struct swift_param_desc swift_params[SWIFT_NUM_PARAMS] = {
 	[SWIFT_P_BASE_TARGET_NS]      = {"base_target_ns",      "ns",        10000,       1,   500000},
 	[SWIFT_P_FS_RANGE_NS]         = {"fs_range_ns",         "ns",        15000,       1,   500000},

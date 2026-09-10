@@ -24,27 +24,17 @@
  */
 
 /*
- * SMaRTT: sender-based ECN + delay windowed congestion control
+ * SMaRTT: sender-based ECN and delay windowed congestion control, the reaction-point
+ * algorithm of Bonato et al., "SMaRTT-REPS: Sender-based Marked Rapidly-adapting Trimmed
+ * & Timed Transport with Recycled Entropies", arXiv:2404.01630, 2024. Implements
+ * Algorithm 1 (four-case loop, Section 3.2), Algorithm 2 (QuickAdapt, Section 3.3),
+ * Algorithm 3 (FastIncrease, Section 3.4) and Wait-to-Decrease (Section 3.6.1).
  *
- * Implementation of the RP (Reaction Point) algorithm from:
- * Bonato et al., "SMaRTT-REPS: Sender-based Marked Rapidly-adapting Trimmed & Timed
- * Transport with Recycled Entropies", arXiv:2404.01630 (Apr 2024).
- *
- * Reference: Algorithm 1 (four-case loop, §3.2), Algorithm 2 (QuickAdapt, §3.3),
- * Algorithm 3 (FastIncrease, §3.4), Wait-to-Decrease (§3.6.1).
- *
- * SMaRTT combines a delay (fabric RTT) signal and an ECN signal per ACK. On BF3, ACKs
- * carry no timestamps, so the delay signal is the last RTT measured on a separate RTT
- * probe event (Swift's fabric_rtt formula + probe-abort machine, ported verbatim). The
- * ECN signal is a CNP-hold predicate (BF3 delivers rate-limited CNPs, not per-packet
- * marks). We keep cwnd (FXP16 packets) as the control variable and actuate it through
- * the FXP20 rate limiter via the BDP identity (BF3 credits are unbacked), exactly like
- * Swift. REPS (§3.6, per-packet load balancing) is intentionally NOT implemented -- BF3
- * exposes no per-packet entropy hook (see README "REPS is intentionally NOT
- * implemented").
- *
- * See device/rp/smartt_reps/README.md for the signal mapping, the numbered deviations,
- * and the frozen PPCC contract.
+ * The delay signal is the fabric RTT measured on separate RTT probe events, because
+ * BlueField-3 ACKs carry no timestamps; the ECN signal is a CNP-hold predicate, because
+ * the hardware delivers rate-limited CNPs rather than per-packet marks. cwnd (FXP16
+ * packets) is the control variable and is actuated through the FXP20 rate limiter via the
+ * BDP identity. REPS (Section 3.6, per-packet load balancing) is not implemented.
  */
 
 #include <doca_pcc_dev.h>
@@ -59,9 +49,7 @@
 
 #pragma clang diagnostic ignored "-Wunused-parameter"
 
-/* Per-event trace emission, gated by SMARTT_REPS_TRACE_ENABLED(param) (see smartt_reps.h):
- * compiled in unconditionally, emitted only when the trace_on PPCC param is set at
- * runtime (or always under -DSMARTT_REPS_DEBUG). The flush is gated too. */
+/* Per-event trace emission and flush, both gated by SMARTT_REPS_TRACE_ENABLED(param). */
 #define SMARTT_REPS_TRACE(param, fmt_id, a1, a2, a3, a4, a5) \
 	do { \
 		if (SMARTT_REPS_TRACE_ENABLED(param)) \
@@ -74,14 +62,13 @@
 			doca_pcc_dev_trace_flush(); \
 	} while (0)
 
-/* Abort time for stuck RTT requests (mirrors rtt_template / TIMELY / Swift). */
+/* Abort time for stuck RTT requests. */
 #define SMARTT_REPS_ABORT_TIME_NS (300000)
 
 /*
  * Calculate wrap around in case of 32-bit timestamp overflow.
- * Local static copy to avoid a duplicate-symbol clash with the ALWAYS_INLINE
- * diff_with_wrap32 in pcc_common_dev.h under -flto (it doesn't survive LTO when pulled
- * into two translation units). Mirrors TIMELY/Swift diff_with_wrap32.
+ * Local static copy: the ALWAYS_INLINE diff_with_wrap32 in pcc_common_dev.h does not
+ * survive -flto when pulled into two translation units.
  */
 static inline uint32_t smartt_reps_diff_with_wrap32(uint32_t greater_num, uint32_t smaller_num)
 {
@@ -97,10 +84,8 @@ static inline uint16_t smartt_reps_sat_add16(uint16_t a, uint32_t b)
 	return (sum > 0xFFFFu) ? 0xFFFFu : (uint16_t)sum;
 }
 
-/* Param/counter indices and default/min/max values come from smartt_reps_params.h (the
- * PPCC contract; single source of truth). Description strings are kept const volatile to
- * prevent dead-code elimination by LTO (they are read out-of-band by the host, never
- * dereferenced on-device, so without volatile the contract strings vanish). */
+/* PPCC contract description strings, read out-of-band by the host and never dereferenced
+ * on device. They are const volatile so LTO does not eliminate them as dead data. */
 const volatile char smartt_reps_desc[] = "SMaRTT v1.0 (Bonato et al. arXiv:2404.01630; REPS omitted)";
 static const volatile char smartt_reps_p_base_rtt_desc[]     = "BASE_RTT_NS, no-load fabric RTT brtt (ns)";
 static const volatile char smartt_reps_p_target_rtt_desc[]   = "TARGET_RTT_NS, congestion threshold trtt (ns)";
@@ -150,9 +135,8 @@ void smartt_reps_init(uint32_t algo_idx)
 
 	doca_pcc_dev_algo_init_metadata(algo_idx, &algo_def, SMARTT_REPS_NUM_PARAMS, SMARTT_REPS_NUM_COUNTERS);
 
-	/* Register every parameter from the contract table. min/max/def come from
-	 * smartt_reps_params[]; permissions=1 (updatable). Passing the table's min (not a
-	 * hardcoded 1) lets fd/mi/trace_on accept a write of 0. */
+	/* Register every parameter from the contract table with permissions=1 (updatable).
+	 * The table's own min is passed, so parameters whose min is 0 accept a write of 0. */
 #define SMARTT_REPS_REG_PARAM(idx, desc) \
 	doca_pcc_dev_algo_init_param(algo_idx, (idx), smartt_reps_params[(idx)].def, smartt_reps_params[(idx)].max, \
 				     smartt_reps_params[(idx)].min, 1, sizeof(desc), (uint64_t)(desc))
@@ -200,12 +184,17 @@ void smartt_reps_init(uint32_t algo_idx)
 #undef SMARTT_REPS_REG_COUNTER
 }
 
-/* ===================== BDP / rate helpers (ported from Swift) ===================== */
+/* ===================== BDP / rate helpers ===================== */
 
 /*
- * bdp_fxp16 = line_rate_mbps * rtt_ns * 2^16 / (mss_bytes * 8000), at the given RTT.
- * cwnd == BDP -> MAX_RATE; cwnd < 1 -> deep sub-line pacing. Callers pass brtt for the
- * paper's BDP (equations, cwnd cap, gamma) and the pacing RTT for actuation.
+ * Compute the bandwidth-delay product at the given RTT:
+ *   bdp_fxp16 = line_rate_mbps * rtt_ns * 2^16 / (mss_bytes * 8000)
+ * Callers pass brtt for the paper's BDP (equation denominators, cwnd cap, gamma) and the
+ * pacing RTT for actuation.
+ *
+ * @param [in]: PPCC parameter array
+ * @rtt_ns [in]: RTT the BDP is evaluated at (ns)
+ * @return: BDP in FXP16 packets, or 0 if the parameters make the denominator zero
  */
 static inline uint32_t smartt_reps_compute_bdp_fxp16(uint32_t *param, uint32_t rtt_ns)
 {
@@ -217,11 +206,13 @@ static inline uint32_t smartt_reps_compute_bdp_fxp16(uint32_t *param, uint32_t r
 }
 
 /*
- * Pacing denominator (ns): the last stored fabric RTT, clamped to
- * [brtt, SMARTT_REPS_PACING_RTT_MAX_NS] (ported from Swift's pacing law). Dividing by
- * the live RTT keeps inflight ~= rate*rtt = cwnd, the defining property of a window;
- * a constant denominator lets inflight grow to cwnd*rtt/brtt exactly when congestion
- * builds. last_rtt_ns is initialised to brtt, so a new flow paces at the base RTT.
+ * Resolve the pacing denominator: the last stored fabric RTT, clamped to
+ * [brtt, SMARTT_REPS_PACING_RTT_MAX_NS]. Dividing by the live RTT keeps inflight equal to
+ * rate*rtt = cwnd, the defining property of a window.
+ *
+ * @param [in]: PPCC parameter array
+ * @ctx [in]: per-flow context holding the last measured fabric RTT
+ * @return: pacing RTT (ns)
  */
 static inline uint32_t smartt_reps_pacing_rtt_ns(uint32_t *param, const cc_ctxt_smartt_reps_t *ctx)
 {
@@ -236,7 +227,14 @@ static inline uint32_t smartt_reps_pacing_rtt_ns(uint32_t *param, const cc_ctxt_
 }
 
 /*
- * Clamp the actuated rate to [min_rate, MAX_RATE], reporting which bound (if any) hit.
+ * Clamp the actuated rate to [min_rate, DOCA_PCC_DEV_MAX_RATE], reporting the two bounds
+ * separately so the caller can drive the two clamp counters distinctly.
+ *
+ * @rate [in]: candidate rate (FXP20)
+ * @min_rate [in]: minimum allowed rate (FXP20)
+ * @clamp_min_flag [out]: set to 1 if rate was below min_rate (may be NULL)
+ * @clamp_max_flag [out]: set to 1 if rate exceeded DOCA_PCC_DEV_MAX_RATE (may be NULL)
+ * @return: clamped rate (FXP20)
  */
 static inline uint32_t smartt_reps_clamp_rate(uint32_t rate, uint32_t min_rate,
 					      uint32_t *clamp_min_flag, uint32_t *clamp_max_flag)
@@ -258,11 +256,17 @@ static inline uint32_t smartt_reps_clamp_rate(uint32_t rate, uint32_t min_rate,
 }
 
 /*
- * Convert cwnd (FXP16 packets) -> clamped FXP20 rate via the BDP identity at the given
- * pacing RTT, recording the clamp counters and (optionally) reporting whether either
- * bound hit so the caller can OR the CLAMPED bit into the trace branch code.
+ * Convert cwnd to the rate that actuates it, via the BDP identity at the given pacing RTT:
  *   rate_fxp20 = clamp((cwnd_fxp16 << 20) / bdp_fxp16(rtt_ns), min_rate, MAX_RATE)
- * bdp == 0 (misconfigured params) -> MAX_RATE (fail open to line rate).
+ * Bumps the two clamp counters and reports whether either bound hit, so the caller can OR
+ * the CLAMPED bit into the trace branch code.
+ *
+ * @param [in]: PPCC parameter array
+ * @counter [in/out]: PPCC counter array (may be NULL)
+ * @cwnd_fxp16 [in]: congestion window (FXP16 packets)
+ * @rtt_ns [in]: pacing RTT the BDP is evaluated at (ns)
+ * @clamped_flag [out]: set to 1 if either bound was hit (may be NULL)
+ * @return: actuated rate (FXP20)
  */
 static inline uint32_t smartt_reps_cwnd_to_rate(uint32_t *param, uint32_t *counter,
 						uint32_t cwnd_fxp16, uint32_t rtt_ns,
@@ -273,7 +277,7 @@ static inline uint32_t smartt_reps_cwnd_to_rate(uint32_t *param, uint32_t *count
 	uint32_t clamp_min = 0, clamp_max = 0;
 
 	if (unlikely(bdp_fxp16 == 0))
-		rate = DOCA_PCC_DEV_MAX_RATE; /* misconfigured params; fail open to line rate */
+		rate = DOCA_PCC_DEV_MAX_RATE; /* fail open to line rate */
 	else
 		rate = (uint32_t)(((uint64_t)cwnd_fxp16 << 20) / bdp_fxp16);
 
@@ -290,10 +294,13 @@ static inline uint32_t smartt_reps_cwnd_to_rate(uint32_t *param, uint32_t *count
 }
 
 /*
- * cwnd clamp per §3.5 / Algorithm 1 line 36: cwnd in [min_cwnd, max_cwnd_frac * BDP].
- * The upper cap is computed per event (BDP depends only on params). If the computed cap
- * is below min_cwnd (misconfig), use min_cwnd so the window is never clamped below its
- * own floor.
+ * Clamp cwnd to [min_cwnd, max_cwnd_frac * BDP] (Algorithm 1 line 36, paper Section 3.5).
+ * If the computed cap is below min_cwnd, min_cwnd wins, so the window is never clamped
+ * below its own floor.
+ *
+ * @param [in]: PPCC parameter array
+ * @cwnd_fxp16 [in]: candidate congestion window (FXP16 packets)
+ * @return: clamped congestion window (FXP16 packets)
  */
 static inline uint32_t smartt_reps_clamp_cwnd(uint32_t *param, uint32_t cwnd_fxp16)
 {
@@ -312,11 +319,12 @@ static inline uint32_t smartt_reps_clamp_cwnd(uint32_t *param, uint32_t cwnd_fxp
 }
 
 /*
- * γ = bdp/reference_bdp (§3.5 "Scaling"): the fi/mi gains are published for a reference
- * fabric (100 Gbps x 12 us, bdp = 150000 bytes) and are multiplied by γ on other
- * fabrics so window growth stays proportional to the BDP. fd/md are NOT scaled (§3.5:
- * always react strongly). bdp_bytes = line_rate_mbps * base_rtt_ns / 8000; saturated
- * against absurd param combinations.
+ * Compute gamma = bdp/reference_bdp (paper Section 3.5 "Scaling"), the factor the fi and
+ * mi gains are multiplied by so window growth stays proportional to the BDP of this
+ * fabric. fd and md are not scaled. bdp_bytes = line_rate_mbps * base_rtt_ns / 8000.
+ *
+ * @param [in]: PPCC parameter array
+ * @return: gamma in FXP16, saturated at UINT32_MAX
  */
 static inline uint32_t smartt_reps_gamma_fxp16(uint32_t *param)
 {
@@ -326,15 +334,14 @@ static inline uint32_t smartt_reps_gamma_fxp16(uint32_t *param)
 	return (g > 0xFFFFFFFFull) ? 0xFFFFFFFFu : (uint32_t)g;
 }
 
-/* Resolve the effective fi gain: the param scaled by γ (§3.5 "Scaling"). */
+/* Resolve the effective fi gain: the parameter scaled by gamma (paper Section 3.5). */
 static inline uint32_t smartt_reps_effective_fi(uint32_t *param)
 {
 	return doca_pcc_dev_fxp_mult(param[SMARTT_REPS_P_FI_FXP16], smartt_reps_gamma_fxp16(param));
 }
 
-/* Resolve the effective mi gain: the param, or (mi==0 sentinel) brtt/(trtt-brtt) derived
- * on device (§3.2.4; = 2.0 at trtt = 1.5*brtt; if trtt <= brtt, misconfig, use 2.0),
- * then scaled by γ (§3.5 "Scaling"). */
+/* Resolve the effective mi gain: the parameter, or, on the mi == 0 sentinel,
+ * brtt/(trtt-brtt) derived on device (paper Section 3.2.4), then scaled by gamma. */
 static inline uint32_t smartt_reps_effective_mi(uint32_t *param)
 {
 	uint32_t mi = param[SMARTT_REPS_P_MI_FXP16];
@@ -350,13 +357,19 @@ static inline uint32_t smartt_reps_effective_mi(uint32_t *param)
 	return doca_pcc_dev_fxp_mult(mi, smartt_reps_gamma_fxp16(param));
 }
 
-/* ===================== ΔPSN acked-packet tracker ===================== */
+/* ===================== delta-PSN acked-packet tracker ===================== */
 
 /*
- * Resolve the packet count acked/delivered since the last ACK/NACK event from the ΔPSN of
- * first_sn, with the num_coalesced fallback, and update the ctxt PSN state. Bumps the
- * psn_anomaly counter on an implausible delta (Δ > max(2*cwnd_pkts + 2, 256)) and falls
- * back to num_coalesced (README signal mapping + Alg1 deviation 5).
+ * Resolve how many packets were acked or delivered since the last ACK/NACK event, from
+ * the delta between first_sn and the stored PSN, and update the PSN state. An implausible
+ * delta (above max(2*cwnd_pkts + 2, 256)) bumps the psn_anomaly counter and falls back to
+ * num_coalesced.
+ *
+ * @ctx [in/out]: per-flow context holding the PSN tracker state
+ * @counter [in/out]: PPCC counter array (may be NULL)
+ * @psn [in]: first_sn of this ACK/NACK event
+ * @num_coalesced [in]: coalesced-packet count reported by the event, used as fallback
+ * @return: packet count acked since the previous event, bounded by the sanity cap
  */
 static inline uint32_t smartt_reps_track_acked_pkts(cc_ctxt_smartt_reps_t *ctx, uint32_t *counter,
 						    uint32_t psn, uint32_t num_coalesced)
@@ -379,10 +392,8 @@ static inline uint32_t smartt_reps_track_acked_pkts(cc_ctxt_smartt_reps_t *ctx, 
 		delta = num_coalesced;
 	}
 
-	/* Bound the num_coalesced fallback by the same sanity cap: it is a raw 16-bit field,
-	 * and an unbounded packet count feeds every downstream acked-proportional term (FI's
-	 * (pkts_acked<<32)/cwnd in particular). With pkts_acked <= 2*cwnd_pkts+2 those terms
-	 * stay in range by construction. */
+	/* The num_coalesced fallback is a raw 16-bit field, so bound it by the same sanity
+	 * cap: it feeds every downstream acked-proportional term. */
 	if (delta > cap)
 		delta = cap;
 
@@ -391,17 +402,22 @@ static inline uint32_t smartt_reps_track_acked_pkts(cc_ctxt_smartt_reps_t *ctx, 
 	return delta;
 }
 
-/* ===================== QuickAdapt (Algorithm 2, §3.3) ===================== */
+/* ===================== QuickAdapt (Algorithm 2, paper Section 3.3) ===================== */
 
 /*
- * QuickAdapt: called per ACK (and per NACK, with src=2). At most one fire per trtt epoch.
- * On fire: cwnd = max(acked, 1 MTU) * qa_scaling; ignore_target = pre-fire cwnd (packets,
- * >=1: Algorithm 2 line 8's bytes_to_ignore = unacked, and the in-flight bytes at fire
- * time ~= the old window); ignored = 0. Epoch boundary always resets qa_epoch_start/acked
- * (Algorithm 2 line 12).
- * Returns 1 if it fired (cwnd changed), 0 otherwise. cwnd is passed/returned by pointer.
- * tsflow is trace-only (SMARTT_REPS_TRACE_TSFLOW(now, flow_tag), precomputed once by the
- * caller): used solely as fmt-21's arg1 below, never read for control decisions.
+ * Run QuickAdapt, called on every ACK and NACK event, firing at most once per trtt epoch.
+ * On fire it sets cwnd = max(acked, 1 MTU) * qa_scaling, arms the blackout with
+ * ignore_target = the pre-fire cwnd in packets (Algorithm 2 line 8) and clears the ignored
+ * count. Crossing an epoch boundary always resets qa_epoch_start and acked (line 12).
+ *
+ * @param [in]: PPCC parameter array
+ * @counter [in/out]: PPCC counter array (may be NULL)
+ * @ctx [in/out]: per-flow context holding the epoch and blackout state
+ * @now [in]: event timestamp (ns)
+ * @cwnd_io [in/out]: congestion window (FXP16 packets), rewritten if QuickAdapt fires
+ * @src [in]: trace annotation, 1 = ACK event, 2 = NACK event
+ * @tsflow [in]: packed timestamp and flow tag, used only as the trace arg1
+ * @return: 1 if QuickAdapt fired and changed cwnd, 0 otherwise
  */
 static inline uint32_t smartt_reps_quick_adapt(uint32_t *param, uint32_t *counter,
 					       cc_ctxt_smartt_reps_t *ctx, uint32_t now,
@@ -411,15 +427,9 @@ static inline uint32_t smartt_reps_quick_adapt(uint32_t *param, uint32_t *counte
 	uint32_t adapted = 0;
 
 	if (smartt_reps_diff_with_wrap32(now, ctx->qa_epoch_start) >= trtt) { /* now >= end */
-		/* "end != 0": no fire before the first full epoch has been established. */
+		/* No fire before the first full epoch has been established. */
 		if ((ctx->flags & SMARTT_REPS_FLAG_TRIGGER_QA) &&
 		    (ctx->flags & SMARTT_REPS_FLAG_QA_EPOCH_VALID)) {
-			/* Algorithm 2 line 8: bytes_to_ignore = unacked. The in-flight bytes at
-			 * fire time ~= the window being replaced, so the blackout is derived from
-			 * the PRE-fire cwnd (already clamped <= max_cwnd by the previous event,
-			 * so it never exceeds one window's worth of packets). Deriving it from
-			 * the new post-cut cwnd would end the blackout early and let the device
-			 * react to signals from packets sent under the old window. */
 			uint32_t prev_cwnd = *cwnd_io;
 			uint32_t ignore_target = prev_cwnd >> 16;    /* bytes_to_ignore ~= old cwnd, pkts */
 			if (prev_cwnd & 0xFFFFu)                      /* round up */
@@ -431,12 +441,9 @@ static inline uint32_t smartt_reps_quick_adapt(uint32_t *param, uint32_t *counte
 
 			uint32_t acked = ctx->acked_pkts;
 			uint32_t qa_floor_pkts = (acked >= 1) ? acked : 1; /* max(acked, mtu) in packets */
-			/* cwnd = max(acked,mtu)*qa_scaling in FXP16 packets (§3.3). Explicit u64
-			 * with saturation: fxp_mult TRUNCATES its u32 result, and
-			 * (qa_floor_pkts<<16)*qa_scaling exceeds u32 for acked > 32768 with
-			 * qa_scaling > 1.0 -- both within the registered param bounds
-			 * (adversarial-review finding: acked=32768, qa=2.0 truncated to 0 =>
-			 * floor collapse). */
+			/* Explicit uint64 with saturation: doca_pcc_dev_fxp_mult truncates its
+			 * uint32 result, and this product exceeds uint32 for parameter values
+			 * that are within the registered bounds. */
 			uint64_t cwnd64 = (((uint64_t)qa_floor_pkts << 16) *
 					   param[SMARTT_REPS_P_QA_SCALING_FXP16]) >> 16;
 			uint32_t cwnd = (cwnd64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : (uint32_t)cwnd64;
@@ -459,15 +466,24 @@ static inline uint32_t smartt_reps_quick_adapt(uint32_t *param, uint32_t *counte
 	return adapted;
 }
 
-/* ===================== FastIncrease (Algorithm 3, §3.4) ===================== */
+/* ===================== FastIncrease (Algorithm 3, paper Section 3.4) ===================== */
 
 /*
- * FastIncrease: engages when rtt <= brtt*fast_inc_thresh and !ecn. While active (or once
- * the byte counter exceeds cwnd), adds fast_inc_k MTUs per coalesced ACK arrival
- * (scaled by num_coalesced, deviation 9). Returns 1 if it fired (cwnd changed), 0 otherwise.
- * cwnd passed/returned by pointer. When !engaged, resets the counter and fi_active.
- * tsflow is trace-only (SMARTT_REPS_TRACE_TSFLOW(now, flow_tag), precomputed once by the
- * caller): used solely as fmt-22's arg1 below, never read for control decisions.
+ * Run FastIncrease, which engages while rtt <= brtt * fast_inc_thresh and ECN is not
+ * asserted. Once active, or once the accumulated packet counter exceeds cwnd, it adds
+ * fast_inc_k MTUs per coalesced ACK arrival. When not engaged it clears the counter and
+ * the fi_active flag.
+ *
+ * @param [in]: PPCC parameter array
+ * @counter [in/out]: PPCC counter array (may be NULL)
+ * @ctx [in/out]: per-flow context holding the FastIncrease state machine
+ * @rtt [in]: last measured fabric RTT (ns)
+ * @ecn [in]: 1 if the ECN predicate is asserted for this event
+ * @pkts_acked [in]: packets acked by this event
+ * @num_coalesced [in]: coalesced-packet count reported by the event
+ * @cwnd_io [in/out]: congestion window (FXP16 packets), rewritten if FastIncrease fires
+ * @tsflow [in]: packed timestamp and flow tag, used only as the trace arg1
+ * @return: 1 if FastIncrease fired and changed cwnd, 0 otherwise
  */
 static inline uint32_t smartt_reps_fast_increase(uint32_t *param, uint32_t *counter,
 						 cc_ctxt_smartt_reps_t *ctx, uint32_t rtt,
@@ -488,9 +504,8 @@ static inline uint32_t smartt_reps_fast_increase(uint32_t *param, uint32_t *coun
 			ctx->flags |= SMARTT_REPS_FLAG_FI_ACTIVE;
 			if (counter != NULL)
 				counter[SMARTT_REPS_C_FAST_INC]++;
-			/* Cast-then-shift (not shift-then-cast, cf. count_fxp16 above): fast_inc_count
-			 * is uint16_t, so "(x & 0xFFFF) << 16" done in promoted-int arithmetic would
-			 * shift into the sign bit (UB) -- widen to uint64_t first, same bit pattern. */
+			/* Widen to uint64_t before shifting: fast_inc_count is uint16_t, so
+			 * shifting it left by 16 in promoted int arithmetic is undefined. */
 			SMARTT_REPS_TRACE(param, SMARTT_REPS_TRACE_FMT_FASTINC, tsflow,
 					  (((uint64_t)(ctx->fast_inc_count & 0xFFFF) << 16) | (num_coalesced & 0xFFFF)),
 					  rtt, *cwnd_io, ctx->cur_rate);
@@ -504,11 +519,17 @@ static inline uint32_t smartt_reps_fast_increase(uint32_t *param, uint32_t *coun
 	return 0;
 }
 
-/* ===================== four-case window updates (§3.2, FXP16 packets) ===================== */
+/* ============ four-case window updates (paper Section 3.2, FXP16 packets) ============ */
 
 /*
- * Fair Decrease (§3.2.1 Eq.1): cwnd -= (cwnd/bdp) * fd * size.
- * Underflow-guarded: if the decrement >= cwnd, collapse to min_cwnd. Bumps FD counter.
+ * Apply Fair Decrease, cwnd -= (cwnd/bdp) * fd * size (Eq. 1, paper Section 3.2.1). If
+ * the decrement would reach or pass cwnd, the window collapses to min_cwnd instead.
+ *
+ * @param [in]: PPCC parameter array
+ * @counter [in/out]: PPCC counter array (may be NULL)
+ * @cwnd_io [in/out]: congestion window (FXP16 packets)
+ * @bdp [in]: bandwidth-delay product at the base RTT (FXP16 packets)
+ * @pkts_acked [in]: packets acked by this event
  */
 static inline void smartt_reps_apply_fd(uint32_t *param, uint32_t *counter,
 					uint32_t *cwnd_io, uint32_t bdp, uint32_t pkts_acked)
@@ -529,9 +550,18 @@ static inline void smartt_reps_apply_fd(uint32_t *param, uint32_t *counter,
 }
 
 /*
- * Multiplicative Decrease (§3.2.2 Eq.2), then additionally applies FD (§3.2.2 text):
+ * Apply Multiplicative Decrease and then Fair Decrease (Eq. 2, paper Section 3.2.2):
  *   dec = ((rtt-trtt)/rtt) * md * size, capped at size MTU; cwnd -= dec; then FD.
- * Requires rtt > trtt > 0 (guaranteed by the caller's branch condition). Underflow-guard.
+ * Requires rtt > trtt > 0, which the caller's branch condition guarantees. If the
+ * decrement would reach or pass cwnd, the window collapses to min_cwnd instead.
+ *
+ * @param [in]: PPCC parameter array
+ * @counter [in/out]: PPCC counter array (may be NULL)
+ * @cwnd_io [in/out]: congestion window (FXP16 packets)
+ * @rtt [in]: last measured fabric RTT (ns)
+ * @trtt [in]: target RTT (ns)
+ * @bdp [in]: bandwidth-delay product at the base RTT (FXP16 packets)
+ * @pkts_acked [in]: packets acked by this event
  */
 static inline void smartt_reps_apply_md(uint32_t *param, uint32_t *counter,
 					uint32_t *cwnd_io, uint32_t rtt, uint32_t trtt,
@@ -553,21 +583,25 @@ static inline void smartt_reps_apply_md(uint32_t *param, uint32_t *counter,
 	if (counter != NULL)
 		counter[SMARTT_REPS_C_MD]++;
 
-	/* §3.2.2: MD additionally applies FD. */
+	/* Paper Section 3.2.2: MD additionally applies FD. */
 	smartt_reps_apply_fd(param, counter, cwnd_io, bdp, pkts_acked);
 }
 
 /*
- * Fair Increase (§3.2.3 Eq.3): cwnd += (size/cwnd) * mtu * fi, with fi γ-scaled (§3.5).
- * mtu == 1.0 == 65536, so (size/cwnd)*mtu = (size<<32)/cwnd in FXP16. Bumps FI counter.
+ * Apply Fair Increase, cwnd += (size/cwnd) * mtu * fi with fi gamma-scaled (Eq. 3, paper
+ * Section 3.2.3). mtu is 1.0 = 65536, so (size/cwnd)*mtu is (size<<32)/cwnd in FXP16.
+ *
+ * @param [in]: PPCC parameter array
+ * @counter [in/out]: PPCC counter array (may be NULL)
+ * @cwnd_io [in/out]: congestion window (FXP16 packets)
+ * @pkts_acked [in]: packets acked by this event
  */
 static inline void smartt_reps_apply_fi(uint32_t *param, uint32_t *counter,
 					uint32_t *cwnd_io, uint32_t pkts_acked)
 {
 	uint32_t cwnd = *cwnd_io;
-	/* (size/cwnd)*mtu in FXP16, saturated: with min_cwnd configured sub-MTU (registered
-	 * floor 66 = 0.001 pkt) the quotient can exceed u32; saturate instead of silently
-	 * truncating (final clamp_cwnd bounds the result either way). */
+	/* (size/cwnd)*mtu in FXP16. The quotient can exceed uint32 when min_cwnd is
+	 * configured below one MTU, so saturate rather than truncate. */
 	uint64_t acked_over_cwnd_mtu64 = (cwnd != 0) ? (((uint64_t)pkts_acked << 32) / cwnd) : 0;
 	uint32_t acked_over_cwnd_mtu = (acked_over_cwnd_mtu64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu :
 				       (uint32_t)acked_over_cwnd_mtu64;
@@ -580,10 +614,17 @@ static inline void smartt_reps_apply_fi(uint32_t *param, uint32_t *counter,
 }
 
 /*
- * Multiplicative Increase (§3.2.4 Eq.4), then additionally applies FI (§3.2.4 text):
+ * Apply Multiplicative Increase and then Fair Increase (Eq. 4, paper Section 3.2.4):
  *   inc = min( ((trtt-rtt)/rtt) * (size/cwnd) * mtu * mi , size MTU ); cwnd += inc; then FI.
- * Requires trtt > rtt (caller's branch), rtt > 0. mi is the effective (possibly derived,
- * γ-scaled) gain. Bumps MI counter.
+ * The caller's branch gives rtt <= trtt; rtt == 0 and rtt == trtt are handled here (ratio term 0).
+ *
+ * @param [in]: PPCC parameter array
+ * @counter [in/out]: PPCC counter array (may be NULL)
+ * @cwnd_io [in/out]: congestion window (FXP16 packets)
+ * @rtt [in]: last measured fabric RTT (ns)
+ * @trtt [in]: target RTT (ns)
+ * @mi [in]: effective, gamma-scaled MI gain (FXP16)
+ * @pkts_acked [in]: packets acked by this event
  */
 static inline void smartt_reps_apply_mi(uint32_t *param, uint32_t *counter,
 					uint32_t *cwnd_io, uint32_t rtt, uint32_t trtt,
@@ -591,8 +632,7 @@ static inline void smartt_reps_apply_mi(uint32_t *param, uint32_t *counter,
 {
 	uint32_t cwnd = *cwnd_io;
 	uint32_t ratio = (rtt != 0) ? (uint32_t)((((uint64_t)(trtt - rtt)) << 16) / rtt) : 0; /* (trtt-rtt)/rtt FXP16 */
-	/* (size/cwnd)*mtu in FXP16, saturated (same sub-MTU min_cwnd rationale as apply_fi;
-	 * Eq.4's min(.., size) cap bounds the final increment regardless). */
+	/* (size/cwnd)*mtu in FXP16, saturated rather than truncated. */
 	uint64_t acked_over_cwnd_mtu64 = (cwnd != 0) ? (((uint64_t)pkts_acked << 32) / cwnd) : 0;
 	uint32_t acked_over_cwnd_mtu = (acked_over_cwnd_mtu64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu :
 				       (uint32_t)acked_over_cwnd_mtu64;
@@ -608,15 +648,22 @@ static inline void smartt_reps_apply_mi(uint32_t *param, uint32_t *counter,
 	if (counter != NULL)
 		counter[SMARTT_REPS_C_MI]++;
 
-	/* §3.2.4: MI is followed by FI. */
+	/* Paper Section 3.2.4: MI is followed by FI. */
 	smartt_reps_apply_fi(param, counter, cwnd_io, pkts_acked);
 }
 
 /* ===================== event handlers ===================== */
 
 /*
- * New flow (cur_rate == 0 sentinel): cwnd = init_cwnd (param 0 => bdp_fxp16), rtt = brtt,
- * avg_wtd = 0, PSN/QA/FI state invalid/zero. Actuate, request first RTT probe.
+ * Initialise a new flow, detected by the cur_rate == 0 sentinel: cwnd = init_cwnd, or the
+ * BDP when init_cwnd is 0; rtt = brtt; all PSN, QuickAdapt and FastIncrease state cleared.
+ * Actuates the initial rate and requests the first RTT probe.
+ *
+ * @event [in]: event being handled
+ * @param [in]: PPCC parameter array
+ * @counter [in/out]: PPCC counter array (may be NULL)
+ * @ctx [out]: per-flow context to initialise
+ * @results [out]: result struct carrying the rate and rtt_req back to hardware
  */
 static inline void smartt_reps_handle_new_flow(doca_pcc_dev_event_t *event,
 					       uint32_t *param,
@@ -625,7 +672,7 @@ static inline void smartt_reps_handle_new_flow(doca_pcc_dev_event_t *event,
 					       doca_pcc_dev_results_t *results)
 {
 	uint32_t now = doca_pcc_dev_get_timestamp(event);
-	/* arg1 for every trace emitted below (see SMARTT_REPS_TRACE_TSFLOW, smartt_reps.h). */
+	/* arg1 for every trace emitted below. */
 	uint64_t tsflow = SMARTT_REPS_TRACE_ENABLED(param) ?
 			  SMARTT_REPS_TRACE_TSFLOW(now, doca_pcc_dev_get_flowtag(event)) : 0;
 	uint32_t init_cwnd = param[SMARTT_REPS_P_INIT_CWND_FXP16];
@@ -634,7 +681,7 @@ static inline void smartt_reps_handle_new_flow(doca_pcc_dev_event_t *event,
 	uint32_t clamped = 0;
 	uint32_t rate;
 
-	if (cwnd == 0) /* both init_cwnd==0 and bdp==0 (misconfig): fall back to 1 MTU */
+	if (cwnd == 0) /* init_cwnd and bdp both 0: fall back to the cwnd floor */
 		cwnd = param[SMARTT_REPS_P_MIN_CWND_FXP16];
 
 	/* No RTT sample yet: pace at brtt. */
@@ -652,7 +699,7 @@ static inline void smartt_reps_handle_new_flow(doca_pcc_dev_event_t *event,
 	ctx->ignored_pkts = 0;
 	ctx->avg_wtd_fxp16 = 0;
 	ctx->fast_inc_count = 0;
-	ctx->flags = 0; /* trigger_qa / fi_active / psn_valid / qa_epoch_valid / cnp_seen / probe all clear */
+	ctx->flags = 0;
 	ctx->abort_cnt = 0;
 	ctx->tx_since_probe_req = 1;
 	ctx->reserved8 = 0;
@@ -669,9 +716,16 @@ static inline void smartt_reps_handle_new_flow(doca_pcc_dev_event_t *event,
 }
 
 /*
- * ACK event (DOCA_PCC_DEV_EVNT_ROCE_ACK = 4) -- THE MAIN LOOP (Algorithm 1, §3.2-3.6.1).
- * Consumes the stored fabric RTT (probe events keep it fresh) and the CNP-hold ECN
- * predicate. See the README control-law block for the exact ordering.
+ * Handle an ACK event: the main control loop (Algorithm 1, paper Sections 3.2 to 3.6.1).
+ * Consumes the stored fabric RTT, kept fresh by probe events, and the CNP-hold ECN
+ * predicate; runs QuickAdapt, FastIncrease and the four-case loop; then clamps cwnd and
+ * actuates the resulting rate.
+ *
+ * @event [in]: event being handled
+ * @param [in]: PPCC parameter array
+ * @counter [in/out]: PPCC counter array (may be NULL)
+ * @ctx [in/out]: per-flow context
+ * @results [out]: result struct carrying the rate and rtt_req back to hardware
  */
 static inline void smartt_reps_handle_ack(doca_pcc_dev_event_t *event,
 					  uint32_t *param,
@@ -683,9 +737,8 @@ static inline void smartt_reps_handle_ack(doca_pcc_dev_event_t *event,
 		counter[SMARTT_REPS_C_ACK_EVENTS]++;
 
 	uint32_t now = doca_pcc_dev_get_timestamp(event);
-	/* arg1 for every trace emitted below (see SMARTT_REPS_TRACE_TSFLOW, smartt_reps.h).
-	 * Computed once and threaded into quick_adapt()/fast_increase() so every trace fired
-	 * from this single event -- fmt 20/21/22/23 -- carries the same tsflow. */
+	/* arg1 for every trace emitted below, computed once and threaded into the QuickAdapt
+	 * and FastIncrease helpers so all traces from this event carry the same tsflow. */
 	uint64_t tsflow = SMARTT_REPS_TRACE_ENABLED(param) ?
 			  SMARTT_REPS_TRACE_TSFLOW(now, doca_pcc_dev_get_flowtag(event)) : 0;
 	uint32_t psn = doca_pcc_dev_get_roce_ack_first_sn(event);
@@ -701,25 +754,24 @@ static inline void smartt_reps_handle_ack(doca_pcc_dev_event_t *event,
 	/* The paper's bdp (equation denominators) stays at the base RTT. */
 	uint32_t bdp  = smartt_reps_compute_bdp_fxp16(param, param[SMARTT_REPS_P_BASE_RTT_NS]);
 
-	/* p.ecn := CNP arrived within the hold window (README signal mapping). */
+	/* p.ecn is asserted when a CNP arrived within the hold window. */
 	uint32_t ecn = 0;
 	if (ctx->flags & SMARTT_REPS_FLAG_CNP_SEEN) {
 		uint32_t since_cnp = smartt_reps_diff_with_wrap32(now, ctx->last_cnp_ts);
 		ecn = (since_cnp <= param[SMARTT_REPS_P_ECN_CNP_HOLD_NS]) ? 1 : 0;
 	}
 
-	/* Alg1 lines 4-5: accumulate acked (QA epoch) and ignored (post-QA blackout). */
+	/* Algorithm 1 lines 4-5: accumulate acked for the QuickAdapt epoch and ignored for
+	 * the post-QuickAdapt blackout. */
 	ctx->acked_pkts = smartt_reps_sat_add16(ctx->acked_pkts, pkts_acked);
 	ctx->ignored_pkts = smartt_reps_sat_add16(ctx->ignored_pkts, pkts_acked);
 
-	/* Raw ACK-signal trace (fmt 23): answers "do ACK events arrive, and is ΔPSN sane?".
-	 * event_sn (doca_pcc_dev_get_sn) is no longer sampled -- dropped from the format,
-	 * see README (sn ~= first_sn + delta, derivable from the ΔPSN reported here anyway). */
+	/* Raw ACK-signal trace: reports arrival and the resolved delta-PSN. */
 	SMARTT_REPS_TRACE(param, SMARTT_REPS_TRACE_FMT_SIG, tsflow, psn,
 			  ((uint64_t)((pkts_acked & 0xFFFF) << 16) | (num_coalesced & 0xFFFF)),
 			  ctx->avg_wtd_fxp16, 0);
 
-	/* Alg1 lines 8-10: post-QuickAdapt blackout (§3.3). While still ignoring the last
+	/* Algorithm 1 lines 8-10: post-QuickAdapt blackout. While still ignoring the last
 	 * window's in-flight bytes, swallow the ACK and leave the rate unchanged. */
 	if (ctx->ignored_pkts < ctx->packets_to_ignore) {
 		if (counter != NULL)
@@ -733,12 +785,12 @@ static inline void smartt_reps_handle_ack(doca_pcc_dev_event_t *event,
 		return;
 	}
 
-	/* WTD §3.6.1: avg_wtd = alpha*(ecn?1:0) + (1-alpha)*avg_wtd, once per ACK event.
-	 * Computed in uint32 FXP16, then capped to 65535 for the uint16 field. */
+	/* Wait-to-Decrease (paper Section 3.6.1): avg_wtd = alpha*(ecn?1:0) +
+	 * (1-alpha)*avg_wtd, computed in uint32 FXP16 and capped for the uint16 field. */
 	{
 		uint32_t alpha = param[SMARTT_REPS_P_WTD_ALPHA_FXP16];
 		uint32_t one_minus_alpha = (alpha <= SMARTT_REPS_FXP16_ONE) ? (SMARTT_REPS_FXP16_ONE - alpha) : 0;
-		uint32_t ecn_term = ecn ? alpha : 0; /* alpha*1 or alpha*0 in FXP16 */
+		uint32_t ecn_term = ecn ? alpha : 0; /* alpha * 1 or alpha * 0, FXP16 */
 		uint32_t decay = doca_pcc_dev_fxp_mult(one_minus_alpha, ctx->avg_wtd_fxp16);
 		uint32_t avg = ecn_term + decay;
 		ctx->avg_wtd_fxp16 = (avg > 0xFFFFu) ? 0xFFFFu : (uint16_t)avg;
@@ -750,15 +802,11 @@ static inline void smartt_reps_handle_ack(doca_pcc_dev_event_t *event,
 	uint32_t trace_bits = (ecn ? SMARTT_REPS_BRANCH_ECN_BIT : 0) |
 			      (can_decrease ? SMARTT_REPS_BRANCH_CAN_DEC_BIT : 0);
 
-	/* Alg1: QuickAdapt (always called) then FastIncrease (always called) -- the README
-	 * control-law block evaluates BOTH before the "if qa_fired or fastinc_fired: goto
-	 * clamp" test.
-	 * fast_increase must run every ACK so its fast_inc_count/fi_active state machine
-	 * stays consistent even when QA also fired. If either fires, skip the four cases and
-	 * go straight to clamp+actuate (deviation 7). Both mutate cwnd through the pointer,
-	 * so when both fire FI stacks on the QA-reset cwnd (paper Algorithm 1 order). The
-	 * fmt20 branch code reports QA_ADAPTED in preference to FASTINC (QA is the
-	 * more-significant severe-congestion response). */
+	/* Both QuickAdapt and FastIncrease are evaluated on every ACK, so the FastIncrease
+	 * state machine stays consistent even when QuickAdapt fires. Both mutate cwnd through
+	 * the pointer, so when both fire FastIncrease stacks on the QuickAdapt-reset cwnd. If
+	 * either fires, the four cases are skipped and the event goes straight to clamp and
+	 * actuate, and the trace branch code reports QuickAdapt in preference. */
 	uint32_t qa_fired = smartt_reps_quick_adapt(param, counter, ctx, now, &cwnd, 1 /* src=ack */, tsflow);
 	uint32_t fastinc_fired = smartt_reps_fast_increase(param, counter, ctx, rtt, ecn, pkts_acked,
 							   num_coalesced, &cwnd, tsflow);
@@ -768,29 +816,29 @@ static inline void smartt_reps_handle_ack(doca_pcc_dev_event_t *event,
 	} else if (fastinc_fired) {
 		branch = SMARTT_REPS_BRANCH_FASTINC;
 	} else {
-		/* --- four-case control loop (§3.2) --- */
+		/* --- four-case control loop (paper Section 3.2) --- */
 		if (ecn && (rtt <= trtt) && can_decrease) {
-			smartt_reps_apply_fd(param, counter, &cwnd, bdp, pkts_acked);   /* §3.2.1 */
+			smartt_reps_apply_fd(param, counter, &cwnd, bdp, pkts_acked);   /* Section 3.2.1 */
 			branch = SMARTT_REPS_BRANCH_FD;
 		} else if (ecn && (rtt > trtt) && can_decrease) {
-			smartt_reps_apply_md(param, counter, &cwnd, rtt, trtt, bdp, pkts_acked); /* §3.2.2 (MD+FD) */
+			smartt_reps_apply_md(param, counter, &cwnd, rtt, trtt, bdp, pkts_acked); /* Section 3.2.2 */
 			branch = SMARTT_REPS_BRANCH_MD;
 		} else if (!ecn && (rtt > trtt)) {
-			smartt_reps_apply_fi(param, counter, &cwnd, pkts_acked);        /* §3.2.3 */
+			smartt_reps_apply_fi(param, counter, &cwnd, pkts_acked);        /* Section 3.2.3 */
 			branch = SMARTT_REPS_BRANCH_FI;
 		} else if (!ecn && (rtt <= trtt)) {
 			uint32_t mi = smartt_reps_effective_mi(param);
-			smartt_reps_apply_mi(param, counter, &cwnd, rtt, trtt, mi, pkts_acked); /* §3.2.4 (MI+FI) */
+			smartt_reps_apply_mi(param, counter, &cwnd, rtt, trtt, mi, pkts_acked); /* Section 3.2.4 */
 			branch = SMARTT_REPS_BRANCH_MI;
 		} else {
-			/* ecn && !can_decrease: WTD blocked the decrease -- no window change. */
+			/* ecn and not can_decrease: Wait-to-Decrease blocked the decrease. */
 			branch = SMARTT_REPS_BRANCH_WTD_BLOCKED;
 			if (counter != NULL)
 				counter[SMARTT_REPS_C_WTD_BLOCKED]++;
 		}
 	}
 
-	/* Alg1 line 36 + §3.5: clamp cwnd to [min_cwnd, max_cwnd_frac * BDP]. */
+	/* Algorithm 1 line 36: clamp cwnd to [min_cwnd, max_cwnd_frac * BDP]. */
 	cwnd = smartt_reps_clamp_cwnd(param, cwnd);
 	ctx->cwnd_fxp16 = cwnd;
 
@@ -811,11 +859,16 @@ static inline void smartt_reps_handle_ack(doca_pcc_dev_event_t *event,
 }
 
 /*
- * NACK event (DOCA_PCC_DEV_EVNT_ROCE_NACK = 5) = trimming/timeout surrogate (Algorithm 1
- * lines 28-34). NACK first_sn is the receiver's expected PSN, so its ΔPSN counts
- * delivered pkts (acked += Δ, ignored += Δ keeps QA's acked measurement honest under
- * go-back-N). cwnd -= 1 MTU (underflow-guarded); trigger_qa = true; if ignored >=
- * ignore_target, QuickAdapt(now).
+ * Handle a NACK event, the trimming and timeout surrogate (Algorithm 1 lines 28-34). NACK
+ * first_sn is the receiver's expected PSN, so its delta counts delivered packets and feeds
+ * both the QuickAdapt epoch and the blackout accumulator. The window loses one MTU,
+ * trigger_qa is set, and QuickAdapt runs once the blackout has been served.
+ *
+ * @event [in]: event being handled
+ * @param [in]: PPCC parameter array
+ * @counter [in/out]: PPCC counter array (may be NULL)
+ * @ctx [in/out]: per-flow context
+ * @results [out]: result struct carrying the rate and rtt_req back to hardware
  */
 static inline void smartt_reps_handle_nack(doca_pcc_dev_event_t *event,
 					   uint32_t *param,
@@ -827,8 +880,7 @@ static inline void smartt_reps_handle_nack(doca_pcc_dev_event_t *event,
 		counter[SMARTT_REPS_C_NACK_EVENTS]++;
 
 	uint32_t now = doca_pcc_dev_get_timestamp(event);
-	/* arg1 for the fmt-24 trace below and threaded into quick_adapt() for fmt-21 (see
-	 * SMARTT_REPS_TRACE_TSFLOW, smartt_reps.h). */
+	/* arg1 for the trace below, also threaded into the QuickAdapt helper. */
 	uint64_t tsflow = SMARTT_REPS_TRACE_ENABLED(param) ?
 			  SMARTT_REPS_TRACE_TSFLOW(now, doca_pcc_dev_get_flowtag(event)) : 0;
 	uint32_t psn = doca_pcc_dev_get_roce_ack_first_sn(event);
@@ -841,7 +893,7 @@ static inline void smartt_reps_handle_nack(doca_pcc_dev_event_t *event,
 	ctx->acked_pkts = smartt_reps_sat_add16(ctx->acked_pkts, pkts_acked);
 	ctx->ignored_pkts = smartt_reps_sat_add16(ctx->ignored_pkts, pkts_acked);
 
-	/* line 29: cwnd -= 1 MTU (one lost packet's p.size); underflow-guard to min_cwnd. */
+	/* Line 29: cwnd -= 1 MTU, the lost packet's p.size, floored at min_cwnd. */
 	uint32_t cwnd = ctx->cwnd_fxp16;
 	uint32_t min_cwnd = param[SMARTT_REPS_P_MIN_CWND_FXP16];
 	if (cwnd > SMARTT_REPS_MTU_FXP16 + min_cwnd)
@@ -849,14 +901,13 @@ static inline void smartt_reps_handle_nack(doca_pcc_dev_event_t *event,
 	else
 		cwnd = min_cwnd;
 
-	/* line 30: trigger_qa = true. */
+	/* Line 30: trigger_qa = true. */
 	ctx->flags |= SMARTT_REPS_FLAG_TRIGGER_QA;
 
-	/* lines 32-34: if ignored >= ignore_target, QuickAdapt now (src=2). */
+	/* Lines 32-34: if ignored >= ignore_target, run QuickAdapt now. */
 	if (ctx->ignored_pkts >= ctx->packets_to_ignore)
 		(void)smartt_reps_quick_adapt(param, counter, ctx, now, &cwnd, 2 /* src=nack */, tsflow);
 
-	/* clamp + actuate; rtt_req = 0. */
 	cwnd = smartt_reps_clamp_cwnd(param, cwnd);
 	ctx->cwnd_fxp16 = cwnd;
 
@@ -875,8 +926,14 @@ static inline void smartt_reps_handle_nack(doca_pcc_dev_event_t *event,
 }
 
 /*
- * CNP event (DOCA_PCC_DEV_EVNT_ROCE_CNP = 2): record the arrival timestamp for the
- * ECN-hold predicate. Decreases happen in the ACK loop via p.ecn; rate unchanged here.
+ * Handle a CNP event by recording the arrival timestamp for the ECN-hold predicate. The
+ * decrease itself happens in the ACK loop via p.ecn, so the rate is unchanged here.
+ *
+ * @event [in]: event being handled
+ * @param [in]: PPCC parameter array
+ * @counter [in/out]: PPCC counter array (may be NULL)
+ * @ctx [in/out]: per-flow context
+ * @results [out]: result struct carrying the rate and rtt_req back to hardware
  */
 static inline void smartt_reps_handle_cnp(doca_pcc_dev_event_t *event,
 					  uint32_t *param,
@@ -895,11 +952,15 @@ static inline void smartt_reps_handle_cnp(doca_pcc_dev_event_t *event,
 }
 
 /*
- * RTT event (DOCA_PCC_DEV_EVNT_RTT = 6): store the fresh fabric RTT for the ACK loop to
- * consume, reset the probe-abort state, re-arm rtt_req=1. Rate unchanged. SMaRTT does not
- * adjust cwnd on probe events (the paper has no probe events; this is the central cadence
- * adaptation -- README Deviation 2). fabric_rtt uses Swift's exact formula with the
- * t2/t4==0 fallback.
+ * Handle an RTT probe response: store the fresh fabric RTT for the ACK loop to consume,
+ * clear the probe-abort state and re-arm the next probe. cwnd and the rate are unchanged,
+ * since the window only moves on ACK and NACK events.
+ *
+ * @event [in]: event being handled
+ * @param [in]: PPCC parameter array
+ * @counter [in/out]: PPCC counter array (may be NULL)
+ * @ctx [in/out]: per-flow context
+ * @results [out]: result struct carrying the rate and rtt_req back to hardware
  */
 static inline void smartt_reps_handle_rtt(doca_pcc_dev_event_t *event,
 					  uint32_t *param,
@@ -910,8 +971,8 @@ static inline void smartt_reps_handle_rtt(doca_pcc_dev_event_t *event,
 	if (counter != NULL)
 		counter[SMARTT_REPS_C_RTT_EVENTS]++;
 
-	/* Drop spurious RTT events not matching a probe we are waiting on (aborted probe).
-	 * Mirrors rtt_template / TIMELY / Swift. */
+	/* Drop RTT events that match no outstanding probe, that is, a response to a probe
+	 * already aborted. */
 	if (unlikely(!(ctx->flags & SMARTT_REPS_FLAG_RTT_PROBE_OUTSTANDING) &&
 		     (ctx->tx_since_probe_req == 0))) {
 		results->rate = ctx->cur_rate;
@@ -928,8 +989,8 @@ static inline void smartt_reps_handle_rtt(doca_pcc_dev_event_t *event,
 
 	uint32_t total_rtt = smartt_reps_diff_with_wrap32(arrival, req_send);
 	uint32_t np_turnaround = 0;
-	/* resp_send/req_recv are populated by the NP for RTT probes; if absent (0), fall
-	 * back to total_rtt (== what TIMELY uses). See README Deviation 2. */
+	/* resp_send and req_recv are populated by the notification point; when either is
+	 * absent the fabric RTT falls back to the total RTT. */
 	if (likely(resp_send != 0 && req_recv != 0))
 		np_turnaround = smartt_reps_diff_with_wrap32(resp_send, req_recv);
 	uint32_t fabric_rtt = (np_turnaround < total_rtt) ? (total_rtt - np_turnaround) : total_rtt;
@@ -942,10 +1003,13 @@ static inline void smartt_reps_handle_rtt(doca_pcc_dev_event_t *event,
 }
 
 /*
- * TX event (DOCA_PCC_DEV_EVNT_ROCE_TX = 3): the RTT-probe abort/retry state machine,
- * ported verbatim from Swift/rtt_template/TIMELY, adapted to this ctxt layout
- * (rtt_probe_outstanding flag, probe_start_ts, abort_cnt, tx_since_probe_req). No cwnd
- * change. Without this machine a single dropped RTT response stalls the flow forever.
+ * Handle a TX event: the RTT-probe abort and retry state machine. Without it a single
+ * dropped RTT response stalls the flow forever. cwnd is unchanged.
+ *
+ * @event [in]: event being handled
+ * @param [in]: PPCC parameter array
+ * @ctx [in/out]: per-flow context holding the probe state machine
+ * @results [out]: result struct carrying the rate and rtt_req back to hardware
  */
 static inline void smartt_reps_handle_tx(doca_pcc_dev_event_t *event,
 					 uint32_t *param,
@@ -971,10 +1035,8 @@ static inline void smartt_reps_handle_tx(doca_pcc_dev_event_t *event,
 			probe_out_time_ns = 0;
 			ctx->tx_since_probe_req += 1;
 		}
-		/* Cap the backoff exponent at use too, not only at growth: in the multi
-		 * app a live algo switch can hand this flow another algorithm's context
-		 * bytes as abort_cnt, so the stored value itself can exceed 31 (UB shift).
-		 * 12 caps the abort threshold at ~1.2 s. */
+		/* The stored abort_cnt is capped at use as well as at growth: a shift by
+		 * 32 or more is undefined behaviour. */
 		uint32_t abort_threshold = (uint32_t)SMARTT_REPS_ABORT_TIME_NS
 					   << ((ctx->abort_cnt < 12) ? ctx->abort_cnt : 12);
 		if (unlikely((probe_out_time_ns > abort_threshold) ||
@@ -1027,9 +1089,8 @@ doca_pcc_dev_error_t smartt_reps_set_algo_params(uint32_t param_id_base,
 						 const uint32_t *new_param_values,
 						 uint32_t *params)
 {
-	/* Reject writes that would run off the end of the param array. param_id_base and
-	 * param_num are bounded individually AND together: param_id_base+param_num must stay
-	 * within SMARTT_REPS_NUM_PARAMS, otherwise the copy below writes OOB. */
+	/* Reject writes that would run off the end of the param array: param_id_base and
+	 * param_num are bounded individually and as a sum. */
 	if ((param_id_base >= SMARTT_REPS_NUM_PARAMS) ||
 	    (param_num > SMARTT_REPS_NUM_PARAMS) ||
 	    (param_id_base + param_num > SMARTT_REPS_NUM_PARAMS))
@@ -1038,13 +1099,9 @@ doca_pcc_dev_error_t smartt_reps_set_algo_params(uint32_t param_id_base,
 	if ((new_param_values == NULL) || (params == NULL))
 		return DOCA_PCC_DEV_STATUS_FAIL;
 
-	/* Commit the validated values into the live param array. The framework does NOT
-	 * auto-copy: per the doca_pcc_dev_user_set_algo_params contract, returning OK means
-	 * "the callback set them" (FAIL means "nothing changed"). Without this loop, the
-	 * array returned by doca_pcc_dev_get_algo_params() keeps the init-time defaults, so
-	 * PPCC writes read back correctly (register image) yet never reach the running
-	 * algorithm. Range is already enforced by the min/max registered in
-	 * smartt_reps_init(). */
+	/* Commit the validated values into the live param array: the framework does not copy
+	 * them, so returning OK means this callback set them. Range is already enforced by
+	 * the min and max registered for each parameter. */
 	for (uint32_t i = 0; i < param_num; i++)
 		params[param_id_base + i] = new_param_values[i];
 

@@ -23,10 +23,12 @@
  */
 
 /*
- * swift_params_dump: emit the Swift PPCC parameter/counter contract as JSON.
- * The orchestrator runs this at session startup; #including the same swift_params.h
- * the DPA registers from keeps its encoder in sync with the device.
- * No DOCA dependencies -- pure stdlib.
+ * swift_params_dump: emit the Swift PPCC parameter and counter contract
+ * (algo ID, parameter indices, units, defaults, min/max, counter indices) as
+ * JSON on stdout, for the benchmark orchestrator to read at session startup.
+ * It includes the same swift_params.h the DPA program registers from, so the
+ * emitted contract cannot drift from the device.
+ * No DOCA dependencies: pure stdlib.
  */
 
 #include <stdint.h>
@@ -34,6 +36,11 @@
 
 #include "swift_params.h"
 
+/*
+ * Print the Swift PPCC contract as a JSON object on stdout
+ *
+ * @return: 0 on success
+ */
 int main(void)
 {
 	printf("{\n");

@@ -91,7 +91,7 @@ then
         PCC_APP_DEVICE_ALGO_SRCS=`ls ${PCC_DEV_RP_DCQCN_DIR}/algo/*.c`
         PCC_DEVICE_SRC_FILES="${PCC_APP_DEVICE_SRCS} ${PCC_APP_DEVICE_ALGO_SRCS}"
         APP_INC_LIST="${DOCA_INC_LIST} -I${PCC_DEV_RP_DCQCN_DIR}/algo"
-        # Device tracing: default-off (was hardwired). DCQCN_DEBUG=1 enables format 6-10.
+        # Device tracing: default-off. DCQCN_DEBUG=1 enables formats 6-10.
         if [ "${DCQCN_DEBUG:-0}" = "1" ]; then
                 DCQCN_DEBUG_FLAG="-DDCQCN_DEBUG"
         fi
@@ -106,7 +106,7 @@ then
         PCC_APP_DEVICE_ALGO_SRCS=`ls ${PCC_DEV_RP_TIMELY_DIR}/algo/*.c`
         PCC_DEVICE_SRC_FILES="${PCC_APP_DEVICE_SRCS} ${PCC_APP_DEVICE_ALGO_SRCS}"
         APP_INC_LIST="${DOCA_INC_LIST} -I${PCC_DEV_RP_TIMELY_DIR}/algo"
-        # Debug tracing: default-off. Build with TIMELY_DEBUG=1 to enable format 6/11/12/14.
+        # Device tracing: default-off. TIMELY_DEBUG=1 enables formats 6, 11, 12 and 14.
         if [ "${TIMELY_DEBUG:-0}" = "1" ]; then
                 TIMELY_DEBUG_FLAG="-DTIMELY_DEBUG"
         fi
@@ -121,7 +121,7 @@ then
         PCC_APP_DEVICE_ALGO_SRCS=`ls ${PCC_DEV_RP_SWIFT_DIR}/algo/*.c`
         PCC_DEVICE_SRC_FILES="${PCC_APP_DEVICE_SRCS} ${PCC_APP_DEVICE_ALGO_SRCS}"
         APP_INC_LIST="${DOCA_INC_LIST} -I${PCC_DEV_RP_SWIFT_DIR}/algo"
-        # Debug tracing: default-off. Build with SWIFT_DEBUG=1 to force formats 6, 15-17 and 19 on.
+        # Device tracing: default-off. SWIFT_DEBUG=1 enables formats 6, 15-17 and 19.
         if [ "${SWIFT_DEBUG:-0}" = "1" ]; then
                 SWIFT_DEBUG_FLAG="-DSWIFT_DEBUG"
         fi
@@ -136,7 +136,7 @@ then
         PCC_APP_DEVICE_ALGO_SRCS=`ls ${PCC_DEV_RP_SMARTT_REPS_DIR}/algo/*.c`
         PCC_DEVICE_SRC_FILES="${PCC_APP_DEVICE_SRCS} ${PCC_APP_DEVICE_ALGO_SRCS}"
         APP_INC_LIST="${DOCA_INC_LIST} -I${PCC_DEV_RP_SMARTT_REPS_DIR}/algo"
-        # Debug tracing: default-off. Build with SMARTT_REPS_DEBUG=1 to force formats 20-24 on.
+        # Device tracing: default-off. SMARTT_REPS_DEBUG=1 enables formats 20-24.
         if [ "${SMARTT_REPS_DEBUG:-0}" = "1" ]; then
                 SMARTT_REPS_DEBUG_FLAG="-DSMARTT_REPS_DEBUG"
         fi
@@ -151,17 +151,15 @@ then
         PCC_DEV_RP_TIMELY_DIR=${PCC_APP_DEVICE_SRC_DIR}/rp/timely
         PCC_DEV_RP_SWIFT_DIR=${PCC_APP_DEVICE_SRC_DIR}/rp/swift
         PCC_DEV_RP_SMARTT_REPS_DIR=${PCC_APP_DEVICE_SRC_DIR}/rp/smartt_reps
-        # Only device/rp/multi's own sources (rp_multi_dev_main.c). The four algos'
-        # rp_*_dev_main.c files are excluded on purpose: they define the same
-        # doca_pcc_dev_user_* entry points rp_multi_dev_main.c defines, so only their
-        # algo/*.c cores (below) are compiled in.
+        # Only the algo/*.c cores of the four algorithms are compiled in: their
+        # rp_*_dev_main.c files define the same doca_pcc_dev_user_* entry points as
+        # rp_multi_dev_main.c.
         PCC_APP_DEVICE_SRCS=`ls ${PCC_DEV_RP_MULTI_DIR}/*.c`
         PCC_APP_DEVICE_ALGO_SRCS=`ls ${PCC_DEV_RP_DCQCN_DIR}/algo/*.c ${PCC_DEV_RP_TIMELY_DIR}/algo/*.c ${PCC_DEV_RP_SWIFT_DIR}/algo/*.c ${PCC_DEV_RP_SMARTT_REPS_DIR}/algo/*.c`
         PCC_DEVICE_SRC_FILES="${PCC_APP_DEVICE_SRCS} ${PCC_APP_DEVICE_ALGO_SRCS}"
         APP_INC_LIST="${DOCA_INC_LIST} -I${PCC_DEV_RP_MULTI_DIR} -I${PCC_DEV_RP_DCQCN_DIR}/algo -I${PCC_DEV_RP_TIMELY_DIR}/algo -I${PCC_DEV_RP_SWIFT_DIR}/algo -I${PCC_DEV_RP_SMARTT_REPS_DIR}/algo"
-        # Device tracing: honor each of the four algorithms' own debug flag exactly as
-        # its single-algo block does, so a multi build can force any subset of formats
-        # 6-24 on from boot.
+        # Device tracing: each algorithm keeps its own debug flag, so a multi build can
+        # enable any subset of formats 6-24 from boot.
         if [ "${DCQCN_DEBUG:-0}" = "1" ]; then
                 DCQCN_DEBUG_FLAG="-DDCQCN_DEBUG"
         fi

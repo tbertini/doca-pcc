@@ -55,7 +55,7 @@
 
 /*
  * Additive increase step R_AI = 40 Mbps, expressed as FXP20 fraction of line rate.
- * For 100 Gbps: 40e6 / 100e9 * (1<<20) = 419.43 ≈ 419
+ * For 100 Gbps: 40e6 / 100e9 * (1<<20) = 419.43, rounded to 419
  * Paper Section 3.1: "target rate is increased in fixed steps R_AI"
  */
 #define DCQCN_R_AI (419)
@@ -66,7 +66,7 @@
  */
 #define DCQCN_R_HAI (5 * DCQCN_R_AI)
 
-/* Initial alpha = 1.0 in FXP16 (paper Section 3.1, footnote 1: "Initial value of α is 1") */
+/* Initial alpha = 1.0 in FXP16 (paper Section 3.1, footnote 1: "Initial value of alpha is 1") */
 #define DCQCN_INITIAL_ALPHA (1 << 16)
 
 /* New flow starting rate = 100% line rate in FXP20 (paper Section 3.1: "sends at full line rate") */
@@ -75,7 +75,7 @@
 /* Minimum rate floor in FXP20 */
 #define DCQCN_MIN_RATE (1 << 6)
 
-/* Maximum values for parameter validation */
+/* Maximum rate for parameter validation (FXP20, 100% line rate) */
 #define DCQCN_RATE_MAX (1 << 20)
 
 #endif /* _DCQCN_ALGO_PARAMS_H_ */

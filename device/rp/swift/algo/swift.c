@@ -26,14 +26,12 @@
 /*
  * Swift: delay-based, window-AIMD congestion control (RP side).
  * Kumar et al., "Swift: Delay is Simple and Effective for Congestion Control in the
- * Datacenter", SIGCOMM 2020 -- Algorithm 1 (§3.2) with the flow-scaled target (§3.5).
+ * Datacenter", SIGCOMM 2020: Algorithm 1 (paper Section 3.2) with the flow-scaled
+ * target delay (paper Section 3.5).
  *
- * cwnd is the control variable; BF3 has no usable credit actuator, so cwnd is actuated
+ * cwnd is the control variable. Credits are unbacked on BF3, so cwnd is actuated
  * through the FXP20 rate limiter as rate = cwnd/BDP(rtt) (swift_cwnd_to_rate).
- * Fabric-only by design: BF3 exposes no endpoint-delay signal (the RoCE path never
- * touches the host, and the firmware probe turnaround is a fixed ~106 ns, measured
- * load-invariant), so the endpoint window (paper §3.3) stays registered but inert.
- * See README "The endpoint window (§3.3): measured dead on BF3".
+ * Fabric-only: the endpoint window (paper Section 3.3) stays registered but inert.
  */
 
 #include <doca_pcc_dev.h>
@@ -48,7 +46,7 @@
 
 #pragma clang diagnostic ignored "-Wunused-parameter"
 
-/* Trace emission, gated at runtime by the trace_on PPCC param (see swift.h). */
+/* Trace emission, gated at runtime by the trace_on PPCC param. */
 #define SWIFT_TRACE(param, fmt_id, a1, a2, a3, a4, a5) \
 	do { \
 		if (SWIFT_TRACE_ENABLED(param)) \
@@ -61,25 +59,25 @@
 			doca_pcc_dev_trace_flush(); \
 	} while (0)
 
-/* Abort time for stuck RTT requests (mirrors rtt_template / TIMELY). */
+/* Abort time for stuck RTT requests. */
 #define SWIFT_ABORT_TIME_NS (300000)
 
 /*
- * 32-bit wrap-safe timestamp difference. 
- * uint32_t goes from 0 to UINT32_MAX, if greater_num is smaller than smaller_num
- * it means that it exceeded this range, so its true value is greater_num + (UINT32_MAX + 1) * number of times it went over
- * however if it wrapped 10 times the resulting uint32_t would be the same as if it wrapped once only.
- * We have to add 1 because the step from UINT32_MAX to 0 is UINT32_MAX+1 = 0, however that +1 gets lost.
+ * Elapsed time between two uint32_t timestamps, correcting for a single counter wrap.
+ *
+ * @greater_num [in]: the later timestamp (ns)
+ * @smaller_num [in]: the earlier timestamp (ns)
+ * @return: greater_num - smaller_num (ns)
  */
 static inline uint32_t swift_diff_with_wrap32(uint32_t greater_num, uint32_t smaller_num)
 {
 	if (greater_num < smaller_num)
-		return UINT32_MAX - smaller_num + greater_num + 1;	/* same as (UINT32_MAX + greater_num + 1) - smaller_num */
+		return UINT32_MAX - smaller_num + greater_num + 1;	/* the wrap step itself costs one tick */
 	return greater_num - smaller_num;
 }
 
-/* Contract descriptor strings. const volatile prevents LTO dead-code elimination:
- * they are read out-of-band by the host, never dereferenced on-device. */
+/* Contract descriptor strings. const volatile prevents dead-code elimination: they are
+ * read out-of-band by the host, never dereferenced on-device. */
 const volatile char swift_desc[] = "Swift v1.0 fabric-only (Kumar et al. SIGCOMM 2020)";
 static const volatile char swift_p_base_target_desc[]   = "BASE_TARGET_NS, base fabric target delay (ns)";
 static const volatile char swift_p_fs_range_desc[]      = "FS_RANGE_NS, max additional target for small flows (ns)";
@@ -127,8 +125,8 @@ void swift_init(uint32_t algo_idx)
 
 	doca_pcc_dev_algo_init_metadata(algo_idx, &algo_def, SWIFT_NUM_PARAMS, SWIFT_NUM_COUNTERS);
 
-	/* Register from the contract table. Passing the table's min (not a hardcoded 1)
-	 * lets hop_scale and trace_on accept a write of 0. */
+	/* Registering the table's min (not a hardcoded 1) is what lets hop_scale and
+	 * trace_on accept a write of 0. */
 #define SWIFT_REG_PARAM(idx, desc) \
 	doca_pcc_dev_algo_init_param(algo_idx, (idx), swift_params[(idx)].def, swift_params[(idx)].max, \
 				     swift_params[(idx)].min, 1, sizeof(desc), (uint64_t)(desc))
@@ -175,26 +173,33 @@ void swift_init(uint32_t algo_idx)
 }
 
 /*
- * Reciprocal square root in FXP16: (1/sqrt(x)) * 2^16, via the identity
- * 1/sqrt(x) = 2^(-0.5*log2(x)) on the DPA's FXP16 log2/pow2 intrinsics (no float, no
- * sqrt on the DPA).
+ * Reciprocal square root in FXP16, via the identity 1/sqrt(x) = 2^(-0.5*log2(x)) on the
+ * DPA's FXP16 log2/pow2 intrinsics. The DPA has no float and no sqrt.
+ *
+ * @x_fxp16 [in]: operand (FXP16)
+ * @return: 1/sqrt(x_fxp16) in FXP16, or 0 when x_fxp16 is 0
  */
 static inline uint32_t swift_recip_sqrt_fxp16(uint32_t x_fxp16)
 {
 	if (x_fxp16 == 0)
-		return 0; /* guard log2(0); callers keep cwnd >= min_cwnd > 0 */
+		return 0; /* guard log2(0) */
 	int32_t log2_fxp16 = (int32_t)doca_pcc_dev_fxp_log2(x_fxp16);
 	int32_t neg_half_log2 = -(log2_fxp16 / 2); /* -0.5 * log2(x), FXP16 (signed) */
 	return doca_pcc_dev_fxp_power2((uint32_t)neg_half_log2);
 }
 
 /*
- * Flow-scaled target delay (paper §3.5):
+ * Flow-scaled target delay (paper Section 3.5):
  *   t = base_target + num_hops*hop_scale + max(0, min(alpha/sqrt(fcwnd) + beta, fs_range))
  * Since beta = -alpha*invsqrt(fs_max), the scaled term collapses to a linear
  * interpolation of fs_range over the 1/sqrt(cwnd) axis between the knees:
  *   fs_term = fs_range * (invsqrt(cwnd) - invsqrt(fs_max)) / (invsqrt(fs_min) - invsqrt(fs_max))
  * clamped to [0, fs_range].
+ *
+ * @param [in]: PPCC parameter array
+ * @cwnd_fxp16 [in]: current fabric window (FXP16 packets)
+ * @counter [in/out]: PPCC counter array, may be NULL
+ * @return: target delay (ns)
  */
 static inline uint32_t swift_flow_scaled_target(uint32_t *param, uint32_t cwnd_fxp16, uint32_t *counter)
 {
@@ -234,10 +239,13 @@ static inline uint32_t swift_flow_scaled_target(uint32_t *param, uint32_t cwnd_f
 }
 
 /*
- * Pacing denominator (ns): the last usable fabric RTT sample, clamped to
+ * Pacing denominator: the last usable fabric RTT sample, clamped to
  * [min_rtt, SWIFT_PACING_RTT_MAX_NS]. Dividing by the live RTT keeps
- * inflight ~= rate*rtt = cwnd, the defining property of a window (see README).
- * No sample yet (zero-filled ctxt) falls back to min_rtt.
+ * inflight ~= rate*rtt = cwnd, the defining property of a window.
+ *
+ * @param [in]: PPCC parameter array
+ * @ccctx [in]: per-flow Swift context
+ * @return: pacing RTT (ns); min_rtt when no sample has been taken yet
  */
 static inline uint32_t swift_pacing_rtt_ns(uint32_t *param, const cc_ctxt_swift_t *ccctx)
 {
@@ -252,23 +260,35 @@ static inline uint32_t swift_pacing_rtt_ns(uint32_t *param, const cc_ctxt_swift_
 }
 
 /*
- * BDP in FXP16 packets at the given RTT:
- *   bdp_fxp16 = line_rate_mbps * rtt_ns * 2^16 / (mss_bytes * 8000)   [1e6*1e-9 = 1e-3]
+ * Bandwidth-delay product in FXP16 packets at the given RTT:
+ *   bdp_fxp16 = line_rate_mbps * rtt_ns * 2^16 / (mss_bytes * 8000)
  * The caller maps rate_fxp20 = cwnd_fxp16 * 2^20 / bdp_fxp16.
- * mss_bytes = a packet's payload size in bytes
+ *
+ * @param [in]: PPCC parameter array
+ * @rtt_ns [in]: RTT to evaluate the BDP at (ns)
+ * @return: BDP in FXP16 packets, or 0 when mss_bytes is 0
  */
 static inline uint32_t swift_compute_bdp_fxp16(uint32_t *param, uint32_t rtt_ns)
 {
 	uint64_t num = (uint64_t)param[SWIFT_P_LINE_RATE_MBPS] * rtt_ns * (1ull << 16);
 
-	/* 8000 = 8*1000, 8 for bytes to bits and 10^3 comes from Mbps->bits/s (10^6) and ns->s (10^-9) */
+	/* 8000 = 8 bits/byte * 1e3, the Mbps (1e6) and ns (1e-9) scale factors combined */
 	uint64_t den = (uint64_t)param[SWIFT_P_MSS_BYTES] * 8000ull;
 	if (unlikely(den == 0))
 		return 0;
 	return (uint32_t)(num / den);
 }
 
-/* Clamp the actuated rate to [min_rate, MAX_RATE], reporting which bound hit. */
+/*
+ * Clamp the actuated rate to [min_rate, DOCA_PCC_DEV_MAX_RATE], reporting the two bounds
+ * separately so the caller can drive the clamp counters independently.
+ *
+ * @rate [in]: candidate rate (FXP20)
+ * @min_rate [in]: minimum allowed rate (FXP20)
+ * @clamp_min_flag [out]: set to 1 if rate was below min_rate (may be NULL)
+ * @clamp_max_flag [out]: set to 1 if rate exceeded DOCA_PCC_DEV_MAX_RATE (may be NULL)
+ * @return: clamped rate (FXP20)
+ */
 static inline uint32_t swift_clamp_rate(uint32_t rate, uint32_t min_rate,
 					uint32_t *clamp_min_flag, uint32_t *clamp_max_flag)
 {
@@ -288,7 +308,16 @@ static inline uint32_t swift_clamp_rate(uint32_t rate, uint32_t min_rate,
 	return rate;
 }
 
-/* Convert cwnd -> clamped FXP20 rate at the given pacing RTT, recording clamp counters. */
+/*
+ * Convert a window to a clamped FXP20 rate at the given pacing RTT, recording the clamp
+ * counters.
+ *
+ * @param [in]: PPCC parameter array
+ * @counter [in/out]: PPCC counter array, may be NULL
+ * @cwnd_fxp16 [in]: window to actuate (FXP16 packets)
+ * @rtt_ns [in]: pacing RTT (ns)
+ * @return: actuated rate (FXP20)
+ */
 static inline uint32_t swift_cwnd_to_rate(uint32_t *param, uint32_t *counter, uint32_t cwnd_fxp16,
 					  uint32_t rtt_ns)
 {
@@ -299,7 +328,7 @@ static inline uint32_t swift_cwnd_to_rate(uint32_t *param, uint32_t *counter, ui
 	if (unlikely(bdp_fxp16 == 0))
 		rate = DOCA_PCC_DEV_MAX_RATE; /* misconfigured params; fail open to line rate */
 	else
-		rate = (uint32_t)(((uint64_t)cwnd_fxp16 << 20) / bdp_fxp16);	/* yields fxp20 number */
+		rate = (uint32_t)(((uint64_t)cwnd_fxp16 << 20) / bdp_fxp16);	/* FXP20 */
 
 	rate = swift_clamp_rate(rate, param[SWIFT_P_MIN_RATE_FXP20], &clamp_min, &clamp_max);
 	if (counter != NULL) {
@@ -312,19 +341,23 @@ static inline uint32_t swift_cwnd_to_rate(uint32_t *param, uint32_t *counter, ui
 }
 
 /*
- * target/delay in FXP16 for the MD branch, clamped to (0, FXP16_ONE); returns
- * FXP16_ONE when delay <= target (no decrease).
+ * target/delay in FXP16 for the multiplicative-decrease branch.
+ *
+ * @target [in]: flow-scaled target delay (ns)
+ * @delay [in]: measured delay (ns)
+ * @return: target/delay clamped to (0, FXP16_ONE), or FXP16_ONE when delay <= target
  */
 static inline uint32_t swift_target_over_delay_fxp16(uint32_t target, uint32_t delay)
 {
 	if (delay <= target)
 		return SWIFT_FXP16_ONE;
-	uint64_t ratio = ((uint64_t)target << 16) / delay;	/* divison by zero guarded by previous if */
+	uint64_t ratio = ((uint64_t)target << 16) / delay;	/* delay > target >= 0 here, so nonzero */
 	if (ratio >= SWIFT_FXP16_ONE)
-		ratio = SWIFT_FXP16_ONE - 1;	/* set to largest FXP16 but still below 1 */
+		ratio = SWIFT_FXP16_ONE - 1;	/* largest FXP16 still below 1.0 */
 	return (uint32_t)ratio;
 }
 
+/* Clamp a window to [min_cwnd, max_cwnd], all in FXP16 packets. */
 static inline uint32_t swift_clamp_cwnd(uint32_t cwnd_fxp16, uint32_t min_cwnd, uint32_t max_cwnd)
 {
 	if (cwnd_fxp16 < min_cwnd)
@@ -334,7 +367,15 @@ static inline uint32_t swift_clamp_cwnd(uint32_t cwnd_fxp16, uint32_t min_cwnd, 
 	return cwnd_fxp16;
 }
 
-/* New flow: start cwnd at init_cwnd, actuate, and request the first RTT probe. */
+/*
+ * New flow: start cwnd at init_cwnd, actuate it, and request the first RTT probe.
+ *
+ * @event [in]: the event that opened the flow
+ * @param [in]: PPCC parameter array
+ * @counter [in/out]: PPCC counter array, may be NULL
+ * @ccctx [out]: per-flow Swift context to initialize
+ * @results [out]: result struct to update rate in HW
+ */
 static inline void swift_handle_new_flow(doca_pcc_dev_event_t *event,
 					 uint32_t *param,
 					 uint32_t *counter,
@@ -369,8 +410,13 @@ static inline void swift_handle_new_flow(doca_pcc_dev_event_t *event,
 }
 
 /*
- * TX event: maintain the RTT-probe abort/retry state machine (ported from
- * rtt_template).
+ * TX event: maintain the RTT-probe abort/retry state machine and re-apply the current
+ * rate.
+ *
+ * @event [in]: the TX event
+ * @param [in]: PPCC parameter array
+ * @ccctx [in/out]: per-flow Swift context
+ * @results [out]: result struct to update rate in HW
  */
 static inline void swift_handle_tx(doca_pcc_dev_event_t *event,
 				   uint32_t *param,
@@ -382,9 +428,7 @@ static inline void swift_handle_tx(doca_pcc_dev_event_t *event,
 	uint32_t timestamp = doca_pcc_dev_get_timestamp(event);
 	doca_pcc_dev_event_general_attr_t ev_attr = doca_pcc_dev_get_ev_attr(event);
 
-	/* check if the event attribute flag has the RTT_REQ_SENT flag set while we don't
-	 * if so, fix variables accordingly
-	*/
+	/* HW reports the probe as sent while our state does not: adopt the HW view. */
 	if (unlikely((ev_attr.flags & DOCA_PCC_DEV_TX_FLAG_RTT_REQ_SENT) && (probe_in_flight == 0))) {
 		ccctx->probe_in_flight = 1;
 		ccctx->tx_since_probe_req = 0;
@@ -399,10 +443,7 @@ static inline void swift_handle_tx(doca_pcc_dev_event_t *event,
 			probe_out_time_ns = 0;
 			ccctx->tx_since_probe_req += 1;
 		}
-		/* Clamp the backoff exponent at use and at growth: a shift >= 32 is UB,
-		 * and in the multi app a live algo switch can hand this flow another
-		 * algorithm's context bytes as abort_cnt (up to 65535).
-		 * 12 caps the abort threshold at ~1.2 s. */
+		/* The backoff exponent is clamped because a shift >= 32 is undefined behavior. */
 		uint32_t abort_threshold = (uint32_t)SWIFT_ABORT_TIME_NS
 					   << ((ccctx->abort_cnt < 12) ? ccctx->abort_cnt : 12);
 		if (unlikely((probe_out_time_ns > abort_threshold) ||
@@ -419,12 +460,18 @@ static inline void swift_handle_tx(doca_pcc_dev_event_t *event,
 }
 
 /*
- * RTT event -- the main handler (Algorithm 1, §3.2, with the flow-scaled target §3.5).
+ * RTT event: the main handler (Algorithm 1, paper Section 3.2, with the flow-scaled
+ * target of paper Section 3.5).
  *   total_rtt     = arrival_ts - req_send_ts       (local clock, t6 - t1)
  *   np_turnaround = resp_send_ts - req_recv_ts     (remote clock, t4 - t2)
- *   fabric_rtt    = total_rtt - np_turnaround      (sync-free: both are durations)
- * delay = fabric_rtt. Serialization is folded into base_target; the residual local
- * NIC-Rx delay (paper t6 - t5; BF3 exposes no t5) stays in the signal.
+ *   fabric_rtt    = total_rtt - np_turnaround      (both are durations, so sync-free)
+ * delay = fabric_rtt. Serialization is folded into base_target.
+ *
+ * @event [in]: the RTT probe-response event
+ * @param [in]: PPCC parameter array
+ * @counter [in/out]: PPCC counter array, may be NULL
+ * @ccctx [in/out]: per-flow Swift context
+ * @results [out]: result struct to update rate in HW
  */
 static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 				    uint32_t *param,
@@ -462,11 +509,9 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 	if (resp_send != 0 && req_recv != 0)
 		np_turnaround = swift_diff_with_wrap32(resp_send, req_recv);
 
-	/* Paper §3.1 defines no fallback for endpoints that do not reflect t4 - t2. An
-	 * unstamped or inconsistent (turnaround >= total RTT) response is not a delay
-	 * sample: dropped, counted, cwnd/rate untouched, next probe re-armed. A
-	 * non-stamping responder leaves Swift visibly inert rather than silently
-	 * regulating on total RTT. */
+	/* The paper (Section 3.1) defines no fallback for endpoints that do not reflect
+	 * t4 - t2. An unstamped or inconsistent (turnaround >= total RTT) response is not a
+	 * delay sample: it is dropped and counted, cwnd/rate untouched, next probe re-armed. */
 	if (unlikely(resp_send == 0 || req_recv == 0 || np_turnaround >= total_rtt)) {
 		if (counter != NULL)
 			counter[SWIFT_C_RTT_DROPPED_UNSTAMPED]++;
@@ -504,7 +549,7 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 		/* === Algorithm 1 lines 7-11: Additive Increase === */
 		if (counter != NULL)
 			counter[SWIFT_C_DELAY_LT_TARGET]++;
-		/* One RTT event == one control interval -> a single +ai step in both
+		/* One RTT event is one control interval, so a single +ai step in both
 		 * regimes; the if/else preserves Algorithm 1's structure. */
 		if (cwnd >= SWIFT_CWND_ONE_FXP16)
 			cwnd += ai;
@@ -585,9 +630,16 @@ static inline void swift_handle_rtt(doca_pcc_dev_event_t *event,
 }
 
 /*
- * OOS NACK event = the loss signal (Algorithm 1 "On Retransmit Timeout"): retx_cnt++;
- * at the threshold collapse cwnd to min_cwnd, otherwise apply the maximum
- * multiplicative cut (1 - max_mdf), once per RTT.
+ * NACK event. The OOS subtype is the loss signal (Algorithm 1 "On Retransmit Timeout"):
+ * retx_cnt++, then collapse cwnd to min_cwnd at the threshold, otherwise apply the
+ * maximum multiplicative cut (1 - max_mdf) at most once per RTT. Other subtypes leave
+ * the flow state untouched.
+ *
+ * @event [in]: the NACK event
+ * @param [in]: PPCC parameter array
+ * @counter [in/out]: PPCC counter array, may be NULL
+ * @ccctx [in/out]: per-flow Swift context
+ * @results [out]: result struct to update rate in HW
  */
 static inline void swift_handle_nack(doca_pcc_dev_event_t *event,
 				     uint32_t *param,
@@ -647,9 +699,13 @@ static inline void swift_handle_nack(doca_pcc_dev_event_t *event,
 }
 
 /*
- * ACK event = Algorithm 1 line 5: "On Receiving ACK: retransmit_cnt <- 0". Delay/cwnd
- * are driven exclusively by RTT probe events (no per-ACK delay on BF3), so an ACK
- * changes no window state.
+ * ACK event, Algorithm 1 line 5: "On Receiving ACK: retransmit_cnt <- 0". Delay and cwnd
+ * are driven exclusively by RTT probe events, so an ACK changes no window state.
+ *
+ * @event [in]: the ACK event
+ * @param [in]: PPCC parameter array
+ * @ccctx [in/out]: per-flow Swift context
+ * @results [out]: result struct to update rate in HW
  */
 static inline void swift_handle_ack(doca_pcc_dev_event_t *event,
 				    uint32_t *param,
@@ -705,10 +761,8 @@ doca_pcc_dev_error_t swift_set_algo_params(uint32_t param_id_base,
 	if ((new_param_values == NULL) || (params == NULL))
 		return DOCA_PCC_DEV_STATUS_FAIL;
 
-	/* The framework does NOT auto-copy: returning OK means "the callback set them".
-	 * Without this loop PPCC writes read back correctly yet never reach the running
-	 * algorithm. Ranges are enforced by the min/max registered in swift_init(); a bad
-	 * fs_min/fs_max pair is additionally guarded in swift_flow_scaled_target. */
+	/* The framework does not copy params; returning OK means the callback set them.
+	 * Ranges are enforced by the min/max registered in swift_init(). */
 	for (uint32_t i = 0; i < param_num; i++)
 		params[param_id_base + i] = new_param_values[i];
 

@@ -36,44 +36,36 @@
  *
  * DCQCN (Zhu et al., "Congestion Control for Large-Scale RDMA Deployments", SIGCOMM
  * 2015) is a rate-based controller driven by ECN / CNPs (Congestion Notification
- * Packets), implementing the Figure 7 state machine (CutRate on CNP; three-phase
- * rate increase -- Fast Recovery / Additive Increase / Hyper Increase -- gated by a
- * software timer T and byte counter BC). Unlike TIMELY/Swift it is not RTT-driven.
+ * Packets), implementing the Figure 7 state machine: CutRate on CNP, plus a
+ * three-phase rate increase (Fast Recovery / Additive Increase / Hyper Increase)
+ * gated by a software timer T and byte counter BC.
  *
- * Wire encodings (consistent with the timely/swift contracts in this repo):
+ * Wire encodings:
  *   - time    -> nanoseconds (uint32): timer_period
  *   - bytes   -> bytes (uint32): byte_counter_th
  *   - shift   -> shift count (uint32): g_shift (g = 1/(1<<g_shift))
  *   - count   -> plain integer (uint32): f_threshold
  *   - rate    -> FXP20 (1<<20 = 100% line rate): r_ai, r_hai, new_flow_rate, min_rate
- * Off-host tooling (incast-bench) is responsible for any human-unit -> FXP
- * conversion (e.g. Mbps -> FXP20) using the configured line rate.
+ * Human-unit to FXP conversion (e.g. Mbps -> FXP20) is the orchestrator's job.
  *
- * Defaults are aligned with the compile-time #defines in dcqcn_algo_params.h (Zhu et
- * al. Figure 14 / Section 5.2) so that a doca_pcc instance running with no param
- * writes behaves identically to a build with the contract bypassed. The orchestrator
- * overrides these at runtime over the PPCC channel (cmd_type=0xB) when sweeping the
- * parameter space.
+ * Defaults match the compile-time defines in dcqcn_algo_params.h (Zhu et al. Figure
+ * 14 / Section 5.2), so an instance running with no param writes behaves identically
+ * to a build with the contract bypassed.
  *
- * TRACE_ON (index 8, appended -- see dcqcn.h) is a diagnostics-only toggle, NOT a
- * tuning knob: it gates runtime emission of the format 6-10 device traces (shared
- * per-event summary + DCQCN's own new_flow/cnp/tx/rate_inc traces). It rides in the
- * param array so it can be flipped at runtime over the existing PPCC channel without
- * rebuilding -- see dcqcn.c/dcqcn.h and the README's "Runtime tuning via PPCC" section.
+ * TRACE_ON (index 8) is a diagnostics-only toggle, not a tuning knob: it gates
+ * runtime emission of the format 6-10 device traces and rides in the param array so
+ * it can be flipped over the PPCC channel without rebuilding.
  */
 
-/* DCQCN algorithm ID. Project convention: TIMELY=0xBFFD, DCQCN=0xBFFE, SWIFT=0xBFFC,
- * SMaRTT=0xBFFB, rtt_template/template=0xBFFF. Verified against dcqcn.c's algo_def. */
+/* DCQCN algorithm ID, as registered by dcqcn_init(). */
 #define DCQCN_ALGO_ID 0xBFFE
 
 /*
  * Parameter indices.
  *
- * APPEND-ONLY: external orchestrators (incast-bench) address parameters by index in
- * bulk-set, so never reorder or insert -- only append before TRACE_ON is reassigned.
- * TRACE_ON is kept LAST so indices 0..N-2 stay stable across versions. Names, order,
- * and values 0-7 below are transcribed verbatim from the pre-contract dcqcn.c
- * enum/init calls; this header is a pure refactor, not a renumbering.
+ * APPEND-ONLY: external orchestrators address parameters by index in bulk-set, so
+ * never reorder or insert. TRACE_ON is kept LAST so the tuning indices stay stable
+ * across versions.
  */
 typedef enum {
 	DCQCN_PARAM_TIMER_PERIOD = 0,	  /* Timer period T in nanoseconds */
@@ -89,7 +81,7 @@ typedef enum {
 } dcqcn_params_t;
 
 /*
- * Counter indices. Transcribed verbatim from the pre-contract dcqcn.c enum.
+ * Counter indices.
  */
 typedef enum {
 	DCQCN_COUNTER_TX_EVENT = 0,
@@ -106,12 +98,8 @@ struct dcqcn_param_desc {
 	uint32_t max;
 };
 
-/* THE contract. Edit only here.
- *
- * def/min/max transcribed verbatim from the doca_pcc_dev_algo_init_param() call
- * arguments in the pre-contract dcqcn.c (DOCA signature order: algo_idx, param_id,
- * default, MAX, MIN, perms, desc_size, desc_addr). g_shift's max=16 is a hard
- * correctness bound, not a style choice: dcqcn_alpha_update_cnp() computes
+/* The contract: name, unit, default, min and max of every parameter. Edit only here.
+ * g_shift's max of 16 is a correctness bound: dcqcn_alpha_update_cnp() computes
  * 1 << (16 - g_shift), which is undefined behavior for g_shift > 16.
  */
 static const struct dcqcn_param_desc dcqcn_params[DCQCN_PARAM_NUM] = {
@@ -123,11 +111,8 @@ static const struct dcqcn_param_desc dcqcn_params[DCQCN_PARAM_NUM] = {
 	[DCQCN_PARAM_R_HAI]           = {"r_hai",           "FXP20",  2095,        1,    1048576},
 	[DCQCN_PARAM_NEW_FLOW_RATE]   = {"new_flow_rate",   "FXP20",  1048576,     1,    1048576},
 	[DCQCN_PARAM_MIN_RATE]        = {"min_rate",        "FXP20",  64,          1,    1048576},
-	/* Diagnostics-only: gates runtime device-trace emission (dcqcn.h). def=0 (quiet),
-	 * range [0,1]. min MUST be 0 so traces can be turned back off at runtime -- unlike
-	 * params 0-7 above (all transcribed with MIN=1 from the pre-contract code), this
-	 * is a new row and DCQCN_REG_PARAM already reads .min from this table, so 0 is
-	 * safe (see dcqcn.c's dcqcn_init). */
+	/* Diagnostics-only: gates runtime device-trace emission. min MUST be 0 so traces
+	 * can be turned back off at runtime. */
 	[DCQCN_PARAM_TRACE_ON]        = {"trace_on",        "bool",   0,           0,          1},
 };
 

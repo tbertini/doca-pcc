@@ -29,13 +29,17 @@
 #include <stdint.h>
 
 /*
- * Swift per-flow context. MUST be exactly 48 bytes: the framework's per-flow slot is
- * mlnx_cc_algo_ctxt_t { uint32_t data[12]; } (doca_pcc_dev_data_structure_le_bf3.h)
- * and this struct is cast over it; overrunning corrupts adjacent per-flow state.
+ * Swift per-flow context.
+ * Kumar et al., "Swift: Delay is Simple and Effective for Congestion Control in the
+ * Datacenter", SIGCOMM 2020.
+ *
+ * MUST be exactly 48 bytes: the framework's per-flow slot is
+ * mlnx_cc_algo_ctxt_t { uint32_t data[12]; } and this struct is cast over it, so
+ * overrunning corrupts adjacent per-flow state.
  *
  * fcwnd (FXP16 packets) is the control variable. Swift regulates on instantaneous
- * delay (paper §3.2), so no EWMA is stored on the fabric path. The framework zeroes
- * the context on flow creation, so cur_rate == 0 marks a new flow.
+ * delay (paper Section 3.2), so no EWMA is stored on the fabric path. The framework
+ * zeroes the context on flow creation, so cur_rate == 0 marks a new flow.
  */
 typedef struct {
 	uint32_t cur_rate;		/* Actuated Tx rate (FXP20); == 0 => new flow sentinel */
@@ -43,7 +47,7 @@ typedef struct {
 	uint32_t t_last_decrease;	/* Timestamp (ns) of last cwnd non-increase; once-per-RTT MD guard */
 	uint32_t probe_start_ts;		/* Timestamp (ns) when RTT_REQ was last sent on a TX event (abort machine) */
 
-	uint32_t ecwnd;			/* Endpoint congestion window (paper §3.3); inert, no endpoint signal on BF3 */
+	uint32_t ecwnd;			/* Endpoint congestion window (paper Section 3.3); inert, no endpoint signal on BF3 */
 	uint32_t endpoint_delay_ewma;	/* Smoothed endpoint delay (ns); inert, no endpoint signal on BF3 */
 
 	uint16_t retx_cnt;		/* Consecutive NACK/RTO count (Algorithm 1 "On Retransmit Timeout") */

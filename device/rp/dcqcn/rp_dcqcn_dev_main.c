@@ -1,3 +1,28 @@
+/*
+ * Copyright (c) 2023 NVIDIA CORPORATION AND AFFILIATES.  All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted
+ * provided that the following conditions are met:
+ *     * Redistributions of source code must retain the above copyright notice, this list of
+ *       conditions and the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above copyright notice, this list of
+ *       conditions and the following disclaimer in the documentation and/or other materials
+ *       provided with the distribution.
+ *     * Neither the name of the NVIDIA CORPORATION nor the names of its contributors may be used
+ *       to endorse or promote products derived from this software without specific prior written
+ *       permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+ * FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL NVIDIA CORPORATION BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+ * STRICT LIABILITY, OR TOR (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ */
+
 // DPA entry point
 
 #include <doca_pcc_dev.h>
@@ -13,8 +38,8 @@
  * Main entry point of CC algorithm
  * This function starts the algorithm code of a single event.
  * It receives the flow context data, the event info and outputs the new rate parameters.
- * Every event is dispatched to DCQCN with slot-0/port-0 params, regardless of the
- * negotiated algo_slot (see comment below).
+ * Every event is dispatched to DCQCN with slot-0 / port-0 params, regardless of the
+ * negotiated algo_slot.
  *
  * @algo_ctxt [in]: A pointer to a flow context data retrieved by libpcc.
  * @event [in]: A pointer to an event data structure to be passed to extractor functions
@@ -26,20 +51,17 @@ void doca_pcc_dev_user_algo(doca_pcc_dev_algo_ctxt_t *algo_ctxt,
 			    const doca_pcc_dev_attr_t *attr,
 			    doca_pcc_dev_results_t *results) {
 
-	/* Always slot 0 (DCQCN is the only algo, so ECE slot negotiation is moot) and
-	 * always port 0. The orchestrator pushes params / scrapes counters over mlxreg
-	 * PPCC local_port=1, which maps to DPA port 0, but mlx5_0 traffic reaches the algo
-	 * on port 1 -- fetching the event's port would read a never-pushed array and
-	 * strand counters where the scrape can't see them (HW-confirmed on timely). */
+	/* Always slot 0, since DCQCN is the only algorithm here, and always port 0:
+	 * mlxreg PPCC local_port=1 maps to DPA port 0, while mlx5_0 traffic reaches the
+	 * algorithm on port 1, so the event's port would be a never-pushed array. */
 	uint32_t *param = doca_pcc_dev_get_algo_params(0, 0);
 	uint32_t *counter = doca_pcc_dev_get_counters(0, 0);
 
 	dcqcn_algo(event, param, counter, algo_ctxt, results);
 
 	/* Generic per-event (format 6) trace: compiled in, emitted only when the trace_on
-	 * PPCC param is set at runtime (or always if built -DDCQCN_DEBUG). See dcqcn.h.
-	 * ev_attr is decoded here, under the gate: with params pinned to port 0, the
-	 * event's port_num/ev_type are needed only for this trace. */
+	 * PPCC param is set at runtime (or always if built -DDCQCN_DEBUG). ev_attr is
+	 * decoded under the gate because the trace is its only consumer here. */
 	if (DCQCN_TRACE_ENABLED(param)) {
 		doca_pcc_dev_event_general_attr_t ev_attr = doca_pcc_dev_get_ev_attr(event);
 
@@ -74,7 +96,7 @@ void doca_pcc_dev_user_init(uint32_t *disable_event_bitmask) {
 		doca_pcc_dev_trace_5(0, port_num, algo_idx, algo_slot, algo_en, DOCA_PCC_DEV_EVNT_ROCE_ACK_MASK);
 	}
 
-	/* Disable ACK events — DCQCN does not use per-ACK feedback */
+	/* Disable ACK events: DCQCN does not use per-ACK feedback */
 	*disable_event_bitmask = DOCA_PCC_DEV_EVNT_ROCE_ACK_MASK;
 	doca_pcc_dev_printf("[DCQCN] %s: init complete, disable_event_bitmask=0x%x\n", __func__, *disable_event_bitmask);
 	doca_pcc_dev_trace_flush();

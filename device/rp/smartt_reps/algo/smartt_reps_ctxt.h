@@ -29,22 +29,14 @@
 #include <stdint.h>
 
 /*
- * SMaRTT per-flow context structure (48 bytes).
+ * SMaRTT per-flow context structure.
  *
- * HARD SIZE CONSTRAINT: the framework's per-flow context slot is
- * mlnx_cc_algo_ctxt_t { uint32_t data[12]; } == 48 bytes (12 dwords) on BlueField-3
- * (doca_pcc_dev_data_structure_le_bf3.h). This struct is cast over that slot, so it
- * MUST be exactly 48 bytes -- TIMELY, DCQCN, rtt_template and Swift are all 48 B.
- * Overrunning it corrupts adjacent per-flow state. The _Static_assert below enforces it.
+ * Holds the per-flow state of SMaRTT, from Bonato et al., "SMaRTT-REPS: Sender-based
+ * Marked Rapidly-adapting Trimmed & Timed Transport with Recycled Entropies",
+ * arXiv:2404.01630, 2024. Control variable: cwnd_fxp16 (FXP16 packets).
  *
- * Implements the per-flow state for SMaRTT (Bonato et al., "SMaRTT-REPS",
- * arXiv:2404.01630, §3.2-3.6.1). Control variable: cwnd_fxp16 (FXP16 packets). cur_rate
- * is the FXP20 rate the cwnd is actuated to, and also the new-flow sentinel (the
- * framework zeroes the context on flow creation, so cur_rate == 0 => new flow).
- *
- * The paper claims 19 B/flow; the extra here is the RTT-probe abort machinery,
- * CNP-hold state, and the rate cache that BF3's probe-driven, rate-actuated environment
- * requires (BF3 ACKs carry no timestamps, so RTT arrives on separate probe events).
+ * This struct is cast over the BlueField-3 per-flow context slot, which is exactly
+ * 48 bytes; overrunning it corrupts adjacent per-flow state.
  */
 typedef struct {
 	uint32_t cur_rate;        /* FXP20 actuated rate; 0 = new-flow sentinel   [4]  */
@@ -52,12 +44,12 @@ typedef struct {
 	uint32_t last_rtt_ns;     /* latest fabric RTT from probe; init = brtt    [4]  */
 	uint32_t last_cnp_ts;     /* CNP arrival ts for the ECN-hold predicate    [4]  */
 	uint32_t qa_epoch_start;  /* QuickAdapt trtt-epoch start ("end" anchor)   [4]  */
-	uint32_t last_ack_psn;    /* PSN tracker for ΔSN acked-packets            [4]  */
-	uint32_t probe_start_ts;  /* RTT-probe abort machine					  [4]  */
+	uint32_t last_ack_psn;    /* PSN tracker for delta-PSN acked packets      [4]  */
+	uint32_t probe_start_ts;  /* RTT-probe abort machine                     [4]  */
 	uint16_t acked_pkts;      /* acked in current trtt epoch (saturating)     [2]  */
 	uint16_t packets_to_ignore;     /* bytes_to_ignore, packets                     [2]  */
 	uint16_t ignored_pkts;    /* bytes_ignored, packets (saturating)          [2]  */
-	uint16_t avg_wtd_fxp16;   /* WTD EWMA, capped 65535 (≈1.0)                [2]  */
+	uint16_t avg_wtd_fxp16;   /* WTD EWMA, FXP16 capped at 65535 (~1.0)      [2]  */
 	uint16_t fast_inc_count;  /* FastIncrease byte counter, packets (sat)     [2]  */
 	uint8_t  flags;           /* bit0 trigger_qa  bit1 fi_active  bit2 psn_valid
 	                             bit3 qa_epoch_valid  bit4 cnp_seen
@@ -67,12 +59,12 @@ typedef struct {
 	uint8_t  reserved8;       /*                                              [1]  */
 	uint16_t reserved16;      /*                                              [2]  */
 	uint32_t reserved32;      /* pad to exactly 48                            [4]  */
-} cc_ctxt_smartt_reps_t;      /* 7·4 + 5·2 + 4·1 + 2 + 4 = 48 */
+} cc_ctxt_smartt_reps_t;      /* 7*4 + 5*2 + 4*1 + 2 + 4 = 48 bytes */
 
 _Static_assert(sizeof(cc_ctxt_smartt_reps_t) == 48,
 	       "cc_ctxt_smartt_reps_t must be exactly 48 bytes (BF3 per-flow ctxt slot)");
 
-/* Flag bit positions for cc_ctxt_smartt_reps_t.flags (see field comment above). */
+/* Flag bit positions for cc_ctxt_smartt_reps_t.flags. */
 #define SMARTT_REPS_FLAG_TRIGGER_QA        (1u << 0)
 #define SMARTT_REPS_FLAG_FI_ACTIVE         (1u << 1)
 #define SMARTT_REPS_FLAG_PSN_VALID         (1u << 2)

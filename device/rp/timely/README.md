@@ -369,15 +369,13 @@ else:                                             (TIMELY_BRANCH_GRAD_GT)
     rate ← rate · (1 - β·normalized_gradient)
 ```
 
+`new_rtt` comes from dedicated RTT-probe request events (`rtt_req`), standing in for the paper's per-ACK NIC timestamps: that is the model mapped onto the DOCA PCC event set, not an algorithm deviation.
+
 Default parameters, units, and min/max bounds are in [`algo/timely_params.h`](algo/timely_params.h) — the single source of truth for the PPCC contract, shared between the DPA algorithm and the host-side dumper. Per-event params are runtime-configurable via the standard DOCA PCC param interface (9 params, see `TIMELY_P_*` enum in [`algo/timely_params.h`](algo/timely_params.h); 9 counters via `TIMELY_C_*`).
 
 ## Known unknowns / FIXMEs
 
-The paper is silent on several points; every choice is flagged in the source so they can be revisited:
-
-```bash
-grep -rn "FIXME:" device/rp/timely/algo/ device/rp/timely/rp_timely_dev_main.c
-```
+The paper is silent on several points; the choices made here are recorded below (the source keeps only the paper citations, open questions live in this README):
 
 Highlights:
 - **α (EWMA weight):** ~~unknown~~ **resolved, no longer a FIXME.** The paper labels it in
@@ -388,12 +386,16 @@ Highlights:
 - **minRTT:** paper says "fixed value… known ahead of time" without specifying. Default 3.8 µs (`3800` ns — measured BF3-to-BF3 1:1 `ib_write_bw`).
 - **min_rate:** paper does not define a floor. Default `1<<6` (FXP20), matches DCQCN.
 - **NACK handling:** paper assumes a PFC fabric where NACKs don't happen — matched exactly: NACK events are masked at init and never delivered to the algorithm (the fabric's PFC baseline is the precondition, applied per run by incast-bench; validated 2026-08-07).
-- **Rate update scaling per minRTT (§5):** paper mentions but doesn't formalize. We do naive per-event update.
+- **Rate update scaling per minRTT (§5):** paper mentions but doesn't formalize. We do naive per-event update. Measured probe inter-arrival on this fabric is ~39 µs, which is the basis for not scaling the per-flow gradient by minRTT.
 - **δ:** paper specifies as absolute bandwidth (10 Mbps); we encode as an FXP20 line-rate fraction. Default `1049` ≈ 100 Mbps on a 100 Gbps NIC (retuned 2026-05-03; the paper's 10 Mbps would be ~`105`). Re-tune if NIC speed changes.
+- **T_high/new_rtt ratio:** paper is silent on overflow. `timely_t_high_over_rtt_fxp16` clamps its result to `FXP16_ONE - 1`; that clamp value is our choice.
+- **Gradient multiplier bound:** paper does not bound it. The gradient multiplicative-decrease path saturates the multiplier at `FXP16_ONE - 1`; that saturation point is our choice.
 
 ## Hardware / branch context
 
 - Tested on BlueField-3 (DPA) at `sgs-bluefield-01`.
+- The code relies on signed right shift being an arithmetic shift: DPA clang guarantees that, C99 does not.
+- A live algorithm switch (the multi-algo mux) can hand the handler foreign context bytes, so `abort_cnt` may start at garbage; that is why the probe backoff shift is capped at 12.
 - Independent sibling of the `dcqcn` branch — no shared algorithm code, but the build/host glue is structured so both can coexist when merged (format IDs 7–10 are reserved for DCQCN's debug traces, 11–14 for TIMELY's).
 - The default app in `host/pcc.c` is **unchanged from main** — TIMELY is selected at runtime via `--rp-timely` / `-rp-tm`.
 - On a PFC + ECN fabric the NIC's DCQCN co-fires alongside TIMELY: you will see

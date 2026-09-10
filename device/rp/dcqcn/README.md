@@ -317,7 +317,8 @@ The paper leaves several points undefined; the decisions made here are:
   packets, so its algorithm has no NACK input — matched exactly: NACK events are
   ignored (still counted via `DCQCN_COUNTER_NACK_EVENT` as the per-run proof that
   the PFC precondition held). The fabric baseline is applied per run by
-  incast-bench (u55c ConnectX QoS via mstreg; A/B-validated 2026-08-07).
+  incast-bench (u55c ConnectX QoS via mstreg; A/B-validated 2026-08-07). While running
+  this algorithm with PFC correctly configured, NACK events were never observed.
 - **Hardware timers**: the paper's asynchronous NIC timers are advanced on TX
   events in DOCA's event-driven model (equivalent for active flows, and a flow with
   no TX events never increases its rate), with bounded catch-up after idle gaps.

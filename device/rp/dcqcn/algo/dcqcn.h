@@ -31,16 +31,10 @@
 /*
  * Runtime trace gate.
  *
- * DCQCN's format 7-10 device traces (plus the shared format 6 per-event summary
- * emitted from rp_dcqcn_dev_main.c) are compiled in unconditionally and gated here,
- * so they can be toggled at runtime via the trace_on PPCC param
- * (param[DCQCN_PARAM_TRACE_ON]) WITHOUT rebuilding the DPA binary. Default is off.
- *
- * Building with -DDCQCN_DEBUG forces them on from boot (e.g. to capture the earliest
- * events, before a param write can land), ignoring the param.
- *
- * Cost when off: one well-predicted branch per event. The trace-record write and the
- * buffer flush -- the expensive part -- are skipped.
+ * The format 6-10 device traces are compiled in unconditionally and gated here, so
+ * they can be toggled at runtime via the trace_on PPCC param
+ * (param[DCQCN_PARAM_TRACE_ON]) without rebuilding the DPA binary. Default is off.
+ * Building with -DDCQCN_DEBUG forces them on from boot, ignoring the param.
  */
 #ifdef DCQCN_DEBUG
 #define DCQCN_TRACE_ENABLED(param) (1)
@@ -49,11 +43,9 @@
 #endif
 
 /*
- * arg1 convention for every DCQCN per-flow trace format (6-10): pack the triggering
- * event's timestamp (ns) and flow_tag into one 64-bit value, printed host-side as
- * tsflow=0x%lx. Bits [63:32] = timestamp (wraps ~4.295 s at 1 ns granularity);
- * bits [31:0] = flow_tag. Defined here (rather than in dcqcn.c) so both dcqcn.c and
- * rp_dcqcn_dev_main.c's format-6 call site can use the same macro.
+ * arg1 convention for every DCQCN trace format (6-10): pack the triggering event's
+ * timestamp and flow_tag into one 64-bit value, printed host-side as tsflow=0x%lx.
+ * Bits [63:32] = timestamp (ns, wraps every ~4.295 s); bits [31:0] = flow_tag.
  */
 #define DCQCN_TRACE_TSFLOW(ts, flow) ((((uint64_t)(uint32_t)(ts)) << 32) | (uint64_t)(uint32_t)(flow))
 
@@ -92,9 +84,9 @@ void dcqcn_init(uint32_t algo_idx);
  * @param_num [in]: number of all parameters that were changed
  * @new_param_values [in]: pointer to an array which holds param_num number of new values for parameters
  * @params [in]: pointer to an array which holds beginning of the current parameters to be changed
- * @return: DOCA_PCC_DEV_STATUS_OK if the values were validated and written into params
- * (the framework does not auto-copy); DOCA_PCC_DEV_STATUS_FAIL if input parameters
- * (one or more) are not legal — nothing is changed.
+ * @return: DOCA_PCC_DEV_STATUS_OK if the values were validated and written into
+ * params; DOCA_PCC_DEV_STATUS_FAIL if one or more input parameters are not legal,
+ * in which case nothing is changed.
  */
 doca_pcc_dev_error_t dcqcn_set_algo_params(uint32_t param_id_base,
 					    uint32_t param_num,

@@ -43,8 +43,8 @@ static char *trace_message_formats[] = {
 	"format 3 - pcc_np dev: thread_idx = %#lx, cnt_recv_packet = %#lx, cnt_sent_packet = %#lx, cnt_user_func_err = %#lx. end %u\n",
 	"format 4 - pcc_np dev: thread_idx = %#lx, rq = %#lx, rq_pi = %#lx, rqcq = %#lx, rqcq_ci = %#lx\n",
 	"format 5 - pcc_np dev: thread_idx = %#lx, sq = %#lx, sq_pi = %#lx, sqcq = %#lx. end %u\n",
-	/* tsflow (all normalized per-event formats): packed arg1 = ts_ns (bits 63:32,
-	 * wraps ~4.295s) | flow_tag (bits 31:0); see the per-algo TRACE_TSFLOW macros. */
+	/* tsflow is the packed first argument of every per-event format below:
+	 * bits 63:32 = ts_ns (wraps every ~4.295 s), bits 31:0 = flow_tag. */
 	"format 6 - pcc event: tsflow=0x%lx ev_type=%lu port=%lu algo_slot=%lu rate=%lu\n",
 	"format 7 - dcqcn new_flow: tsflow=0x%lx alpha=%lu rate=%lu\n",
 	"format 8 - dcqcn cnp: tsflow=0x%lx old_rate=%lu alpha=%lu dec_factor=%lu new_rate=%lu\n",
@@ -52,30 +52,21 @@ static char *trace_message_formats[] = {
 	"format 10 - dcqcn rate_inc: tsflow=0x%lx old_rate=%lu target=%lu phase=%lu new_rate=%lu\n",
 	"format 11 - timely new_flow: tsflow=0x%lx rate=%lu\n",
 	/* branch low nibble = T_LOW(0)/T_HIGH(1)/GRAD_LE(2)/GRAD_GT(3); bit 0x80 = clamped.
-	 * norm_grad is FXP16 (65536 = a gradient of 1.0, i.e. rtt_diff == min_rtt_ns), signed.
-	 * It used to be an integer ns/ns quotient, which truncated to 0 on every event; the
-	 * field name is unchanged because incast-bench's tools/pcc_trace_parse.py keys on it. */
+	 * norm_grad is signed FXP16 (65536 = a gradient of 1.0, i.e. rtt_diff == min_rtt_ns). */
 	"format 12 - timely rtt: tsflow=0x%lx new_rtt=%lu norm_grad=%ld branch=0x%lx new_rate=%lu\n",
 	"format 13 - retired (clamp folded into format 12 branch bit 0x80)\n",
 	"format 14 - timely hai: tsflow=0x%lx neg_count=%lu N=%lu delta=%lu new_rate=%lu\n",
-	/* Format IDs 15-19 owned by Swift (sender RP); per-event summaries reuse format 6.
-	 * Trace-format normalization (2026-07-10): every line's arg1 is tsflow (see the
-	 * comment above); dropped fields (delay_minus_target, cwnd_prev) are
-	 * host-derivable, and rate (where present) moved last -- see README.md's trace
-	 * table for the full before/after field map. */
+	/* Format IDs 15-19 owned by Swift (sender RP); per-event summaries reuse format 6. */
 	"format 15 - swift new_flow: tsflow=0x%lx init_cwnd=%lu line_mbps=%lu bdp_fxp16=%lu rate=%lu\n",
-	/* format 16 branch: low nibble AI(0)/MD(1)/MD_BLOCKED(2); 0x80=clamped 0x40=cwnd<1 0x20=fs_sat.
-	 * delay_minus_target dropped (= fabric_rtt - target, derive host-side). */
+	/* format 16 branch: low nibble AI(0)/MD(1)/MD_BLOCKED(2); 0x80=clamped 0x40=cwnd<1 0x20=fs_sat. */
 	"format 16 - swift rtt: tsflow=0x%lx fabric_rtt=%lu np_turn=%lu target=%lu branch=0x%lx\n",
 	"format 17 - swift win: tsflow=0x%lx cwnd=%lu fs_term=%lu can_decr=%lu rate=%lu\n",
-	/* retx_reset packs what were separate retx_cnt/reset fields: bits[31:1] = retx_cnt,
-	 * bit0 = reset (1 = NACK threshold collapsed cwnd to min_cwnd). */
+	/* format 18 retx_reset: bits[31:1] = retx_cnt, bit0 = reset (1 = NACK threshold
+	 * collapsed cwnd to min_cwnd). */
 	"format 18 - swift loss: tsflow=0x%lx ev_subtype=%lu retx_reset=0x%lx cwnd=%lu rate=%lu\n",
 	/* format 19 populated: bit0 = t2 (req_recv) nonzero, bit1 = t4 (resp_send) nonzero;
-	 * 3 = receiver stamps both -> usable sample; anything else means the sample was
-	 * DROPPED (rtt_dropped_unstamped counter moves, no cwnd/rate change, and no
-	 * format 16/17 pair follows this line). t6/arrival is folded into tsflow's ts_ns
-	 * half instead of passed as its own field. */
+	 * 3 = receiver stamped both, so the sample is usable; any other value means the
+	 * sample was dropped as unstamped. */
 	"format 19 - swift rtt_ts: tsflow=0x%lx t1_req_send=%lu t2_req_recv=%lu t4_resp_send=%lu populated=%lu\n",
 	/* Format IDs 20-24 owned by SMaRTT-REPS (sender RP); per-event summaries reuse format 6.
 	 * format 20 branch: low nibble 0=FD 1=MD 2=FI 3=MI 4=wtd_blocked 5=blackout 6=fastinc.

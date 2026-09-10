@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
 #
-# timely-prettify — translate doca_pcc TIMELY trace fields (tsflow, ev_type,
+# timely-prettify - translate doca_pcc TIMELY trace fields (tsflow, ev_type,
 # branch) into human-readable names, with optional ANSI colors.
 #
-# Every per-event format (6/11/12/14) now leads with tsflow=0x<hex>: a packed
-# 64-bit value, bits[63:32] = device timestamp in ns (wraps ~4.295s), bits[31:0]
-# = flow_tag. This script rewrites it to "ts=<ns> flow=<tag>" and uses the
-# flow_tag to power --filter-flow on all four of those formats — 11/12/14
-# never carried a flow tag before tsflow existed, so filtering them is new in
-# this version. Pre-normalization logs without tsflow still work: format 6
-# falls back to its old standalone flow_tag= field, and formats 11/12/14
-# (which never carried a flow tag at all) pass through unfiltered, same as
-# before.
+# Per-event formats 6, 11, 12 and 14 lead with tsflow=0x<hex>, a packed 64-bit
+# value: bits[63:32] = device timestamp in ns (wraps every ~4.295 s),
+# bits[31:0] = flow_tag. The script rewrites it to "ts=<ns> flow=<tag>" and
+# filters those formats on the recovered flow tag. Lines carrying no tsflow
+# still pass: format 6 falls back to its standalone flow_tag= field, and
+# formats 11, 12 and 14 are not filtered.
 #
 # Usage:
 #   /tmp/build/pcc/doca_pcc --rp-timely -d mlx5_0 -l 70 2>&1 | timely-prettify
@@ -27,8 +24,8 @@
 #   --no-color           Disable ANSI colors (default: on if stdout is a tty)
 #   --filter-flow TAG    Drop lines (formats 6, 11, 12, 14) whose flow tag !=
 #                        TAG (decimal). TAG is matched against tsflow's low 32
-#                        bits, or the legacy flow_tag= field on old-style
-#                        format-6 logs. Formats with no flow concept always
+#                        bits, or the flow_tag= field on format-6 lines that
+#                        carry no tsflow. Formats with no flow concept always
 #                        pass through.
 #   --drop-acks          Drop format-6 lines with ev_type=ACK (most common noise).
 #   --drop-reserved      Drop "format N - reserved" placeholder lines.
@@ -69,7 +66,7 @@ awk -v use_color="$USE_COLOR" \
 # NOT using strtonum(): it is a gawk-only extension, absent from mawk (the
 # default /usr/bin/awk provider on stock Ubuntu, which is what the BlueField
 # hosts run) and from the macOS/BSD one-true-awk used for local dev/test on
-# this Mac — and the rest of this script already sticks to portable POSIX
+# this Mac - and the rest of this script already sticks to portable POSIX
 # constructs (2-arg match/RSTART/RLENGTH, no gensub/asort/etc.) on purpose, so
 # it runs unmodified on whatever awk a given host resolves "awk" to. Splitting
 # tsflow into two 32-bit halves before converting (see split_tsflow) keeps
@@ -110,8 +107,7 @@ BEGIN {
 	ev[0] = "NULL"; ev[1] = "FW"; ev[2] = "CNP"; ev[3] = "TX";
 	ev[4] = "ACK";  ev[5] = "NACK"; ev[6] = "RTT";
 
-	# branch lookup (from device/rp/timely/algo/timely.c) — unchanged by the
-	# tsflow normalization.
+	# branch lookup (from device/rp/timely/algo/timely.c)
 	br["0x0"] = "T_LOW";   br["0x1"] = "T_HIGH";
 	br["0x2"] = "GRAD_LE"; br["0x3"] = "GRAD_GT";
 	br["0x80"] = "T_LOW+CLAMP";   br["0x81"] = "T_HIGH+CLAMP";
@@ -175,7 +171,7 @@ drop_reserved && /^format (7|8|9|10) - reserved/ { next }
 	if (drop_acks && ev[ev_t] == "ACK") next
 	if (filter_flow != "" && ft != filter_flow) next
 
-	# Substitute ev_type=N → ev_type=NAME
+	# Substitute ev_type=N -> ev_type=NAME
 	if (ev_t in ev) {
 		sub(/ev_type=[0-9]+/, "ev_type=" ev[ev_t])
 	}
@@ -192,12 +188,8 @@ drop_reserved && /^format (7|8|9|10) - reserved/ { next }
 }
 
 # --- Format 12: TIMELY RTT event (Algorithm 1 ran) ---------------------------
-# New layout: tsflow=0x%lx new_rtt=%lu norm_grad=%ld branch=0x%lx new_rate=%lu
-# rtt_diff is retired, and norm_grad is now genuinely sign-extended (%ld) by
-# the device before printing — so the old unsign-from-%lu heuristic this
-# block used to run on rtt_diff/norm_grad is dead weight (both the field it
-# no longer has, and a fixup the value no longer needs) and has been removed
-# rather than kept as a no-op.
+# Layout: tsflow=0x%lx new_rtt=%lu norm_grad=%ld branch=0x%lx new_rate=%lu
+# norm_grad arrives sign-extended (%ld) from the device; no fixup is needed here.
 /^format 12 - timely rtt:/ {
 	if (have_tsflow && filter_flow != "" && cur_flow != filter_flow) next
 

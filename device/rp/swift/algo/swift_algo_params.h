@@ -27,50 +27,45 @@
 #define _SWIFT_ALGO_PARAMS_H_
 
 /*
- * Compile-time defaults for Swift (Kumar et al., SIGCOMM 2020). These mirror the
- * swift_params[] descriptor table (swift_params.h) and apply until the orchestrator
- * pushes a PPCC param write. The paper publishes no numeric tuning table, so every
- * value it does not fix is a seed, flagged FIXME.
+ * Compile-time defaults for Swift.
+ * Kumar et al., "Swift: Delay is Simple and Effective for Congestion Control in the
+ * Datacenter", SIGCOMM 2020.
+ * These mirror the swift_params[] descriptor table and apply until the orchestrator
+ * pushes a PPCC param write.
  */
 
-/* ===== Fixed-point conventions (match TIMELY/DCQCN) ===== */
+/* ===== Fixed-point conventions ===== */
 #define SWIFT_FXP16_ONE     (1 << 16)   /* 1.0 in FXP16 (ratios, gains, cwnd packets) */
 #define SWIFT_FXP16_SHIFT   (16)
 #define SWIFT_RATE_MAX      (1 << 20)   /* 100% line rate in FXP20 (== DOCA_PCC_DEV_MAX_RATE) */
 #define SWIFT_CWND_ONE_FXP16 (1 << 16)  /* cwnd == 1.0 packet, the AI/pacing regime boundary */
 
-/* ===== Target delay scaling (paper §3.5) =====
+/* ===== Target delay scaling (paper Section 3.5) =====
  *   t = base_target + num_hops*hop_scale + max(0, min(alpha/sqrt(fcwnd) + beta, fs_range))
  * alpha/beta derived on-device from fs_range / fs_min_cwnd / fs_max_cwnd. */
 
 /*
- * base_target: base fabric target delay (ns); absorbs the fixed portion of fabric
- * delay (propagation, serialization) -- nothing is subtracted separately.
- * FIXME: the paper's 25-50 us points are Google's fabric; idle fabric RTT here is
- * ~3-4 us, so 10 us is used instead.
- * FIXME: revisit if variable segment sizes appear (a per-segment serialization
- * subtraction would then be warranted; BF3 exposes no per-event segment-byte source).
+ * base_target: base fabric target delay (ns). It absorbs the fixed portion of fabric
+ * delay (propagation, serialization); nothing is subtracted separately.
  */
 #define SWIFT_BASE_TARGET_NS  (10000)
 
 /*
- * fs_range: maximum extra target delay granted to small flows (ns) -- the full span
- * of the flow-scaling curve (paper §3.5).
- * FIXME: paper gives no value; 1.5x base_target is used.
+ * fs_range: maximum extra target delay granted to small flows (ns), the full span of
+ * the flow-scaling curve (paper Section 3.5).
  */
 #define SWIFT_FS_RANGE_NS  (15000)
 
 /*
  * fs_min_cwnd / fs_max_cwnd: knees of the flow-scaling curve (FXP16 packets):
  * fs_term = fs_range at/below fs_min_cwnd, 0 at/above fs_max_cwnd. Must satisfy
- * fs_min_cwnd < fs_max_cwnd (guarded in swift.c and set_algo_params).
- * FIXME: paper gives no values; 0.5 pkt and 16 pkt are used.
+ * fs_min_cwnd < fs_max_cwnd.
  */
 #define SWIFT_FS_MIN_CWND_FXP16  (32768)    /* 0.5 pkt */
 #define SWIFT_FS_MAX_CWND_FXP16  (1048576)  /* 16 pkt  */
 
 /*
- * Per-hop target term: target += num_hops * hop_scale (paper §3.5).
+ * Per-hop target term: target += num_hops * hop_scale (paper Section 3.5).
  * doca_pcc_dev_get_ttl_hoplimit() returns 0 on BF3, so num_hops is a fixed param;
  * hop_scale defaults to 0, keeping the term inert.
  */
@@ -93,16 +88,15 @@
 
 /*
  * max_mdf: floor on the MD multiplier (FXP16); also the cut applied on loss
- * (paper §3.6).
+ * (paper Section 3.6).
  * 0.5, from the Bolt artifact's Swift baseline (Arslan et al., NSDI 2023).
  */
 #define SWIFT_MAX_MDF_FXP16  (32768)
 
 /*
  * min_cwnd / max_cwnd / init_cwnd (FXP16 packets).
- * min_cwnd = 0.001 pkt (paper §3.4); min_rate must be able to represent the rate it
- * maps to, else min_rate is the effective floor.
- * FIXME: paper gives no max_cwnd / init_cwnd values; 64 pkt and 16 pkt (~BDP) are used.
+ * min_cwnd = 0.001 pkt (paper Section 3.4). It is only reachable if min_rate can
+ * represent the rate it maps to, otherwise min_rate is the effective floor.
  */
 #define SWIFT_MIN_CWND_FXP16   (66)       /* 0.001 pkt */
 #define SWIFT_MAX_CWND_FXP16   (4194304)  /* 64 pkt */
@@ -110,21 +104,20 @@
 
 /*
  * retx_reset_threshold: consecutive NACK/RTO events after which cwnd collapses to
- * min_cwnd (paper §3.6).
- * FIXME: paper gives no value; 3 is used.
+ * min_cwnd (paper Section 3.6).
  */
 #define SWIFT_RETX_RESET_THRESHOLD  (3)
 
 /* ===== cwnd -> rate actuation ===== */
 
 /*
- * Credits are unbacked on BF3 (see README), so cwnd is enforced through the rate
- * limiter: rate = cwnd / BDP(rtt) -- the paper's pacing law -- with rtt = the last
- * fabric sample clamped to >= min_rtt.
+ * Credits are unbacked on BF3, so cwnd is enforced through the rate limiter using the
+ * paper's pacing law rate = cwnd / BDP(rtt), with rtt = the last fabric sample clamped
+ * to >= min_rtt.
  */
-#define SWIFT_MSS_BYTES       (4096)    /* measured RoCE MTU (active_mtu) */
-#define SWIFT_MIN_RTT_NS      (3800)    /* measured BF3<->BF3 base RTT */
-#define SWIFT_LINE_RATE_MBPS  (100000)  /* measured link rate (100 GbE) */
+#define SWIFT_MSS_BYTES       (4096)    /* RoCE MTU (bytes) */
+#define SWIFT_MIN_RTT_NS      (3800)    /* base fabric RTT (ns) */
+#define SWIFT_LINE_RATE_MBPS  (100000)  /* link rate (Mbps, 100 GbE) */
 
 /*
  * Guard on the pacing arithmetic: line_rate_mbps * rtt_ns * 2^16 must fit in uint64;
@@ -132,21 +125,15 @@
  */
 #define SWIFT_PACING_RTT_MAX_NS  (100000000)  /* 100 ms */
 
-/*
- * min_rate: rate floor (FXP20).
- * FIXME: paper defines no minimum rate; the TIMELY/DCQCN floor 1<<6 is used.
- */
+/* min_rate: rate floor (FXP20). */
 #define SWIFT_MIN_RATE_FXP20  (1 << 6)
 
-/* ===== Endpoint window (paper §3.3) -- inert by design, not a deferral ===== */
+/* ===== Endpoint window (paper Section 3.3) ===== */
 
 /*
- * The endpoint window (ecwnd) cannot be implemented on BF3: the RoCE path never
- * touches the host, and the only endpoint-side duration the probe reflects (the
- * firmware turnaround t4 - t2) measured as a fixed ~106 ns while receiver-bound load
- * moved fabric_rtt 12x (characterized 2026-08-20; see README "The endpoint window
- * (§3.3): measured dead on BF3"). The two params stay registered so the append-only
- * index map is stable; the algorithm does not read them.
+ * BF3 exposes no endpoint-delay signal, so the endpoint window (ecwnd) is inert. The two
+ * params stay registered to keep the append-only index map stable; the algorithm does
+ * not read them.
  */
 #define SWIFT_ENDPOINT_TARGET_NS    (100000)
 #define SWIFT_ENDPOINT_EWMA_FXP16   (32768)  /* 0.5 */

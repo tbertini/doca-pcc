@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 NVIDIA's DOCA PCC (Programmable Congestion Control) reference application for BlueField-3, forked and extended with custom RoCE congestion-control algorithms (TIMELY, DCQCN, Swift). A host-side Linux app (`host/`) loads DPA (Data Path Accelerator, RISC-V) kernels (`device/`) onto the NIC; the DPA code handles per-flow CC events (RTT probes, ACK/NACK, CNP, TX) and sets each flow's TX rate.
 
-Each algorithm's `device/rp/<algo>/README.md` is the authoritative doc for that algorithm — read it before touching algorithm code. It covers the math, the fixed-point tricks, the trace formats, and the open FIXMEs.
+Each algorithm's `device/rp/<algo>/README.md` is the authoritative doc for that algorithm — read it before touching algorithm code. It covers the math, the fixed-point tricks, the trace formats, and the open questions.
 
 ## Environment and deployment — read first
 
@@ -50,7 +50,7 @@ Trace-format IDs and algo_ids are a cross-branch registry — never reuse anothe
 - `rp_<algo>_dev_main.c` — DPA entry points: `doca_pcc_dev_user_init` (registers the algo on all ports/slots), `doca_pcc_dev_user_algo` (per-event dispatch), `doca_pcc_dev_user_set_algo_params` (PPCC writes).
 - `algo/<algo>.c/.h` — the algorithm itself (init / event handler / param setter).
 - `algo/<algo>_ctxt.h` — per-flow state struct.
-- `algo/<algo>_algo_params.h` — compile-time defaults; every value that isn't paper-backed is marked `FIXME:` and is a seed to sweep.
+- `algo/<algo>_algo_params.h` — compile-time defaults; each value carries a short paper citation, and values with no paper backing (tuning seeds) are documented in the algorithm README.
 - `algo/<algo>_params.h` — the PPCC contract (param/counter index enums + descriptor table with name/unit/default/min/max). **Single source of truth**, shared by the DPA code and the host-side `host/<algo>_params_dump.c` (a no-DOCA-deps binary that emits the contract as JSON for incast-bench). Param tables are **append-only** — orchestrators address params by index — and the `trace_on` diagnostic param stays last.
 
 ### Host side (`host/`)
@@ -73,6 +73,6 @@ The 19-ish tuning params per algorithm are exposed through the standard PPCC reg
 
 ## Conventions
 
-- `grep -rn FIXME device/rp/<algo>/` lists the known unknowns; keep the FIXME-with-citation style (every constant cites a paper section or is flagged as a guess).
+- Constants keep a short paper citation next to the value; open questions and tuning seeds live in the per-algorithm README, not as FIXME/TODO comments in code.
 - Keep the per-algorithm README in sync with behavior changes — it is the design record (trace tables, branch semantics, tuning lessons like "retune `base_target` from a no-load fabric-RTT trace; idle RTT here is ~3–4 µs, not the paper's 25 µs").
 - Wire encodings in contracts: time in ns (uint32), cwnd in FXP16 packets, gains in FXP16, rate in FXP20. Human-unit conversion is the orchestrator's job, not the device's.

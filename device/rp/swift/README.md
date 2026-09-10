@@ -23,7 +23,7 @@ window (`ecwnd`, paper §3.3) is deferred; see [FIXMEs](#known-unknowns--fixmes)
 |---|---|
 | `algo/swift.h` | Public API: `swift_init`, `swift_algo`, `swift_set_algo_params`; trace gate + format IDs |
 | `algo/swift_ctxt.h` | Per-flow state struct, **exactly 48 bytes** (`fcwnd`, `cur_rate`, `t_last_decrease`, `retx_cnt`, RTT-probe abort machinery; `ecwnd`/endpoint reserved) |
-| `algo/swift_algo_params.h` | Compiled-in default `#define`s; every value cites a paper section or is marked `FIXME:` |
+| `algo/swift_algo_params.h` | Compiled-in default `#define`s; every value cites a paper section, unbacked tuning seeds are recorded in this README |
 | `algo/swift_params.h` | The PPCC **contract**: 20-param (19 tuning + 1 diagnostic `trace_on`) / 13-counter table (name, unit, default, min, max), shared by the DPA algorithm and the host `swift_params_dump`. Single source of truth |
 | `algo/swift.c` | Algorithm 1 + §3.5 target (see [§ Algorithm 1 mapping](#algorithm-1-mapping)) |
 | `rp_swift_dev_main.c` | DPA entry points; slot-15 fallback bypass (see [§ Slot 0 vs slot 15](#slot-0-vs-slot-15)) |
@@ -180,7 +180,7 @@ process):
 which subtracts none and folds everything into its empirically-retuned thresholds) it is
 absorbed into `base_target`. For fixed-MTU RoCE this is algebraically identical to an
 explicit subtraction. A per-segment subtraction would only matter for variable segment
-sizes, for which BF3 exposes no clean per-event byte source (`FIXME` in source).
+sizes, for which BF3 exposes no clean per-event byte source.
 
 ## The endpoint window (§3.3): measured dead on BF3
 
@@ -387,9 +387,7 @@ cadence.
 
 ## Known unknowns / FIXMEs
 
-```bash
-grep -rn "FIXME" device/rp/swift/
-```
+Open choices are recorded here rather than as FIXME comments in the source.
 
 Highlights:
 - **Integer 1/√cwnd:** no longer open: the precision/sign behaviour of
@@ -398,6 +396,10 @@ Highlights:
   fallback if a future input range misbehaves.
 - **Flow-scale constants** (`fs_range`, `fs_min_cwnd`, `fs_max_cwnd`), **`md_beta`,
   `max_mdf`, `max_cwnd`, `retx_reset_threshold`:** paper gives no values; seeded, sweep.
+- **`max_cwnd` / `init_cwnd` seeds:** the paper gives neither value; 64 pkts and 16 pkts
+  (about one BDP) were chosen here.
+- **`min_rate`:** paper defines no rate floor; reuses the `1<<6` FXP20 floor from the
+  TIMELY/DCQCN implementations.
 - **Endpoint window (`ecwnd`, §3.3):** closed as a negative result, not an open item:
   the only endpoint signal BF3 exposes (`np_turnaround`) is load-invariant, measured
   2026-08-20 (see "The endpoint window (§3.3): measured dead on BF3"). Params reserved,

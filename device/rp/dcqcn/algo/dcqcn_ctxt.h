@@ -33,18 +33,18 @@
  * (Zhu et al., "Congestion Control for Large-Scale RDMA Deployments", SIGCOMM 2015).
  *
  * RC (cur_rate) and RT (target_rate) are in FXP20 format (1<<20 = 100% line rate).
- * Alpha (α) is in FXP16 format (1<<16 = 1.0).
+ * Alpha is in FXP16 format (1<<16 = 1.0).
  * Timestamps are in nanoseconds (from doca_pcc_dev_get_timestamp).
  */
 typedef struct {
 	uint32_t cur_rate;		/* RC: current sending rate (FXP20) */
 	uint32_t target_rate;		/* RT: target rate for recovery (FXP20) */
-	uint32_t alpha;			/* α: congestion severity EWMA (FXP16, 1<<16 = 1.0) */
+	uint32_t alpha;			/* congestion severity EWMA (FXP16, 1<<16 = 1.0) */
 	uint32_t last_alpha_ts;		/* Timestamp (ns) of last alpha timer fire */
 	uint32_t last_rate_timer_ts;		/* Timestamp (ns) of last rate-increase timer fire */
 	uint32_t bytes_accumulated;	/* Bytes accumulated since last byte counter fire */
-	uint16_t t_count;		/* Timer fire count since last CNP (T in paper Fig. 7) */
-	uint16_t bc_count;		/* Byte counter fire count since last CNP (BC in paper Fig. 7) */
+	uint16_t t_count;		/* Timer fire count since last CNP (T in paper Figure 7) */
+	uint16_t bc_count;		/* Byte counter fire count since last CNP (BC in paper Figure 7) */
 	uint16_t prev_tx_cntr_32b;	/* Last cumulative TX 32-byte counter value (for delta computation) */
 	uint8_t reserved0[2];		/* Padding to 4-byte alignment */
 	uint32_t reserved[4];		/* Reserved for future use, pad to 48 bytes total */

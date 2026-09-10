@@ -5,7 +5,7 @@ labelled with the TIMELY param/counter name based on the cmd_type.
 
 NOTE: TIMELY_PARAMS / TIMELY_COUNTERS below mirror the contract defined in
 device/rp/timely/algo/timely_params.h. If that header changes (params added,
-reordered, renamed), update these lists to match — they are NOT auto-derived.
+reordered, renamed), update these lists to match - they are NOT auto-derived.
 
 Usage (one-time, in your shell):
 

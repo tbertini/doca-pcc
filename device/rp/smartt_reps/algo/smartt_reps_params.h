@@ -28,81 +28,49 @@
 #include <stdint.h>
 
 /*
- * Single source of truth for SMaRTT's PPCC parameter and counter contract.
+ * PPCC parameter and counter contract for SMaRTT: the single source of truth shared by
+ * the device algorithm (smartt_reps.c) and the host contract dumper
+ * (host/smartt_reps_params_dump.c).
  *
- * Included by:
- *   - smartt_reps.c (DPA): smartt_reps_init() registers params/counters from
- *     smartt_reps_params[].
- *   - smartt_reps_params_dump.c (host): emits JSON for incast-bench's parameter encoder.
+ * SMaRTT is from Bonato et al., "SMaRTT-REPS: Sender-based Marked Rapidly-adapting
+ * Trimmed & Timed Transport with Recycled Entropies", arXiv:2404.01630, 2024. REPS
+ * (Section 3.6) is not implemented.
  *
- * SMaRTT (Bonato et al., "SMaRTT-REPS: Sender-based Marked Rapidly-adapting Trimmed &
- * Timed Transport with Recycled Entropies", arXiv:2404.01630, Apr 2024) is a
- * sender-based, WINDOW-based controller combining a delay (RTT) signal and an ECN
- * signal per ACK (§3.2, four-case control loop), with QuickAdapt (§3.3) for severe
- * congestion and FastIncrease (§3.4) for bandwidth reclamation, gated by
- * Wait-to-Decrease (§3.6.1). REPS (§3.6, per-packet load balancing) is intentionally
- * NOT implemented -- BF3 exposes no per-packet entropy hook and the testbed has no
- * meaningful multipath (see README "REPS is intentionally NOT implemented").
- *
- * We control a congestion window (cwnd, in FXP16 packets) and actuate it on
- * BlueField-3 by mapping cwnd -> Tx rate via the BDP identity (see smartt_reps.c). BF3
- * has no usable credit/window actuator (doca_pcc_dev_results_t.credits is unbacked), so
- * rate is the actuator; cwnd remains the control variable.
- *
- * Wire encodings (consistent with the timely/dcqcn/swift contracts in this repo):
- *   - time          -> nanoseconds (uint32)
- *   - cwnd          -> FXP16 packets (1<<16 = 1.0 packet = 1 MSS/MTU; 0.001 pkt = 66)
- *   - ratios/gains  -> FXP16 (1<<16 = 1.0): fd, md, fi, mi, qa_scaling, thresholds
- *   - rate          -> FXP20 (1<<20 = 100% line rate): min_rate
- * Off-host tooling (incast-bench) is responsible for any human-unit -> FXP conversion.
- *
- * Defaults are aligned with the compile-time #defines in smartt_reps_algo_params.h so
- * that a doca_pcc instance running with no param writes behaves identically to a build
- * with the contract bypassed. The orchestrator overrides these at runtime over the PPCC
- * channel (cmd_type=0xB) when sweeping the parameter space.
+ * Wire encodings: time in ns (uint32), cwnd in FXP16 packets (1<<16 = 1.0 packet =
+ * 1 MSS/MTU), ratios and gains in FXP16, rate in FXP20 (1<<20 = 100% line rate).
+ * Human-unit conversion is the orchestrator's job.
  */
 
-/* SMaRTT algorithm ID. Project convention: TIMELY=0xBFFD, DCQCN=0xBFFE,
- * rtt_template/template=0xBFFF, Swift=0xBFFC. SMaRTT claims the next-lower free slot. */
+/* SMaRTT algorithm ID. */
 #define SMARTT_REPS_ALGO_ID  0xBFFB
 
 /*
  * Parameter indices.
  *
- * APPEND-ONLY: external orchestrators (incast-bench) address parameters by index in
- * bulk-set, so never reorder or insert -- only append before TRACE_ON is reassigned.
- * TRACE_ON is kept LAST so indices 0..N-2 stay stable across versions.
- *
- * Grouping: [0..1] delay reference (§3.5); [2..6] four-case + QuickAdapt gains
- * (§3.2, §3.3); [7..8] FastIncrease (§3.4); [9..11] Wait-to-Decrease + ECN-hold
- * (§3.6.1, signal mapping); [12..14] cwnd bounds (§3.5); [15..17] cwnd->rate actuation
- * (BDP); [18] diagnostics.
- *
- * TRACE_ON is a diagnostics-only toggle, NOT a tuning knob: it gates runtime emission
- * of the format 20/21/22/23/24 device traces (see smartt_reps.h). It rides in the param
- * array so it can be flipped at runtime over the existing PPCC channel without
- * rebuilding.
+ * APPEND-ONLY: orchestrators address parameters by index, so never reorder or insert.
+ * TRACE_ON is a diagnostics toggle, not a tuning knob, and stays LAST so indices
+ * 0..N-2 remain stable.
  */
 enum smartt_reps_param_idx {
-	/* --- delay reference (paper §3.5) --- */
-	SMARTT_REPS_P_BASE_RTT_NS         = 0,  /* brtt: no-load fabric RTT (measured ~3.8 us here) */
-	SMARTT_REPS_P_TARGET_RTT_NS       = 1,  /* trtt: congestion threshold = 1.5*brtt (§3.5) */
-	/* --- four-case gains (paper §3.2) + QuickAdapt (§3.3) --- */
-	SMARTT_REPS_P_FD_FXP16            = 2,  /* fd: Fair Decrease gain (§3.2.1 Eq.1) */
-	SMARTT_REPS_P_MD_FXP16            = 3,  /* md: Multiplicative Decrease gain (§3.2.2 Eq.2) */
-	SMARTT_REPS_P_FI_FXP16            = 4,  /* fi: Fair Increase gain (§3.2.3 Eq.3) */
-	SMARTT_REPS_P_MI_FXP16            = 5,  /* mi: Multiplicative Increase gain (§3.2.4 Eq.4); 0 => derive */
-	SMARTT_REPS_P_QA_SCALING_FXP16    = 6,  /* qa_scaling: QuickAdapt target scale (§3.3) */
-	/* --- FastIncrease (paper §3.4) --- */
-	SMARTT_REPS_P_FAST_INC_K_FXP16    = 7,  /* fast_inc_k: MTUs added per coalesced ACK (§3.4) */
-	SMARTT_REPS_P_FAST_INC_THRESH_FXP16 = 8,/* fast_inc_thresh: rtt<=brtt*thresh tolerance (§3.4) */
-	/* --- Wait-to-Decrease + ECN-hold (paper §3.6.1, signal mapping) --- */
-	SMARTT_REPS_P_WTD_ALPHA_FXP16     = 9,  /* wtd_alpha: EWMA weight for avg_wtd (§3.6.1) */
-	SMARTT_REPS_P_WTD_THRESH_FXP16    = 10, /* wtd_thresh: avg_wtd gate; 0 disables WTD (§3.6.1) */
-	SMARTT_REPS_P_ECN_CNP_HOLD_NS     = 11, /* ecn_cnp_hold_ns: CNP->ECN assertion window */
-	/* --- cwnd bounds (paper §3.5) --- */
-	SMARTT_REPS_P_MAX_CWND_FRAC_FXP16 = 12, /* max_cwnd_frac: cwnd cap as fraction of BDP (§3.5) */
-	SMARTT_REPS_P_MIN_CWND_FXP16      = 13, /* min_cwnd: cwnd floor, FXP16 pkts (§3.5) */
+	/* --- delay reference (paper Section 3.5) --- */
+	SMARTT_REPS_P_BASE_RTT_NS         = 0,  /* brtt: no-load fabric RTT (ns) */
+	SMARTT_REPS_P_TARGET_RTT_NS       = 1,  /* trtt: congestion threshold = 1.5*brtt (Section 3.5) */
+	/* --- four-case gains (paper Section 3.2) + QuickAdapt (Section 3.3) --- */
+	SMARTT_REPS_P_FD_FXP16            = 2,  /* fd: Fair Decrease gain (Eq. 1, Section 3.2.1) */
+	SMARTT_REPS_P_MD_FXP16            = 3,  /* md: Multiplicative Decrease gain (Eq. 2, Section 3.2.2) */
+	SMARTT_REPS_P_FI_FXP16            = 4,  /* fi: Fair Increase gain (Eq. 3, Section 3.2.3) */
+	SMARTT_REPS_P_MI_FXP16            = 5,  /* mi: Multiplicative Increase gain (Eq. 4, Section 3.2.4); 0 => derive */
+	SMARTT_REPS_P_QA_SCALING_FXP16    = 6,  /* qa_scaling: QuickAdapt target scale (Section 3.3) */
+	/* --- FastIncrease (paper Section 3.4) --- */
+	SMARTT_REPS_P_FAST_INC_K_FXP16    = 7,  /* fast_inc_k: MTUs added per coalesced ACK (Section 3.4) */
+	SMARTT_REPS_P_FAST_INC_THRESH_FXP16 = 8,/* fast_inc_thresh: rtt<=brtt*thresh tolerance (Section 3.4) */
+	/* --- Wait-to-Decrease + ECN-hold (paper Section 3.6.1) --- */
+	SMARTT_REPS_P_WTD_ALPHA_FXP16     = 9,  /* wtd_alpha: EWMA weight for avg_wtd (Section 3.6.1) */
+	SMARTT_REPS_P_WTD_THRESH_FXP16    = 10, /* wtd_thresh: avg_wtd gate; 0 disables WTD (Section 3.6.1) */
+	SMARTT_REPS_P_ECN_CNP_HOLD_NS     = 11, /* ecn_cnp_hold_ns: CNP->ECN assertion window (ns) */
+	/* --- cwnd bounds (paper Section 3.5) --- */
+	SMARTT_REPS_P_MAX_CWND_FRAC_FXP16 = 12, /* max_cwnd_frac: cwnd cap as fraction of BDP (Section 3.5) */
+	SMARTT_REPS_P_MIN_CWND_FXP16      = 13, /* min_cwnd: cwnd floor, FXP16 pkts (Section 3.5) */
 	SMARTT_REPS_P_INIT_CWND_FXP16     = 14, /* init_cwnd: new-flow window; 0 => BDP */
 	/* --- cwnd -> rate actuation (BDP identity) --- */
 	SMARTT_REPS_P_MSS_BYTES           = 15, /* segment size for BDP (bytes) */
@@ -114,20 +82,15 @@ enum smartt_reps_param_idx {
 };
 
 /*
- * Counter indices.
- *
- * EVENTS is the total event count. ACK_EVENTS is the control-loop driver and MUST be
- * nonzero on this hardware (SMaRTT is the repo's first ACK-event consumer). The FD/MD/
- * FI/MI counters count the four Algorithm-1 window branches (FD includes the FD applied
- * inside MD; FI includes the FI applied inside MI, per §3.2.2/§3.2.4). The remaining
- * counters instrument QuickAdapt, FastIncrease, WTD gating, the post-QA blackout, the
- * rate clamps, and the ΔPSN sanity-cap fallbacks.
+ * Counter indices. The FD/MD/FI/MI counters count the four Algorithm 1 window branches:
+ * FD includes the FD applied inside MD, and FI includes the FI applied inside MI
+ * (paper Sections 3.2.2 and 3.2.4).
  */
 enum smartt_reps_counter_idx {
 	SMARTT_REPS_C_EVENTS          = 0,  /* total events dispatched */
-	SMARTT_REPS_C_ACK_EVENTS      = 1,  /* ACK events (control-loop driver -- must be nonzero!) */
+	SMARTT_REPS_C_ACK_EVENTS      = 1,  /* ACK events (control-loop driver) */
 	SMARTT_REPS_C_RTT_EVENTS      = 2,  /* RTT probe responses */
-	SMARTT_REPS_C_CNP_EVENTS      = 3,  /* CNP events ("is ECN marking live?") */
+	SMARTT_REPS_C_CNP_EVENTS      = 3,  /* CNP events (ECN-marking answer) */
 	SMARTT_REPS_C_NACK_EVENTS     = 4,  /* NACK events (loss signal) */
 	SMARTT_REPS_C_FD              = 5,  /* Fair Decrease applications (incl. FD inside MD) */
 	SMARTT_REPS_C_MD              = 6,  /* Multiplicative Decrease applications */
@@ -139,7 +102,7 @@ enum smartt_reps_counter_idx {
 	SMARTT_REPS_C_ACKS_IGNORED    = 12, /* ACK events swallowed by post-QA blackout */
 	SMARTT_REPS_C_RATE_CLAMPED_MIN = 13,/* actuated rate hit min_rate */
 	SMARTT_REPS_C_RATE_CLAMPED_MAX = 14,/* actuated rate hit MAX_RATE */
-	SMARTT_REPS_C_PSN_ANOMALY     = 15, /* ΔPSN sanity-cap fallbacks to num_coalesced */
+	SMARTT_REPS_C_PSN_ANOMALY     = 15, /* delta-PSN sanity-cap fallbacks to num_coalesced */
 	SMARTT_REPS_NUM_COUNTERS
 };
 
@@ -151,27 +114,8 @@ struct smartt_reps_param_desc {
 	uint32_t max;
 };
 
-/* THE contract. Edit only here.
- *
- * Honesty caveat: SMaRTT (Bonato et al., arXiv:2404.01630) publishes formula structure
- * and the §3.5 gain values (fd=0.8, md=2.0, fi=0.25, qa_scaling=0.8, k=2 MTU), but
- * several tuning constants are unstated in the paper and are FIXME seeds to sweep:
- * fast_inc_thresh (paper says "close to brtt"), wtd_alpha (§3.6.1 gives no α),
- * ecn_cnp_hold_ns (a BF3-specific CNP->ECN assertion window). mi=0 is a sentinel: the
- * device derives mi = brtt/(trtt-brtt) (= 2.0 at trtt=1.5*brtt, §3.2.4). md defaults to
- * 4.0 (= §3.2.2's 2.0 doubled): the paper recommends doubling md when using timeouts
- * instead of trimming (§3.3), and NACKs (the timeout surrogate) are the loss signal here.
- *
- * Critical retune lesson carried from TIMELY/Swift: idle fabric RTT on this BF3 setup
- * measured ~3.8 us (NOT the paper's 12 us), so base_rtt_ns=4000 / target_rtt_ns=6000;
- * retune from a no-load fabric_rtt trace (format 23) or the controller never decreases.
- *
- * γ note (§3.5 "Scaling"): the paper scales fi/mi by γ=bdp/reference_bdp
- * (reference = 100 Gbps × 12 µs = 150000 bytes). The device applies γ at use time
- * (smartt_reps_gamma_fxp16), so the fi/mi values here are the paper's reference values
- * and the effective gains track base_rtt_ns/line_rate_mbps (γ ~ 1/3 at the defaults).
- * fd/md are fixed regardless of link speed (paper: always react strongly).
- *
+/* The contract: parameter name, unit, default, min and max. Edit only here.
+ * mi = 0 is a sentinel: the device derives mi = brtt/(trtt-brtt) (paper Section 3.2.4).
  * FXP16 cwnd: 0.001=66, 0.5=32768, 1.0=65536, 16=1048576, 64=4194304.
  */
 static const struct smartt_reps_param_desc smartt_reps_params[SMARTT_REPS_NUM_PARAMS] = {
@@ -193,8 +137,8 @@ static const struct smartt_reps_param_desc smartt_reps_params[SMARTT_REPS_NUM_PA
 	[SMARTT_REPS_P_MSS_BYTES]           = {"mss_bytes",        "bytes",       4096,     256,      9000},
 	[SMARTT_REPS_P_LINE_RATE_MBPS]      = {"line_rate_mbps",   "Mbps",      100000,    1000,    800000},
 	[SMARTT_REPS_P_MIN_RATE_FXP20]      = {"min_rate",         "FXP20",         64,       1,    104858},
-	/* Diagnostics-only: gates runtime device-trace emission. def=0 (quiet), range [0,1].
-	 * min MUST be 0 so traces can be turned back off at runtime. */
+	/* Diagnostics only: gates runtime device-trace emission. min must stay 0 so traces
+	 * can be turned back off at runtime. */
 	[SMARTT_REPS_P_TRACE_ON]            = {"trace_on",         "bool",           0,       0,         1},
 };
 

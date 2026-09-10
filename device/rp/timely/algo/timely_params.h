@@ -28,34 +28,22 @@
 #include <stdint.h>
 
 /*
- * Single source of truth for TIMELY's PPCC parameter and counter contract.
+ * TIMELY PPCC parameter and counter contract: the single source of truth, shared
+ * by the DPA algorithm (timely.c) and the host-side dumper (timely_params_dump.c).
  *
- * Included by:
- *   - timely.c (DPA): timely_init() registers params/counters from timely_params[].
- *   - timely_params_dump.c (host): emits JSON for incast-bench's parameter encoder.
+ * Mittal et al., "TIMELY: RTT-based Congestion Control for the Datacenter",
+ * SIGCOMM 2015.
  *
- * Wire encoding for rate parameters is FXP20 (1<<20 = 100% line rate, dimensionless
- * fraction). Off-host tooling (incast-bench) is responsible for human Mbps -> FXP20
- * conversion using the configured line rate. Time parameters are nanoseconds. Alpha
- * and beta are FXP16 (1<<16 = 1.0). HAI threshold is a raw count.
- *
- * Defaults are the pre-PPCC measured-good values: a doca_pcc instance running
- * without any param writes uses them. The orchestrator (incast-bench) overrides
- * them at runtime via PPCC cmd_type=0x8/0xB when sweeping the parameter space.
+ * Wire encodings: rates in FXP20 (1<<20 = 100% line rate), times in ns, alpha and
+ * beta in FXP16 (1<<16 = 1.0), hai_threshold a raw count. Conversion to and from
+ * human units is the orchestrator's job.
  */
 
-/* TIMELY algorithm ID. Project convention: DCQCN=0xBFFE, rtt_template=0xBFFF. */
+/* TIMELY algorithm ID. */
 #define TIMELY_ALGO_ID  0xBFFD
 
-/* Parameter indices. Order matches the existing DPA registration order; INIT_RATE
- * is appended as the 9th parameter (was hardcoded as TIMELY_NEW_FLOW_RATE_FXP20).
- *
- * TRACE_ON (10th) is a diagnostics-only toggle, NOT an algorithm tuning knob: it
- * gates runtime emission of the format 6/11/12/14 device traces (see timely.h).
- * It rides in the param array -- rather than a mailbox or a device global -- so it
- * can be flipped at runtime over the existing, tested PPCC channel without rebuilding.
- * Appended last so indices 0..8 stay stable for the orchestrator; sweeps should leave
- * it at its default of 0. */
+/* Parameter indices. The table is append-only: orchestrators address params by
+ * index. TRACE_ON is a diagnostics toggle, not a tuning knob, and stays last. */
 enum timely_param_idx {
 	TIMELY_P_T_LOW_NS         = 0,
 	TIMELY_P_T_HIGH_NS        = 1,
@@ -66,22 +54,14 @@ enum timely_param_idx {
 	TIMELY_P_HAI_THRESHOLD    = 6,
 	TIMELY_P_MIN_RATE_FXP20   = 7,
 	TIMELY_P_INIT_RATE_FXP20  = 8,
-	TIMELY_P_TRACE_ON         = 9,  /* diagnostics: runtime trace toggle (0/1), not a tuning param */
+	TIMELY_P_TRACE_ON         = 9,  /* diagnostics: runtime trace toggle (0/1) */
 	TIMELY_NUM_PARAMS
 };
 
-/* Counter indices. EVENTS is the total event count; the four branch counters
- * (MD_GRADIENT, MD_THIGH, AI, HAI) sum to ~EVENTS minus events that took none of
- * those branches (TX, and RTT events from spurious probes; CNP/ACK/NACK are
- * masked at init and never counted). RTT_LT_TLOW
- * and RTT_GT_THIGH are independent classification counters (RTT_LT_TLOW counts
- * coincide with AI on the T_low branch; RTT_GT_THIGH coincide with MD_THIGH).
- *
- * RATE_CLAMPED_MIN/MAX are saturation counters: MIN means a decrease run drove the
- * rate into the floor, MAX means the increase side is pinned at line rate and δ is
- * larger than the fabric can absorb. Both are needed to read a δ sweep -- without
- * MAX you cannot distinguish "δ is well tuned" from "δ overshoots every event and
- * the ceiling is doing the work". */
+/* Counter indices. EVENTS counts every dispatched event; MD_GRADIENT, MD_THIGH, AI
+ * and HAI count the Algorithm 1 branch taken; RTT_LT_TLOW and RTT_GT_THIGH classify
+ * the RTT sample; RATE_CLAMPED_MIN/MAX count rate saturation at the floor and at the
+ * line-rate ceiling. */
 enum timely_counter_idx {
 	TIMELY_C_EVENTS           = 0,
 	TIMELY_C_MD_GRADIENT      = 1,
@@ -91,7 +71,7 @@ enum timely_counter_idx {
 	TIMELY_C_RTT_LT_TLOW      = 5,
 	TIMELY_C_RTT_GT_THIGH     = 6,
 	TIMELY_C_RATE_CLAMPED_MIN = 7,
-	TIMELY_C_RATE_CLAMPED_MAX = 8,  /* appended: rate hit the line-rate ceiling */
+	TIMELY_C_RATE_CLAMPED_MAX = 8,  /* rate hit the line-rate ceiling */
 	TIMELY_NUM_COUNTERS
 };
 
@@ -103,29 +83,13 @@ struct timely_param_desc {
 	uint32_t max;
 };
 
-/* THE contract. Edit only here.
- *
- * Defaults are the pre-PPCC measured-good values on a 100 Gbps BlueField-3
- * fabric. FXP20 values assume a 100 Gbps line rate:
+/* Defaults are tuned for a 100 Gbps link, which the FXP20 values assume:
  *   N Mbps -> N*1e6 / 100e9 * (1<<20) = N*10.486 (rounded).
- */
-
-/* alpha=1311 (0.02 in FXP16) -- the paper names the EWMA weight in Algorithm 1 but gives no
- * value for it, neither there nor in its §6 parameter list. The value comes from the rate
- * computation code snippet the paper's first author publishes alongside the paper
- * (https://radhikam.web.illinois.edu/timely-code-snippet.cc), whose header reads
- * "ewma_alpha: recommended value = 0.02". The same snippet recommends beta=0.8 and
- * HAI_Thresh=5, which the defaults below already match.
- */
-
-/* Paper-silent choices (the README "Known unknowns / FIXMEs"); revisit if retuning:
- * FIXME: delta=1049 (FXP20) -- the paper gives delta as absolute bandwidth (10 Mbps); we encode
- *   it as a line-rate fraction, 1049 ~= 100 Mbps on 100 Gbps (the paper's 10 Mbps ~= 105).
- *   Re-tune with the NIC line rate.
- * FIXME: min_rtt_ns=3800 -- the paper says "a fixed value known ahead of time" without a number;
- *   measured BF3-to-BF3 1:1 ib_write_bw. Its magnitude scales the gradient-branch decrease.
- * FIXME: min_rate=64 (1<<6 in FXP20) -- the paper defines no rate floor; matches DCQCN and keeps
- *   the rate from collapsing to zero on a long decrease run.
+ *
+ * alpha = 1311 (0.02 in FXP16): the paper names the EWMA weight in Algorithm 1 but
+ * gives no value; 0.02 is the value recommended by the first author's published rate
+ * computation snippet (https://radhikam.web.illinois.edu/timely-code-snippet.cc),
+ * which also gives beta = 0.8 and hai_threshold = 5 (paper Section 6).
  */
 static const struct timely_param_desc timely_params[TIMELY_NUM_PARAMS] = {
 	[TIMELY_P_T_LOW_NS]        = {"t_low",         "ns",       10000,    1000,  200000},
@@ -137,8 +101,7 @@ static const struct timely_param_desc timely_params[TIMELY_NUM_PARAMS] = {
 	[TIMELY_P_HAI_THRESHOLD]   = {"hai_threshold", "count",        5,       1,      50},
 	[TIMELY_P_MIN_RATE_FXP20]  = {"min_rate",      "FXP20",       64,       1,  104858},
 	[TIMELY_P_INIT_RATE_FXP20] = {"init_rate",     "FXP20",  1048576,   10486, 1048576},
-	/* Diagnostics-only: gates runtime device-trace emission. def=0 (quiet), range [0,1].
-	 * min MUST be 0 so traces can be turned back off at runtime. */
+	/* Diagnostics only; min must be 0 so traces can be turned back off at runtime. */
 	[TIMELY_P_TRACE_ON]        = {"trace_on",      "bool",         0,       0,       1},
 };
 

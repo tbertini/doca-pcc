@@ -44,11 +44,9 @@
 
 #pragma clang diagnostic ignored "-Wunused-parameter"
 
-/* Per-event trace emission, gated by DCQCN_TRACE_ENABLED(param) (see dcqcn.h):
- * compiled in unconditionally, emitted only when the trace_on PPCC param is set at
- * runtime (or always under -DDCQCN_DEBUG). The flush is gated too.
- * WARNING: even gated off, this is hot-path plumbing (every TX event) -- see dcqcn.h
- * for the cost when disabled. */
+/* Per-event trace emission, gated by DCQCN_TRACE_ENABLED(param): compiled in
+ * unconditionally, emitted only when the trace_on PPCC param is set at runtime
+ * (or always under -DDCQCN_DEBUG). The flush is gated too. */
 #define DCQCN_TRACE(param, fmt_id, a1, a2, a3, a4, a5) \
 	do { \
 		if (DCQCN_TRACE_ENABLED(param)) \
@@ -61,8 +59,8 @@
 			doca_pcc_dev_trace_flush(); \
 	} while (0)
 
-/* Trace format IDs (emitted when DCQCN_TRACE_ENABLED(param) is true; see dcqcn.h).
- * Format 6 (shared per-event summary) is emitted from rp_dcqcn_dev_main.c. */
+/* Trace format IDs. Format 6, the shared per-event summary, is emitted from
+ * rp_dcqcn_dev_main.c. */
 #define DCQCN_TRACE_FMT_NEW_FLOW  (7)
 #define DCQCN_TRACE_FMT_CNP       (8)
 #define DCQCN_TRACE_FMT_TX        (9)
@@ -79,24 +77,17 @@ static inline uint32_t dcqcn_diff_with_wrap32(uint32_t greater_num, uint32_t sma
 	return greater_num - smaller_num;
 }
 
-/* Bound on alpha-decay catch-up iterations per event (keeps the loop finite on the
- * DPA). 32 decays at g=1/256 only reduce α by (255/256)^32 ≈ 0.88, so a gap longer
- * than the bound means a long-idle flow: α snaps to 0 instead of iterating. */
+/* Bound on alpha-decay catch-up iterations per event; past the bound alpha snaps to 0. */
 #define DCQCN_MAX_ALPHA_CATCHUP (32)
 
 #define DCQCN_MAX_TIMER_CATCHUP (8)
 
-/* Same bound for the byte counter's catch-up loop. Needed because a single TX event
- * can carry up to 65535 * 32 = 2 MiB of delta, so a swept-down byte_counter_th (min 1)
- * would otherwise spin for millions of iterations on the DPA. At the default B = 10 MiB
- * the loop always runs exactly once, so the bound is unreachable in practice. */
+/* Bound on byte-counter catch-up iterations per event: one TX event can carry up to
+ * 65535 * 32 = 2 MiB of delta, unbounded work at the minimum byte_counter_th of 1. */
 #define DCQCN_MAX_BYTE_CATCHUP (8)
 
-/* Param/counter indices and default/min/max values come from dcqcn_params.h (the
- * PPCC contract; single source of truth). Description strings are kept const
- * volatile to prevent dead-code elimination by LTO (they are read out-of-band by the
- * host, never dereferenced on-device, so without volatile the contract strings
- * vanish). */
+/* Description strings are const volatile: the host reads them out-of-band and the
+ * device never dereferences them, so without volatile LTO would eliminate them. */
 const volatile char dcqcn_desc[] = "DCQCN v1.0 (Zhu et al. SIGCOMM 2015)";
 static const volatile char dcqcn_param_timer_period_desc[] = "TIMER_PERIOD, rate increase timer period in ns";
 static const volatile char dcqcn_param_byte_counter_th_desc[] = "BYTE_COUNTER_TH, byte counter threshold in bytes";
@@ -123,11 +114,7 @@ void dcqcn_init(uint32_t algo_idx)
 
 	doca_pcc_dev_algo_init_metadata(algo_idx, &algo_def, DCQCN_PARAM_NUM, DCQCN_COUNTER_NUM);
 
-	/* Register every parameter from the contract table. min/max/def come from
-	 * dcqcn_params[]; permissions=1 (updatable). Passing the table's min (not a
-	 * hardcoded 1) keeps params 0-7 value-identical with the pre-contract calls, all
-	 * of which happened to pass MIN=1 (see dcqcn_params.h for the transcription), and
-	 * lets the appended trace_on (index 8) accept a write of 0. */
+	/* Register every parameter from the contract table; permissions=1 (updatable). */
 #define DCQCN_REG_PARAM(idx, desc) \
 	doca_pcc_dev_algo_init_param(algo_idx, (idx), dcqcn_params[(idx)].def, dcqcn_params[(idx)].max, \
 				     dcqcn_params[(idx)].min, 1, sizeof(desc), (uint64_t)(desc))
@@ -155,7 +142,7 @@ void dcqcn_init(uint32_t algo_idx)
 /*
  * Rate increase logic implementing the three phases from Figure 7 of the paper.
  *
- * Phase determination (paper Section 3.1, Fig. 7):
+ * Phase determination (paper Section 3.1, Figure 7):
  *   - Fast Recovery:     max(T, BC) < F  =>  RC = (RT + RC) / 2
  *   - Hyper Increase:    min(T, BC) > F  =>  RT += R_HAI; RC = (RT + RC) / 2
  *   - Additive Increase: otherwise       =>  RT += R_AI;  RC = (RT + RC) / 2
@@ -163,9 +150,8 @@ void dcqcn_init(uint32_t algo_idx)
  * @ccctx [in/out]: Per-flow context
  * @cur_rate [in]: Current rate RC (FXP20)
  * @param [in]: Algorithm parameters
- * @tsflow [in]: DCQCN_TRACE_TSFLOW(ts, flow_tag) of the TX event driving this
- * increase, forwarded from dcqcn_handle_tx (this helper has no doca_pcc_dev_event_t
- * of its own) -- used only by the format-10 trace below, never by the rate math.
+ * @tsflow [in]: DCQCN_TRACE_TSFLOW(ts, flow_tag) of the driving TX event, used only
+ * by the format-10 trace
  * @return: Updated rate RC (FXP20)
  */
 static inline uint32_t dcqcn_rate_increase(cc_ctxt_dcqcn_t *ccctx,
@@ -176,7 +162,7 @@ static inline uint32_t dcqcn_rate_increase(cc_ctxt_dcqcn_t *ccctx,
 	uint16_t t_count = ccctx->t_count;
 	uint16_t bc_count = ccctx->bc_count;
 	uint32_t target_rate = ccctx->target_rate;
-	uint32_t old_rate = cur_rate; /* pre-update snapshot, used only by the format-10 trace below */
+	uint32_t old_rate = cur_rate; /* pre-update snapshot, trace only */
 	uint32_t F = param[DCQCN_PARAM_F_THRESHOLD];
 	uint32_t R_AI = param[DCQCN_PARAM_R_AI];
 	uint32_t R_HAI = param[DCQCN_PARAM_R_HAI];
@@ -187,8 +173,6 @@ static inline uint32_t dcqcn_rate_increase(cc_ctxt_dcqcn_t *ccctx,
 	if (max_count < F) {
 		/* Fast Recovery (paper Equation 3): RC = (RT + RC) / 2 */
 		cur_rate = (target_rate + cur_rate) >> 1;
-		/* t_bc dropped from this format (available at fmt-9/TX cadence instead) --
-		 * see README trace table. */
 		DCQCN_TRACE(param, DCQCN_TRACE_FMT_RATE_INC, tsflow, old_rate, target_rate, 0 /* FR */, cur_rate);
 	} else if (min_count > F) {
 		/* Hyper Increase (paper Section 3.1, QCN [17]): both T and BC past F.
@@ -212,9 +196,9 @@ static inline uint32_t dcqcn_rate_increase(cc_ctxt_dcqcn_t *ccctx,
 }
 
 /*
- * Alpha decay: α = (1 - g) * α  (paper Equation 2)
+ * Alpha decay: alpha = (1 - g) * alpha  (paper Equation 2)
  *
- * With g = 1/(1 << g_shift), this becomes: α = α - (α >> g_shift)
+ * With g = 1/(1 << g_shift), this becomes: alpha = alpha - (alpha >> g_shift)
  */
 static inline uint32_t dcqcn_alpha_decay(uint32_t alpha, uint32_t g_shift)
 {
@@ -222,10 +206,10 @@ static inline uint32_t dcqcn_alpha_decay(uint32_t alpha, uint32_t g_shift)
 }
 
 /*
- * Alpha update on CNP: α = (1 - g) * α + g  (paper Equation 1)
+ * Alpha update on CNP: alpha = (1 - g) * alpha + g  (paper Equation 1)
  *
- * With g = 1/(1 << g_shift) and α in FXP16:
- *   α = α - (α >> g_shift) + (1 << (16 - g_shift))
+ * With g = 1/(1 << g_shift) and alpha in FXP16:
+ *   alpha = alpha - (alpha >> g_shift) + (1 << (16 - g_shift))
  */
 static inline uint32_t dcqcn_alpha_update_cnp(uint32_t alpha, uint32_t g_shift)
 {
@@ -239,7 +223,7 @@ static inline uint32_t dcqcn_alpha_update_cnp(uint32_t alpha, uint32_t g_shift)
  * Handle new flow initialization.
  *
  * Paper Section 3.1: "When a flow starts, it sends at full line rate"
- * Paper footnote 1: "Initial value of α is 1"
+ * Paper footnote 1: "Initial value of alpha is 1"
  */
 static inline void dcqcn_handle_new_flow(doca_pcc_dev_event_t *event,
 					  uint32_t *param,
@@ -272,12 +256,12 @@ static inline void dcqcn_handle_new_flow(doca_pcc_dev_event_t *event,
  *
  * Implements the CutRate() function from Figure 7 of the paper:
  *   1. RT = RC                          (save current rate as target)
- *   2. RC = RC * (1 - α/2)             (Equation 1: reduce current rate)
- *   3. α = (1-g)*α + g                 (Equation 1: update alpha EWMA)
+ *   2. RC = RC * (1 - alpha/2)          (Equation 1: reduce current rate)
+ *   3. alpha = (1-g)*alpha + g          (Equation 1: update alpha EWMA)
  *   4. Reset(Timer, ByteCounter, T, BC, AlphaTimer)
  *
- * Before cutting rate, we apply any pending alpha decays (Equation 2)
- * since the alpha timer may have fired while waiting for this CNP.
+ * Pending alpha decays (Equation 2) are applied first, since the alpha timer may
+ * have fired while waiting for this CNP.
  */
 static inline void dcqcn_handle_cnp(doca_pcc_dev_event_t *event,
 				     uint32_t *param,
@@ -286,7 +270,7 @@ static inline void dcqcn_handle_cnp(doca_pcc_dev_event_t *event,
 {
 	uint32_t timestamp = doca_pcc_dev_get_timestamp(event);
 	uint32_t cur_rate = ccctx->cur_rate;
-	uint32_t old_rate = cur_rate; /* pre-update snapshot, used only by the format-8 trace below */
+	uint32_t old_rate = cur_rate; /* pre-update snapshot, trace only */
 	uint64_t tsflow = DCQCN_TRACE_TSFLOW(timestamp, doca_pcc_dev_get_flowtag(event));
 	uint32_t alpha = ccctx->alpha;
 	uint32_t g_shift = param[DCQCN_PARAM_G_SHIFT];
@@ -309,16 +293,14 @@ static inline void dcqcn_handle_cnp(doca_pcc_dev_event_t *event,
 	/* Step 1 (Equation 1): RT = RC */
 	ccctx->target_rate = cur_rate;
 
-	/* Step 2 (Equation 1): RC = RC * (1 - α/2)
-	 * α is in FXP16, so α/2 in FXP16 = α >> 1.
-	 * (1 - α/2) in FXP16 = (1<<16) - (α >> 1).
-	 * doca_pcc_dev_fxp_mult(FXP16_factor, FXP20_rate) → FXP20_result. */
+	/* Step 2 (Equation 1): RC = RC * (1 - alpha/2), alpha in FXP16.
+	 * doca_pcc_dev_fxp_mult(FXP16 factor, FXP20 rate) -> FXP20 result. */
 	uint32_t half_alpha = alpha >> 1;
 	uint32_t dec_factor = (1 << 16) - half_alpha;
 
 	cur_rate = doca_pcc_dev_fxp_mult(dec_factor, cur_rate);
 
-	/* Step 3 (Equation 1): α = (1-g)*α + g */
+	/* Step 3 (Equation 1): alpha = (1-g)*alpha + g */
 	alpha = dcqcn_alpha_update_cnp(alpha, g_shift);
 
 	/* Step 4 (Figure 7): Reset(Timer, ByteCounter, T, BC, AlphaTimer) */
@@ -343,14 +325,13 @@ static inline void dcqcn_handle_cnp(doca_pcc_dev_event_t *event,
 /*
  * Handle TX event: implements the rate increase logic from Figure 7.
  *
- * On each TX event we check three software timers/counters:
- *   1. Alpha timer (Equation 2): decay α every timer_period ns
+ * On each TX event three software timers/counters are checked:
+ *   1. Alpha timer (Equation 2): decay alpha every timer_period ns
  *   2. Rate increase timer (Figure 7): increment T, increase rate every timer_period ns
  *   3. Byte counter (Figure 7): increment BC, increase rate every B bytes sent
  *
- * The paper assumes NIC hardware timers that fire asynchronously; in DOCA's
- * event-driven model we advance them on TX events instead — equivalent for active
- * flows, with bounded catch-up covering idle gaps.
+ * The paper's asynchronous NIC hardware timers are advanced on TX events here, with
+ * bounded catch-up covering idle gaps.
  */
 static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 				    uint32_t *param,
@@ -363,11 +344,9 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 	uint32_t g_shift = param[DCQCN_PARAM_G_SHIFT];
 	uint32_t timer_period = param[DCQCN_PARAM_TIMER_PERIOD];
 	uint32_t byte_threshold = param[DCQCN_PARAM_BYTE_COUNTER_TH];
-	/* Shared by this event's format-9 trace and every format-10 trace fired by
-	 * dcqcn_rate_increase() below (same event -> same ts/flow_tag). */
 	uint64_t tsflow = DCQCN_TRACE_TSFLOW(timestamp, doca_pcc_dev_get_flowtag(event));
 
-	/* --- Alpha Timer (Equation 2): α = (1 - g) * α --- */
+	/* --- Alpha Timer (Equation 2): alpha = (1 - g) * alpha --- */
 	uint32_t alpha_elapsed = dcqcn_diff_with_wrap32(timestamp, ccctx->last_alpha_ts);
 
 	if (timer_period > 0 && alpha_elapsed >= timer_period) {
@@ -384,20 +363,14 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 		ccctx->alpha = alpha;
 	}
 
-	/* --- Rate Increase Timer (Figure 7: Timer expires → T++; rate increase) --- */
+	/* --- Rate Increase Timer (Figure 7: Timer expires -> T++; rate increase) --- */
 	uint32_t timer_elapsed = dcqcn_diff_with_wrap32(timestamp, ccctx->last_rate_timer_ts);
 
 	if (timer_period > 0 && timer_elapsed >= timer_period) {
 		uint32_t n_timer = timer_elapsed / timer_period;
 
-		/* Advance the deadline by whole periods, so the timer keeps a fixed phase --
-		 * the paper's hardware timer fires every T regardless of when the DPA gets to
-		 * observe it. Assigning `timestamp` here instead would discard the sub-period
-		 * remainder on every fire and make the timer run systematically slow, at a
-		 * rate set by the TX event cadence. Same discipline as the alpha timer above.
-		 * Cap catch-up so a long idle gap can't compound into a rate jump; past the
-		 * cap the backlog is dropped rather than carried, since carrying it would keep
-		 * firing the cap on every subsequent event. */
+		/* Advance the deadline by whole periods so the timer keeps a fixed phase.
+		 * Past the catch-up cap the backlog is dropped rather than carried. */
 		if (n_timer > DCQCN_MAX_TIMER_CATCHUP) {
 			n_timer = DCQCN_MAX_TIMER_CATCHUP;
 			ccctx->last_rate_timer_ts = timestamp;
@@ -411,7 +384,7 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 		}
 	}
 
-	/* --- Byte Counter (Figure 7: ByteCounter expires → BC++; rate increase) ---
+	/* --- Byte Counter (Figure 7: ByteCounter expires -> BC++; rate increase) ---
 	 * B is in bytes; the TX event exposes a cumulative sent_32bytes counter
 	 * (32-byte units, 16-bit wrapping), so accumulate the wrapped delta * 32. */
 	doca_pcc_dev_roce_tx_cntrs_t tx_cntrs = doca_pcc_dev_get_roce_tx_cntrs(event);
@@ -423,11 +396,8 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 
 	/* One increase step per whole B crossed, not one per event: the paper's byte
 	 * counter wraps every B bytes, so an event carrying several multiples of B owes
-	 * several steps. Structured exactly like the timer above -- whole multiples
-	 * consumed, remainder carried, catch-up bounded (and the backlog dropped once the
-	 * bound is hit). At the default B = 10 MiB a TX event never carries more than one
-	 * multiple, so this is behaviourally identical to the previous single fire; it
-	 * only bites when a sweep pushes B down. */
+	 * several steps. Whole multiples are consumed, the remainder carried, and the
+	 * backlog dropped once the catch-up bound is hit. */
 	if (byte_threshold > 0 && ccctx->bytes_accumulated >= byte_threshold) {
 		uint32_t n_bc = ccctx->bytes_accumulated / byte_threshold;
 
@@ -453,7 +423,7 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 	results->rate = cur_rate;
 	results->rtt_req = 0;
 
-	/* t_bc: bits[31:16] = t_count, bits[15:0] = bc_count (see README trace table). */
+	/* t_bc: bits[31:16] = t_count, bits[15:0] = bc_count. */
 	DCQCN_TRACE(param, DCQCN_TRACE_FMT_TX, tsflow, alpha,
 		    ((uint64_t)((uint32_t)ccctx->t_count << 16 | (ccctx->bc_count & 0xFFFF))),
 		    ccctx->bytes_accumulated, cur_rate);
@@ -461,9 +431,7 @@ static inline void dcqcn_handle_tx(doca_pcc_dev_event_t *event,
 
 /*
  * Handle NACK event.
- * Not part of the paper's algorithm, however implemented just in case.
- * Note: NACKs have never been detected while running this algorithm when PFC
- * is correctly configured.
+ * The paper's algorithm has no NACK input, so the current rate is reapplied unchanged.
  */
 static inline void dcqcn_handle_nack(doca_pcc_dev_event_t *event,
 				      uint32_t *param,
@@ -520,9 +488,7 @@ doca_pcc_dev_error_t dcqcn_set_algo_params(uint32_t param_id_base,
 	if ((new_param_values == NULL) || (params == NULL))
 		return DOCA_PCC_DEV_STATUS_FAIL;
 
-	/* Copy the validated values into the live array -- the framework does not
-	 * auto-copy (contract: OK means the callback set them). Without this, PPCC writes
-	 * read back via cmd_type=0xA yet the algo keeps its init-time defaults. */
+	/* The framework does not copy params; the callback must. */
 	for (uint32_t i = 0; i < param_num; i++)
 		params[param_id_base + i] = new_param_values[i];
 
