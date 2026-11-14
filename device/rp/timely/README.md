@@ -238,7 +238,7 @@ array. Revisit if a build ever drives multiple physical ports.
 | 1 | DOCA infra `user algo` | `algo_slot`; `result_rate` (FXP20); `result_rtt_req`; `port_num`; `timestamp` |
 | 2–5 | NP-side `pcc_np dev` | Only fire when running a `--np-*` app — ignore on RP/TIMELY |
 | 6 | per-event summary (`rp_timely_dev_main.c`) | `tsflow` (packed timestamp+flow_tag, see below); `ev_type` (see table below); `port`; `algo_slot` (15 = ECE fallback / no negotiation, 0 = registered TIMELY slot); `rate` (FXP20 after our algo ran) |
-| 7–10 | reserved for DCQCN | placeholder strings — never emitted on the timely branch |
+| 7–10 | DCQCN's formats | never emitted by TIMELY |
 | 11 | TIMELY `new_flow` | `tsflow`; `rate` (FXP20 initial = 1048576 = full line rate) |
 | 12 | TIMELY `rtt` (Algorithm 1 ran) | `tsflow`; `new_rtt` (ns); `norm_grad` (signed `rtt_diff/min_rtt` in **FXP16** — 65536 = gradient 1.0); `branch` (see table below); `new_rate` (FXP20) |
 | 13 | retired | clamp info folded into format-12 `branch` bit `0x80` |
@@ -396,8 +396,8 @@ Highlights:
 - Tested on BlueField-3 (DPA) at `sgs-bluefield-01`.
 - The code relies on signed right shift being an arithmetic shift: DPA clang guarantees that, C99 does not.
 - A live algorithm switch (the multi-algo mux) can hand the handler foreign context bytes, so `abort_cnt` may start at garbage; that is why the probe backoff shift is capped at 12.
-- Independent sibling of the `dcqcn` branch — no shared algorithm code, but the build/host glue is structured so both can coexist when merged (format IDs 7–10 are reserved for DCQCN's debug traces, 11–14 for TIMELY's).
-- The default app in `host/pcc.c` is **unchanged from main** — TIMELY is selected at runtime via `--rp-timely` / `-rp-tm`.
+- Ships in the same `doca_pcc` binary as DCQCN, Swift and SMaRTT, with no shared algorithm code. Trace format IDs are a cross-algorithm registry: 7–10 are DCQCN's, 11–14 TIMELY's.
+- The default app in `host/pcc.c` is NVIDIA's `rtt_template`; TIMELY is selected at runtime via `--rp-timely` / `-rp-tm`.
 - On a PFC + ECN fabric the NIC's DCQCN co-fires alongside TIMELY: you will see
   receiver-side CNPs even when TIMELY is driving the rate. When reading the
   TIMELY counters, remember that measured throughput is the joint result of

@@ -2,8 +2,8 @@
 
 One DPA binary that carries all four congestion-control algorithms (DCQCN, TIMELY,
 Swift, SMaRTT) and switches between them at runtime through a PPCC register write,
-with no process restart. This document is the frozen specification; the
-implementation must not deviate from the registry below without updating this file.
+with no process restart. This document is the design specification and matches the
+implementation; change the registry below only together with the code.
 
 ## Motivation
 
@@ -14,13 +14,12 @@ extends the same mechanism to algorithm selection: a fifth, minimal "mux" algori
 occupies its own slot and holds a single `algo_select` parameter; the per-event
 handler reads it and dispatches to the selected algorithm.
 
-## Frozen registry
+## Registry
 
 | Item | Value |
 |---|---|
 | App name (dpacc/meson) | `pcc_rp_multi_app` |
 | CLI flag | `--rp-multi` / short `-rp-mt` |
-| Branch | `multi-algo` (from `pre-master`) |
 | Mux algo_id | `0xBFFA` (next free below 0xBFFB) |
 | Mux trace format ID | 25 (next free after SMaRTT's 20-24) |
 | Slot/idx 0 | DCQCN (algo_id 0xBFFE) |
@@ -40,7 +39,7 @@ The four algorithm cores are compiled in unchanged from
 `device/rp/{dcqcn,timely,swift,smartt_reps}/algo/*.c`; only their per-app
 `rp_*_dev_main.c` files are excluded (they define the same `doca_pcc_dev_user_*`
 entry points this file defines). One shared safety fix was applied to the
-timely/swift/smartt cores on this branch (adversarial-review finding): the
+timely/swift/smartt cores for this app (adversarial-review finding): the
 RTT-probe abort backoff exponent is clamped to 12 at the shift site, because a
 live algo switch can hand a flow another algorithm's context bytes as
 `abort_cnt` and a shift >= 32 is undefined behavior. Behavior in single-app
@@ -130,8 +129,10 @@ before flipping the selector.
   `PCC_TRACE_FMT_EVENT (6)` is defined only in the excluded single mains, so
   `rp_multi_dev_main.c` defines its own copy plus `PCC_TRACE_FMT_MUX (25)`.
 
-No `multi_params_dump` binary in v1; verification drives the mux with raw
-`mlxreg` writes. incast-bench integration is a follow-up.
+There is no `multi_params_dump` binary; the mux contract is a single parameter.
+incast-bench drives the mux directly: see `MULTI_CLI_FLAG` / `MUX_*` /
+`FAMILY_MULTI_SLOTS` in its `incast_bench/config.py` and the `--multi` mode of its
+live dashboard.
 
 ## Runtime operation
 
@@ -146,7 +147,11 @@ Only the selected slot's counters move under traffic; that is the primary
 verification signal (aggregate bandwidth is receiver-bound at 2:1 and hides
 algorithm differences).
 
-## Watchlist (verify empirically on hardware)
+## Hardware validation
+
+Validated on the BlueField-3 testbed on 2026-09-03: a live 4-way switch through mux
+slot 4, param 0, with trace-format identity confirmed under ~99 Gb/s load. The
+pre-validation watchlist is kept below as the checklist to re-run after changes:
 
 - Five `doca_pcc_dev_algo_init_metadata` registrations coexist (DOCA supports 8
   algos / 15 slots; never exercised five at once here before).

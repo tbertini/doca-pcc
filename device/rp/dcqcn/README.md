@@ -31,12 +31,11 @@ Device-side code is compiled by `dpacc` during `meson setup`, **not** during
 cd /opt/mellanox/doca/applications
 meson setup --wipe /tmp/build -Denable_all_applications=false -Denable_pcc=true
 ninja -C /tmp/build
-/tmp/build/pcc/doca_pcc -d mlx5_0 -l 70          # DCQCN is the default app on this branch
+/tmp/build/pcc/doca_pcc --rp-dcqcn -d mlx5_0 -l 70
 ```
 
-On this branch the default application is DCQCN (`host/pcc.c` sets
-`cfg.app = pcc_rp_dcqcn_app`), so a bare `doca_pcc -d mlx5_0` runs it; the
-`--rp-dcqcn` / `-rp-dc` flag selects it explicitly.
+DCQCN is selected with `--rp-dcqcn` / `-rp-dc`. Without an algorithm flag,
+`doca_pcc` runs NVIDIA's `rtt_template` app (`host/pcc.c`), not DCQCN.
 
 Per-event traces (formats 6-10) are **compiled in but quiet by default** (per-event
 tracing would otherwise be hot-path cost on every TX). Turn them on at runtime — no
@@ -344,9 +343,10 @@ The paper leaves several points undefined; the decisions made here are:
 
 - Target: BlueField-3 (DPA), 100 Gbps RoCEv2. DCQCN requires **ECN marking at the
   switch** and CNP generation at the receiver, both configured on this fabric.
-- Independent sibling of the [`timely`](../timely/README.md) branch: no shared
-  algorithm code, but the host/build glue is structured so both can coexist
-  (format IDs 7–10 are DCQCN's, 11–14 are TIMELY's).
+- Ships in the same `doca_pcc` binary as [TIMELY](../timely/README.md),
+  [Swift](../swift/README.md) and [SMaRTT](../smartt_reps/README.md), with no shared
+  algorithm code. Trace format IDs are a cross-algorithm registry: 7–10 are DCQCN's,
+  11–14 TIMELY's.
 - On a PFC + ECN fabric the NIC's own DCQCN may co-fire; when reading counters,
   remember measured throughput is the joint result of this RP logic and any
   hardware reaction, not this code alone.

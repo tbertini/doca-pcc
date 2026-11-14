@@ -9,8 +9,8 @@ bandwidth with **FastIncrease** (§3.4, Algorithm 3), gated by **Wait-to-Decreas
 (§3.6.1).
 
 This document is the **design spec** (written before the code; kept in sync after).
-Registry: algo_id **0xBFFB**, trace formats **20–24**, CLI flag `--rp-smartt-reps`,
-branch `smartt-reps` off `main`.
+Registry: algo_id **0xBFFB**, trace formats **20–24**, CLI flag `--rp-smartt-reps` /
+`-rp-sr`.
 
 ## REPS is intentionally NOT implemented
 
@@ -21,7 +21,7 @@ actuator — the per-flow FXP20 TX rate — and exposes no per-packet entropy ho
 against `doca_pcc_dev.h` / `doca_pcc_dev_event.h`: `doca_pcc_dev_results_t` carries only
 `rate`, `rtt_req`/`probe_req`, `probe_type_slot`, and the BF3-unbacked credit fields).
 Additionally this testbed (2 senders → 1 receiver through one switch) has no meaningful
-multipath for entropy recycling to exploit. The branch keeps the paper's full name for
+multipath for entropy recycling to exploit. The flag and directory keep the paper's full name for
 identification; the CC algorithm implemented is SMaRTT.
 
 ## File layout
@@ -38,7 +38,7 @@ host/smartt_reps_params_dump.c  no-DOCA-deps contract dumper (JSON for incast-be
 
 ## Signal mapping (paper → BlueField-3) — all header facts verified
 
-| Paper signal | BF3 reality (verified in `~/Desktop/doca/include/doca_pcc_dev_event.h`) | Adaptation |
+| Paper signal | BF3 reality (verified in the DOCA SDK's `include/doca_pcc_dev_event.h`) | Adaptation |
 |---|---|---|
 | per-ACK `p.rtt` | Data ACKs carry no RTT. RTT **probe** events (`DOCA_PCC_DEV_EVNT_RTT`, requested via `results->rtt_req=1`) carry t1/t2/t4 timestamps + event ts (t6) | Keep last `fabric_rtt = (t6−t1) − (t4−t2)` in ctxt (sync-free; swift's exact formula + t2/t4==0 fallback). ACK decisions read the stored value. Swift's probe re-arm + TX abort machinery ported verbatim |
 | per-ACK `p.ecn` | ECN marks never reach the sender as ACK bits; the RoCE receiver emits **CNP** events (`DOCA_PCC_DEV_EVNT_ROCE_CNP` = 2) for marked arrivals | `p.ecn := (now − last_cnp_ts) ≤ ecn_cnp_hold_ns` (param). CNPs are receiver-rate-limited, not 1:1 with marks — WTD α/threshold are the compensating tuning levers |
@@ -266,7 +266,7 @@ Host `pcc_core.c` format strings must match these argument orders exactly.
 
 **Trace normalization (2026-07-10):** every SMaRTT trace call (format 6 and 20-24) now
 carries `tsflow` as `arg1`, and every format that has a rate field puts it last. This
-brought the branch in line with the same normalization pass on timely/dcqcn/swift: a
+brought SMaRTT in line with the same normalization pass on timely/dcqcn/swift: a
 fixed arg1 makes cross-format correlation trivial (join on flow_tag, or eyeball the
 timestamp half), and rate-last is now a repo-wide convention, not just a SMaRTT one.
 **Only trace-call arguments/strings/docs changed — no algorithm/control-law logic moved.**
@@ -302,8 +302,8 @@ called on the current event — never re-derived, cached, or approximated.
 
 Every AFTER string above is byte-identical to what `rp_smartt_reps_dev_main.c` /
 `smartt_reps.c` emit post-normalization. Format 6's AFTER string is additionally
-byte-identical across the timely/dcqcn/swift/smartt-reps branches (it is one shared slot
-in the merged `trace_message_formats[]` table host-side).
+byte-identical across the TIMELY/DCQCN/Swift/SMaRTT apps (it is one shared slot
+in the host-side `trace_message_formats[]` table).
 
 ### Packed sub-fields (bit ranges, all printed `0x%lx`)
 

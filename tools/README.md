@@ -30,7 +30,7 @@ copied to each BlueField host to run. From a machine with SSH access:
 
 ```bash
 for H in sgs-bluefield-01 sgs-bluefield-02; do
-    scp tools/timely-prettify.sh tools/mlxreg-pretty.py tbertini@$H:~/
+    scp tools/timely-prettify.sh tools/mlxreg-pretty.py "$H":~/   # user from ~/.ssh/config
 done
 ```
 

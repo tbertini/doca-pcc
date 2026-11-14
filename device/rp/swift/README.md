@@ -278,8 +278,9 @@ that reaches the running algorithm; pushing to any other `local_port` silently n
 params/counters**: Swift registers on slot 0 (`algo_idx=0`), but `ib_write_bw` flows
 that do not negotiate via ECE land on **slot 15** and still run Swift. The practical
 consequence: a param vector pushed via PPCC `algo_slot=0` governs the slot-15 benchmark
-traffic, and the slot-0 counters aggregate it. (A future multi-algorithm binary must
-instead dispatch on `attr->algo_slot`.)
+traffic, and the slot-0 counters aggregate it. (The `--rp-multi` app ignores
+`attr->algo_slot` too; it picks the algorithm from its own mux parameter instead, see
+[multi](../multi/README.md).)
 
 For the same reason the dispatcher pins to **port 0** rather than the event's port
 (`rp_swift_dev_main.c`). Param/counter arrays are per `(port, slot)`: the orchestrator
@@ -316,7 +317,7 @@ addition to log order, a reader can group them by that value.
 | 0-1 | DOCA infra | `user init` / `user algo` (every algo) |
 | 2-5 | NP-side | only fire under a `--np-*` app; ignore on RP/Swift |
 | 6 | per-event summary (`rp_swift_dev_main.c`) | `tsflow`; `ev_type` (table below); `port`; `algo_slot`; `rate` (FXP20 after algo) |
-| 7-14 | reserved for DCQCN (7-10) / TIMELY (11/12/14, 13 retired) | placeholders for the eventual merged build; never emitted on the swift branch |
+| 7-14 | DCQCN (7-10) / TIMELY (11/12/14, 13 retired) | owned by the other algorithms; never emitted by Swift |
 | 15 | Swift `new_flow` | `tsflow`; `init_cwnd` (FXP16 pkts); `line_mbps`; `bdp_fxp16`; `rate` (FXP20) |
 | 16 | Swift `rtt` (delay side) | `tsflow`; `fabric_rtt` (ns); `np_turn` (ns); `target` (ns); `branch` (table below) |
 | 17 | Swift `rtt` (window side) | `tsflow`; `cwnd` (FXP16 pkts); `fs_term` (ns, = target − base); `can_decr`; `rate` (FXP20) |
@@ -421,21 +422,22 @@ Highlights:
 ## Hardware / branch context
 
 - Targets BlueField-3 (DPA) at `sgs-bluefield-01`. algo_id `0xBFFC`.
-- Independent sibling of the `timely` (`0xBFFD`) and `dcqcn` (`0xBFFE`) branches: no
-  shared algorithm code (disjoint `device/rp/*` trees). The build/host glue is additive
-  so all three can merge into one runtime-selectable build; trace format IDs 6-14 mirror
-  the timely/dcqcn reservations so the merge is conflict-free, with 15-19 owned by Swift.
-- The default app in `host/pcc.c` is **unchanged from main**; Swift is selected at
+- Ships in the same `doca_pcc` binary as TIMELY (`0xBFFD`), DCQCN (`0xBFFE`) and
+  SMaRTT (`0xBFFB`), with no shared algorithm code (disjoint `device/rp/*` trees).
+  Trace format IDs 15-19 are Swift's.
+- The default app in `host/pcc.c` is NVIDIA's `rtt_template`; Swift is selected at
   runtime via `--rp-swift` / `-rp-sw`.
 - One ACTIVE PCC process per BlueField (firmware HA): you cannot run Swift and another
   PCC algorithm actively on the same card simultaneously.
 
 ### Where the credit-window variant went
 
-A second variant, Swift-CX8 (algo_id `0xBFFA`), actuated this same cwnd through the
+A second variant, Swift-CX8, actuated this same cwnd through the
 `results->credits` / `reload_credits` fields as a true credit window instead of
-converting it to a rate. It now lives on its own branch, `swift-cx8` (a snapshot of
-`pre-master` taken at the point of removal), and is no longer part of this tree. The
+converting it to a rate. It now lives on its own branch, `swift-cx8` (a snapshot taken
+at the point of removal), and is no longer part of this tree. On that branch it uses
+algo_id `0xBFFA`, which this tree has since given to the `--rp-multi` mux; renumber it
+before merging the two. The
 reason is scope: the credit fields are dead on every device this DOCA release supports
 (see "Actuating a window on a rate framework" above), so the variant compiles and loads
 but runs as an uncontrolled sender. It can never be benchmarked on this hardware, and
